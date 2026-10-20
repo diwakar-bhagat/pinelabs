@@ -1,0 +1,16 @@
+.gradle/
+build/
+local.properties
+.idea/
+*.iml
+.DS_Store
+captures/
+# Secrets & vendor binaries — never commit
+keystore.properties
+*.jks
+*.keystore
+app/libs/pine-billing-sdk-android-maven/
+*.zip
+
+# build output
+*.apk

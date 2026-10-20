@@ -1,0 +1,12 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- HTTPS only. Odoo's chain (Let's Encrypt YR1 -> Root YR, cross-signed by ISRG Root X1
+     until 2032) validates on Android 7.1.2 via the system store (ISRG Root X1 present
+     since 7.1.1). If Odoo ever drops the cross-sign, bundle Root YR here as an extra
+     trust anchor: <certificates src="@raw/isrg_root_yr" />. -->
+<network-security-config>
+    <base-config cleartextTrafficPermitted="false">
+        <trust-anchors>
+            <certificates src="system" />
+        </trust-anchors>
+    </base-config>
+</network-security-config>
