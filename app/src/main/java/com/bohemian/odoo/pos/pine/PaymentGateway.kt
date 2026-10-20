@@ -18,7 +18,16 @@ data class SaleRequest(
 data class VoidRequest(
     val billingRef: String,       // new ref for the void operation
     val amount: Paise,            // must equal the original sale amount
-    val bankCode: String?,        // required for card voids on AppToApp (source TBD in UAT)
+    /**
+     * Acquirer/bank code, e.g. "01". Required for card voids on AppToApp
+     * [flows/void]. Source field in the sale result still to be confirmed on UAT.
+     */
+    val bankCode: String?,
+    /**
+     * Required by UDL validation for Void/TipAdjust/Adjust/SaleComplete
+     * [models/TransactionRequest]. The AppToApp template in [flows/void] omits it,
+     * so send it and let the terminal ignore it rather than risk InvalidInput.
+     */
     val originalTransactionId: String?,
 )
 
@@ -36,6 +45,19 @@ data class TxnDetails(
     val responseMessage: String? = null,
     val amountPaise: Long? = null,
     val simulated: Boolean = false,
+    /**
+     * `TransactionResult.charge_slip_print_data` — the print-ready charge slip the
+     * terminal composed. Printing this verbatim is what keeps our slip identical to
+     * the acquirer's. Our own GST tax invoice is printed separately.
+     */
+    val chargeSlipPrintData: String? = null,
+    val cardHolderName: String? = null,
+    val merchantId: String? = null,
+    /** Terminal-reported date/time; formats are terminal-specific. */
+    val date: String? = null,
+    val time: String? = null,
+    /** Echoed back by the terminal; used to correlate a late result with our attempt. */
+    val billingReferenceId: String? = null,
 )
 
 sealed interface GatewayResult {

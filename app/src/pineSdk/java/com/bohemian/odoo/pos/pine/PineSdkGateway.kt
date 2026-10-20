@@ -14,6 +14,8 @@ import com.bohemian.odoo.pos.core.Redact
 import com.pinelabs.billing.sdk.PineBillingSdk
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.suspendCancellableCoroutine
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
 import uniffi.pine_billing.*
 import java.util.concurrent.atomic.AtomicBoolean
@@ -44,6 +46,20 @@ object PineSdkBootstrap {
 class PineSdkGateway : PaymentGateway {
     override val name = "PINE_A2A"
 
+    /**
+     * [flows/get-status]: "GetStatus is a listener-style operation — it consumes the
+     * single in-flight op slot. Do not call it while another do_transaction / print /
+     * scan / perform_operation is in flight."
+     *
+     * PaymentCoordinator's mutex only serialises payments; a reprint fired from the UI
+     * while a GetStatus loop is running would hit that slot and come back
+     * OperationInProgress. This mutex covers every SDK entry point in this class.
+     *
+     * It is never held across a call into PaymentCoordinator, so it cannot deadlock
+     * with the coordinator's own mutex.
+     */
+    private val sdkSlot = Mutex()
+
     private fun sdk(): PineBillingSdk = PineBillingSdk.shared()
 
     override suspend fun sale(request: SaleRequest, onStarted: (String) -> Unit): GatewayResult =
@@ -59,11 +75,14 @@ class PineSdkGateway : PaymentGateway {
         )
 
     override suspend fun getStatus(billingRef: String, amount: Paise, mode: PayMode, onStarted: (String) -> Unit): GatewayResult =
-        // Pine docs: GetStatus request template on AppToApp uses allowed_payment_modes ["Upi"].
-        // For Bharat QR we also query as UPI (UAT to confirm; see docs/PLAN.md open items).
+        // [flows/get-status]: GetStatus is a TransactionType on do_transaction, NOT the
+        // check_status API — on AppToApp check_status only reads the SDK's in-memory
+        // registry and never touches the terminal.
+        // allowed_payment_modes is optional there and merely narrows the query, so we
+        // send null: narrowing to Upi would have been a guess for Bharat QR.
         transact(
             type = TransactionType.GET_STATUS,
-            modes = listOf(PaymentMode.UPI),
+            modes = null,
             options = options(billingRef = billingRef, amount = amount),
             onStarted = onStarted,
         )
@@ -82,7 +101,7 @@ class PineSdkGateway : PaymentGateway {
             onStarted = onStarted,
         )
 
-    override suspend fun print(lines: List<PrintLine>, printRef: String): PrintResult = withContext(Dispatchers.IO) {
+    override suspend fun print(lines: List<PrintLine>, printRef: String): PrintResult = withContext(Dispatchers.IO) { sdkSlot.withLock {
         val req = PrintRequest(
             data = lines.map { l ->
                 PrintItem(
@@ -124,7 +143,7 @@ class PineSdkGateway : PaymentGateway {
         modes: List<PaymentMode>?,
         options: TransactionOptions,
         onStarted: (String) -> Unit,
-    ): GatewayResult = withContext(Dispatchers.IO) { // HARD RULE 9: never on main
+    ): GatewayResult = withContext(Dispatchers.IO) { sdkSlot.withLock { // HARD RULE 9: never on main
         val request = TransactionRequest(
             transactionType = type,
             allowedPaymentModes = modes,
@@ -163,7 +182,7 @@ class PineSdkGateway : PaymentGateway {
                 finish(GatewayResult.Rejected("IllegalState", e.message))
             }
         }
-    }
+    } }
 
     /** Async failures happen after onStarted: the terminal may have taken money. */
     private fun mapAsyncFailure(e: SdkException): GatewayResult = when (e) {
@@ -184,6 +203,7 @@ class PineSdkGateway : PaymentGateway {
         PayMode.BHARAT_QR -> PaymentMode.BHARAT_QR
     }
 
+    /** Field names verified against [models/TransactionResult] (unchanged 0.19 -> 1.0.0). */
     private fun TransactionResult.toDetails() = TxnDetails(
         transactionId = transactionId,
         rrn = rrn,
@@ -195,8 +215,15 @@ class PineSdkGateway : PaymentGateway {
         terminalId = terminalId,
         responseCode = responseCode,
         responseMessage = responseMessage,
+        // UDL: `string? amount` — stringified lowest currency unit, i.e. paise for INR.
         amountPaise = amount?.toLongOrNull(),
         simulated = simulated,
+        chargeSlipPrintData = chargeSlipPrintData,
+        cardHolderName = cardHolderName,
+        merchantId = merchantId,
+        date = date,
+        time = time,
+        billingReferenceId = billingReferenceId,
     )
 
     /** Every TransactionOptions field passed by name (UniFFI: no defaults on older SDKs). */
