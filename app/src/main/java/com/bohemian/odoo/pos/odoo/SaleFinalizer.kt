@@ -29,16 +29,34 @@ data class SaleSnapshot(
     val customerId: Int? = null,
     val customerName: String? = null,
     val customerPhone: String? = null,
+    val customerGstin: String? = null,
+    val customerGstTreatment: String? = null,
+    val customerStateId: Int? = null,
+    val fiscalPositionId: Int? = null,
 ) {
     fun cartLines() = lines.map {
         CartLine(it.uuid, Product(it.productId, it.name, Paise(it.pricePaise), it.barcode, null, it.taxIds), it.qty,
             Paise(it.totalInclPaise), Paise(it.totalExclPaise))
     }
     fun totals() = CartTotals(Paise(totalInclPaise), Paise(totalExclPaise))
-    fun customer() = customerId?.let { Customer(it, customerName ?: "", customerPhone) }
+    fun customer() = customerId?.let {
+        Customer(
+            id = it, name = customerName ?: "", phone = customerPhone,
+            gstin = customerGstin,
+            gstTreatment = com.bohemian.odoo.pos.gst.GstTreatment.fromOdoo(customerGstTreatment),
+            stateId = customerStateId,
+        )
+    }
 
     companion object {
-        fun of(orderUuid: String, cfg: PosConfig, lines: List<CartLine>, totals: CartTotals, customer: Customer?) = SaleSnapshot(
+        fun of(
+            orderUuid: String,
+            cfg: PosConfig,
+            lines: List<CartLine>,
+            totals: CartTotals,
+            customer: Customer?,
+            fiscalPositionId: Int? = null,
+        ) = SaleSnapshot(
             orderUuid = orderUuid,
             sessionId = cfg.currentSessionId ?: error("no open session"),
             configName = cfg.name, companyName = cfg.companyName,
@@ -48,6 +66,10 @@ data class SaleSnapshot(
             },
             totalInclPaise = totals.totalIncl.value, totalExclPaise = totals.totalExcl.value,
             customerId = customer?.id, customerName = customer?.name, customerPhone = customer?.phone,
+            customerGstin = customer?.gstin,
+            customerGstTreatment = customer?.gstTreatment?.odoo,
+            customerStateId = customer?.stateId,
+            fiscalPositionId = fiscalPositionId,
         )
     }
 }
@@ -79,7 +101,11 @@ class SaleFinalizer(
     }
 
     suspend fun finalize(snap: SaleSnapshot, payment: PaymentLineData): PaidSale {
-        val sale = PaidSale(snap.orderUuid, snap.sessionId, snap.cartLines(), snap.totals(), snap.customer(), listOf(payment), clock())
+        val sale = PaidSale(
+            orderUuid = snap.orderUuid, sessionId = snap.sessionId, lines = snap.cartLines(),
+            totals = snap.totals(), customer = snap.customer(), payments = listOf(payment),
+            paidAtMillis = clock(), fiscalPositionId = snap.fiscalPositionId,
+        )
         orderSync.submit(sale)          // outbox row written first inside submit()
         snapshots.delete(snap.orderUuid)
         return sale

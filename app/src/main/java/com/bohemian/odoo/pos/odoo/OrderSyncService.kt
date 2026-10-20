@@ -1,6 +1,7 @@
 package com.bohemian.odoo.pos.odoo
 
 import com.bohemian.odoo.pos.core.Paise
+import com.bohemian.odoo.pos.gst.InvoiceDecision
 import com.bohemian.odoo.pos.core.PosLog
 import com.bohemian.odoo.pos.data.OutboxDao
 import com.bohemian.odoo.pos.data.OutboxEntity
@@ -31,6 +32,12 @@ data class PaidSale(
     val customer: Customer?,
     val payments: List<PaymentLineData>,
     val paidAtMillis: Long,
+    /**
+     * account.fiscal.position applied to this order. Odoo re-derives each line's
+     * `tax_ids_after_fiscal_position` from it, so an inter-state B2B sale only becomes
+     * IGST in the books when this is sent.
+     */
+    val fiscalPositionId: Int? = null,
 ) {
     val amountPaid: Paise get() = payments.fold(Paise.ZERO) { a, p -> a + p.amount }
 }
@@ -44,10 +51,12 @@ class OrderSyncService(
     private val odoo: OdooJson2Client,
     private val outbox: OutboxDao,
     private val clock: () -> Long = System::currentTimeMillis,
+    private val onPayloadGenerated: ((uuid: String, payload: JsonObject) -> Unit)? = null,
 ) {
     /** Persist first, then try once. Returns true if Odoo confirmed now. */
     suspend fun submit(sale: PaidSale): Boolean {
         val payload = buildPayload(sale)
+        onPayloadGenerated?.invoke(sale.orderUuid, payload)
         outbox.upsert(OutboxEntity(sale.orderUuid, payload.toString(), sale.totals.totalIncl.value, 0, null, clock(), 0))
         return trySend(sale.orderUuid, payload)
     }
@@ -89,7 +98,10 @@ class OrderSyncService(
                 "state" to "paid",
                 "date_order" to date,
                 "partner_id" to (s.customer?.id ?: false),
-                "to_invoice" to false,
+                // l10n_in_pos `setPartner`: a GSTIN-carrying registered business is invoiced,
+                // a consumer / unregistered / overseas partner is not.
+                "to_invoice" to InvoiceDecision.toInvoice(s.customer),
+                "fiscal_position_id" to (s.fiscalPositionId ?: false),
                 "amount_total" to s.totals.totalIncl.toRupees(),
                 "amount_tax" to s.totals.tax.toRupees(),
                 "amount_paid" to s.amountPaid.toRupees(),
@@ -102,6 +114,8 @@ class OrderSyncService(
                         "qty" to l.qty,
                         "price_unit" to l.product.price.toRupees(),
                         "discount" to 0,
+                        // Unmapped product taxes on purpose: pos.order.line.tax_ids holds the
+                        // original taxes and Odoo computes tax_ids_after_fiscal_position itself.
                         "tax_ids" to listOf(listOf(6, 0, l.product.taxIds)),
                         "price_subtotal" to l.totalExcl!!.toRupees(),
                         "price_subtotal_incl" to l.totalIncl!!.toRupees(),

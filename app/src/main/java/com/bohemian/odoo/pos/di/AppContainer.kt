@@ -35,10 +35,26 @@ class AppContainer(context: Context) {
 
     val odoo = OdooJson2Client(BuildConfig.ODOO_BASE_URL, BuildConfig.ODOO_DB, apiKey = { settings.odooApiKey })
     val catalog = CatalogService(odoo)
-    val pricing = PricingService(odoo)
+    val fiscalPositions = com.bohemian.odoo.pos.odoo.FiscalPositionService(odoo)
+    val pricing = PricingService(odoo, fiscalPositions)
     val sessions = SessionService(odoo)
     val customers = CustomerService(odoo)
-    val orderSync = OrderSyncService(odoo, db.outbox())
+    val orderSync = OrderSyncService(
+        odoo = odoo,
+        outbox = db.outbox(),
+        onPayloadGenerated = { uuid, payload ->
+            if (BuildConfig.DEBUG) {
+                runCatching {
+                    val dir = context.getExternalFilesDir("payload")
+                    if (dir != null) {
+                        if (!dir.exists()) dir.mkdirs()
+                        java.io.File(dir, "$uuid.json").writeText(payload.toString())
+                        PosLog.i("PAYLOAD_DUMP", "uuid" to uuid, "path" to dir.absolutePath)
+                    }
+                }
+            }
+        }
+    )
     val finalizer = SaleFinalizer(db.snapshots(), orderSync, terminalPaymentMethodId = { settings.terminalPaymentMethodId })
 
     private val realGateway: PaymentGateway by lazy { PineSdkGateway() }

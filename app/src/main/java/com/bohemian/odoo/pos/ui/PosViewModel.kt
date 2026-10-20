@@ -10,6 +10,7 @@ import com.bohemian.odoo.pos.di.AppContainer
 import com.bohemian.odoo.pos.odoo.CartLine
 import com.bohemian.odoo.pos.odoo.CartTotals
 import com.bohemian.odoo.pos.odoo.Customer
+import com.bohemian.odoo.pos.odoo.FiscalPosition
 import com.bohemian.odoo.pos.odoo.OdooException
 import com.bohemian.odoo.pos.odoo.PaidSale
 import com.bohemian.odoo.pos.odoo.PaymentLineData
@@ -73,6 +74,13 @@ data class SellState(
     val pricing: Boolean = false,
     val phone: String = "",
     val customerName: String = "",
+    /** Resolved customer. Set by [PosViewModel.attachCustomer], not at payment time. */
+    val customer: Customer? = null,
+    /**
+     * The fiscal position the cart was priced with. It must be the one sent to Odoo,
+     * otherwise our totals and Odoo's disagree on an inter-state B2B sale.
+     */
+    val fiscalPosition: FiscalPosition? = null,
     val loading: Boolean = false,
     val error: String? = null,
     val pay: PayUi = PayUi.Idle,
@@ -165,7 +173,15 @@ class PosViewModel(private val c: AppContainer) : ViewModel() {
         try {
             val cfg = c.catalog.config(c.settings.posConfigId)
             val products = c.catalog.products()
-            _sell.update { it.copy(config = cfg, products = products, loading = false) }
+            val fposIds = (cfg.fiscalPositionIds + listOfNotNull(cfg.defaultFiscalPositionId)).distinct()
+            fiscalPositionsById = c.fiscalPositions.load(fposIds)
+            c.fiscalPositions.primeTaxFiscalPositions(products.flatMap { it.taxIds })
+            _sell.update {
+                it.copy(
+                    config = cfg, products = products, loading = false,
+                    fiscalPosition = fiscalPositionsById[cfg.defaultFiscalPositionId],
+                )
+            }
         } catch (e: Exception) {
             _sell.update { it.copy(loading = false, error = friendly(e)) }
         }
@@ -216,7 +232,8 @@ class PosViewModel(private val c: AppContainer) : ViewModel() {
     private fun reprice() = viewModelScope.launch {
         _sell.update { it.copy(pricing = true, error = null) }
         try {
-            val priced = _sell.value.lines.map { c.pricing.price(it) }
+            val position = _sell.value.fiscalPosition
+            val priced = c.pricing.priceAll(_sell.value.lines, position)
             _sell.update { s ->
                 // Ignore if the cart changed while we were pricing.
                 if (s.lines.map { it.uuid to it.qty } != priced.map { it.uuid to it.qty }) s
@@ -260,8 +277,23 @@ class PosViewModel(private val c: AppContainer) : ViewModel() {
         // the coordinator will answer Blocked / AlreadyPaid and nothing new is charged.
         val earlier = c.journal.forOrder(s.orderUuid).any { it.state.blocksNewCharge || it.state.isPaid }
         if (earlier) return c.finalizer.load(s.orderUuid)
-        val customer = resolveCustomer()
-        val snap = SaleSnapshot.of(s.orderUuid, cfg, s.lines, totals, customer)
+        val customer = s.customer ?: resolveCustomer()
+        // The cart was priced under s.fiscalPosition. If resolving the customer now would
+        // pick a different one, the totals we hold are wrong for this customer — re-price
+        // first rather than send Odoo figures it will not reproduce.
+        val expectedFpos = c.fiscalPositions.resolve(cfg, customer)
+        if (expectedFpos != s.fiscalPosition?.id) {
+            _sell.update {
+                it.copy(
+                    customer = customer,
+                    fiscalPosition = fiscalPositionsById[expectedFpos],
+                    error = "Customer changed the tax treatment of this cart. Prices have been refreshed — check the total and charge again.",
+                )
+            }
+            reprice()
+            return null
+        }
+        val snap = SaleSnapshot.of(s.orderUuid, cfg, s.lines, totals, customer, s.fiscalPosition?.id)
         c.finalizer.save(snap) // HARD RULE 4/7: the cart survives a crash mid-payment
         return snap
     }
@@ -315,6 +347,21 @@ class PosViewModel(private val c: AppContainer) : ViewModel() {
         }
     }
 
+    /** account.fiscal.position records this till may use, keyed by id. */
+    private var fiscalPositionsById: Map<Int, FiscalPosition> = emptyMap()
+
+    /**
+     * Resolve the customer from the typed phone / GSTIN and re-price the cart under
+     * their fiscal position. Must run BEFORE payment: an inter-state B2B cart is
+     * IGST, and the price changes with it.
+     */
+    fun attachCustomer() = viewModelScope.launch {
+        val found = resolveCustomer()
+        val fposId = c.fiscalPositions.resolve(_sell.value.config ?: return@launch, found)
+        _sell.update { it.copy(customer = found, fiscalPosition = fiscalPositionsById[fposId]) }
+        reprice()
+    }
+
     private suspend fun resolveCustomer(): Customer? {
         val s = _sell.value
         val e164 = c.customers.normalizeIndianMobile(s.phone) ?: return null
@@ -327,7 +374,12 @@ class PosViewModel(private val c: AppContainer) : ViewModel() {
     }
 
     fun newSale() = _sell.update {
-        it.copy(orderUuid = UUID.randomUUID().toString(), lines = emptyList(), totals = null, phone = "", customerName = "", pay = PayUi.Idle, error = null)
+        it.copy(
+            orderUuid = UUID.randomUUID().toString(), lines = emptyList(), totals = null,
+            phone = "", customerName = "", customer = null,
+            fiscalPosition = fiscalPositionsById[it.config?.defaultFiscalPositionId],
+            pay = PayUi.Idle, error = null,
+        )
     }
 
     fun dismissPayResult() {

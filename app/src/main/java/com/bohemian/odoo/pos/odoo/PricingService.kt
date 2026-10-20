@@ -13,20 +13,43 @@ import java.util.concurrent.ConcurrentHashMap
  * account.tax.compute_all (handles GST groups, CESS and code-type taxes exactly
  * like the Odoo web POS / invoice). Company rounding is round_per_line, so the
  * order total = sum of line totals.
+ *
+ * The taxes sent to compute_all are the product taxes **after** the order's fiscal
+ * position has been mapped over them, matching
+ * `pos.order.line._compute_amount_line_all`:
+ *
+ *     tax_ids_after_fiscal_position = fpos.map_tax(self.tax_ids)
+ *     taxes = tax_ids_after_fiscal_position.compute_all(...)
+ *
+ * Without the mapping an inter-state B2B sale is priced as CGST+SGST while Odoo
+ * books it as IGST, and the totals we send no longer match the ones Odoo derives.
  */
-class PricingService(private val odoo: OdooJson2Client) {
-    private data class Key(val taxIds: List<Int>, val unit: Long, val qty: Int)
+class PricingService(
+    private val odoo: OdooJson2Client,
+    private val fiscalPositions: FiscalPositionService,
+) {
+    /** The fiscal position is part of the key: the same product prices differently under IGST. */
+    private data class Key(val taxIds: List<Int>, val unit: Long, val qty: Int, val fiscalPositionId: Int?)
+
     private val cache = ConcurrentHashMap<Key, Pair<Paise, Paise>>()
 
-    suspend fun price(line: CartLine): CartLine {
-        val key = Key(line.product.taxIds.sorted(), line.product.price.value, line.qty)
+    suspend fun price(line: CartLine, position: FiscalPosition? = null): CartLine {
+        val applied = fiscalPositions.mapTaxes(position, line.product.taxIds)
+        val key = Key(applied.sorted(), line.product.price.value, line.qty, position?.id)
         val (incl, excl) = cache[key] ?: compute(key).also { cache[key] = it }
-        return line.copy(totalIncl = incl, totalExcl = excl)
+        return line.copy(totalIncl = incl, totalExcl = excl, appliedTaxIds = applied)
     }
+
+    /** Re-price a whole cart; call this whenever the customer (hence the position) changes. */
+    suspend fun priceAll(lines: List<CartLine>, position: FiscalPosition? = null): List<CartLine> =
+        lines.map { price(it, position) }
 
     fun totals(lines: List<CartLine>): CartTotals? =
         if (lines.isEmpty() || lines.any { !it.isPriced }) null
         else CartTotals(lines.mapNotNull { it.totalIncl }.sum(), lines.mapNotNull { it.totalExcl }.sum())
+
+    /** Dropped when the fiscal position changes mid-cart is not needed — the key covers it. */
+    fun clearCache() = cache.clear()
 
     private suspend fun compute(k: Key): Pair<Paise, Paise> {
         val unit = Paise(k.unit)
