@@ -14,3 +14,4 @@ app/libs/pine-billing-sdk-android-maven/
 
 # build output
 *.apk
+.kotlin/
