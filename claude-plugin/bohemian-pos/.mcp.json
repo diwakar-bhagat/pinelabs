@@ -1,0 +1,8 @@
+{
+  "mcpServers": {
+    "odoo-json2": {
+      "command": "node",
+      "args": ["${CLAUDE_PLUGIN_ROOT}/mcp/odoo-json2-server.mjs"]
+    }
+  }
+}

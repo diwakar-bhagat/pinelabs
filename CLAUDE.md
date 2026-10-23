@@ -253,7 +253,7 @@ Private (`_x`) methods are not callable.
 - **Taxes:** `tax_calculation_rounding_method = round_per_line`, INR. Most POS taxes are
   price-included GST groups (e.g. id 30 "18% GST S" = 9% SGST + 9% CGST).
   `account.tax.compute_all(ids, price_unit, quantity)` returns `total_included`/`total_excluded`.
-- **Products:** `product.product` with `available_in_pos=True, sale_ok=True` (~2,044 items).
+- **Products:** `product.product` with `available_in_pos=True, sale_ok=True` (2,396 items on 2026-10-23).
   Fields: `lst_price, barcode, taxes_id, pos_categ_ids, display_name`.
 - **Orders:** `pos.order.sync_from_ui(orders=[...])` — same method the web POS uses. Lines
   and payments as ORM commands `[0, 0, {...}]`. Server recomputes and **rejects** if
@@ -296,11 +296,11 @@ Private (`_x`) methods are not callable.
 - `application_id` optional but if provided must be non-empty (HARD RULE 10).
 - GST fields (`gst_number`, `gst_breakup`, `invoice_date`) exist on `TransactionOptions`.
 
-### Two contradictions in docs (resolve against `classes.jar`)
+### Two doc contradictions — resolved against `classes.jar` (2026-10-23)
 
-1. `amount` type: `i64?` vs `ULong?` in different doc pages. We pass `Long`. Confirm in AAR.
-2. `init` arity: docs show `init(config, logger)` vs reference code `init(context, config, logger)`.
-   Confirm before building.
+1. `TransactionOptions.amount` is `java.lang.Long?` (signed i64) — we pass `Long`. ✅
+2. `init` takes a Context: `init(Context, SdkConfig, LoggerCallback)` and `init(Context, SdkConfig)`. ✅
+   Re-check any time with the plugin script `claude-plugin/bohemian-pos/scripts/sdk-signatures.sh`.
 
 ---
 
@@ -412,18 +412,26 @@ company password manager + encrypted drive.
 
 - [ ] PROD Pine Application ID (Pine issues after UAT sign-off)
 - [ ] Confirm `bank_code = "01"` for ZenZebra's acquirer (UAT case 8)
-- [ ] Confirm SDK 1.0.0 `init` arity and `amount` type against `classes.jar` in AAR
+- [x] Confirm SDK 1.0.0 `init` arity and `amount` type against `classes.jar` in AAR (2026-10-23)
 - [ ] Add E700 `pos.config` id to WhatsApp / ZZ Cash automation filters in Odoo
 - [ ] E700 printer width in dots and chars per line (measure on device)
 - [ ] Confirm `GetStatus` relevance for card sales (vs UPI/BQR only)
 - [ ] Confirm `charge_slip_print_data` vs what MasterApp auto-prints
 - [ ] Written confirmation from Pine Labs on WebView/PAXSTORE position
-- [ ] Run unit tests on Mac (`./gradlew testUatDebugUnitTest`)
+- [x] Run unit tests on Mac (`./gradlew testUatDebugUnitTest`) — 47 pass with real SDK (2026-10-23)
 - [ ] Rotate exposed release keystore password
+- [ ] Odoo API key in use belongs to Ankur (internal user, res.users 28) — create a POS-User-only user for the E700 and issue its own key
 
 ---
 
-## 14. Reference docs (in `docs/`)
+## 14. Claude Code plugin (`claude-plugin/bohemian-pos`)
+
+Install once per machine: `/plugin marketplace add diwakar-bhagat/pinelabs` then `/plugin install bohemian-pos@pinelabs`.
+Skills: `money-safety-review`, `pine-sdk`, `odoo-json2`, `build-test`, `uat-e700`, `deploy-e700`.
+MCP `odoo-json2`: read-only JSON-2 tools against the live DB; credentials from the git-ignored `.env`
+in the repo root (`ODOO_URL`, `ODOO_DB`, `ODOO_USER`, `ODOO_API_KEY`). Writes need `ODOO_MCP_ALLOW_WRITE=1`.
+
+## 15. Reference docs (in `docs/`)
 
 | File | Content |
 |---|---|
