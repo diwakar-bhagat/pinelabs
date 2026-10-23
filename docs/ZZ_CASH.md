@@ -46,6 +46,20 @@ Existing ZZ Cash server actions in production (read-only check, 2026-10-23):
 
 These must not be changed by the POS work.
 
+## Phase 3b — redemption (built, not yet run on a device)
+
+- Cashier taps **Use ₹N ZZ Cash** in the cart (only rewards the card can pay for, and that
+  stay below the bill). The reward is priced by Odoo's compute_all as a negative line with the
+  cart's single tax rate. Mixed-rate carts are refused.
+- The sale sends a reward line exactly as the captured web POS sale did: `is_reward_line`,
+  `reward_id`, `coupon_id` (card), `points_cost`, and a random `reward_identifier_code`.
+  The code is stored in the sale snapshot, so a retry sends the same code.
+- Diffed against the captured sale (`tools/payload-ref`): every reward-line field matches.
+  Remaining differences are present for ordinary lines too (tax-id format, web-only fields).
+- Tests: `ZzCashRedemptionTest`, `ZzCashRewardCatalogTest`, `ZzCashPayloadTest` (the captured sale).
+- Not yet verified: a redeemed sale through the E700 (Pine) payment path, and a redemption
+  that syncs after a crash (outbox retry with the same code).
+
 ## Open before redemption can ship (Phase 3b)
 
 1. **Captured payload.** Confirm the exact `sync_from_ui` order JSON for a redeemed

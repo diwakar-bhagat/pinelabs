@@ -6,8 +6,7 @@ import kotlinx.serialization.json.JsonObject
 /**
  * ZZ Cash card balance for a customer. The balance is the card's `points` (1 point = ₹1).
  * Read live from Odoo; never stored locally, so the till cannot show a stale figure for
- * long. Redemption is NOT here: Odoo's own loyalty validation applies it at sync time
- * (see docs/ZZ_CASH.md).
+ * long. Redemption itself is validated by Odoo at sync time (see docs/ZZ_CASH.md).
  */
 data class ZzCashBalance(
     val partnerId: Int,
@@ -17,6 +16,18 @@ data class ZzCashBalance(
     /** Rewards are whole rupees, so only whole rupees of the balance can be redeemed. */
     val redeemable: Paise get() = Paise(points.value - points.value % 100)
 }
+
+/**
+ * A ZZ Cash reward from loyalty.reward: "₹N off", costs N points. [discountProductId] is
+ * the product Odoo puts on the reward line (loyalty.reward.discount_line_product_id).
+ */
+data class ZzCashReward(
+    val rewardId: Int,
+    val description: String,
+    val points: Paise,
+    val amount: Paise,
+    val discountProductId: Int,
+)
 
 class ZzCashService(private val odoo: OdooJson2Client) {
 
@@ -33,6 +44,24 @@ class ZzCashService(private val odoo: OdooJson2Client) {
         return fromRows(partnerId, rows)
     }
 
+    /**
+     * The "₹N off per order" rewards the till can apply, cheapest first. Only rewards
+     * whose cost equals their value are accepted, so the rule "1 point = ₹1" holds.
+     */
+    suspend fun rewards(): List<ZzCashReward> {
+        val rows = odoo.call("loyalty.reward", "search_read", jsonOf(
+            "domain" to listOf(
+                listOf("program_id", "=", PROGRAM_ID),
+                listOf("reward_type", "=", "discount"),
+                listOf("discount_mode", "=", "per_order"),
+                listOf("discount_applicability", "=", "order"),
+            ),
+            "fields" to listOf("description", "required_points", "discount", "discount_line_product_id"),
+            "limit" to 50,
+        )).objects()
+        return fromRewardRows(rows)
+    }
+
     companion object {
         /** loyalty.program id 4 = "ZZ Cash" (30 rules, 10 rewards, INR). */
         const val PROGRAM_ID = 4
@@ -45,5 +74,14 @@ class ZzCashService(private val odoo: OdooJson2Client) {
             val points = row.money("points").let { if (it.isPositive) it else Paise.ZERO }
             return ZzCashBalance(partnerId = partnerId, cardId = cardId, points = points)
         }
+
+        internal fun fromRewardRows(rows: List<JsonObject>): List<ZzCashReward> = rows.mapNotNull { r ->
+            val id = r.int("id") ?: return@mapNotNull null
+            val productId = r.m2oId("discount_line_product_id") ?: return@mapNotNull null
+            val points = r.money("required_points")
+            val amount = r.money("discount")
+            if (!amount.isPositive || points != amount) return@mapNotNull null
+            ZzCashReward(id, r.str("description") ?: "", points, amount, productId)
+        }.sortedBy { it.points.value }
     }
 }

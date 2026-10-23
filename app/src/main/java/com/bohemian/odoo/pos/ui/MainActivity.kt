@@ -31,6 +31,7 @@ import androidx.lifecycle.ViewModelProvider
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.bohemian.odoo.pos.PosApp
 import com.bohemian.odoo.pos.core.Paise
+import com.bohemian.odoo.pos.odoo.ZzCashRules
 import com.bohemian.odoo.pos.payment.PaymentOutcome
 import com.bohemian.odoo.pos.pine.PayMode
 
@@ -206,6 +207,29 @@ fun SellScreen(vm: PosViewModel) {
                         }
                         Spacer(Modifier.width(8.dp))
                         TextButton({ vm.clearCustomer() }) { Text("Clear", fontSize = 12.sp) }
+                    }
+                    // ZZ Cash: show the applied reward, or the rewards this card can pay for.
+                    s.zzRedemption?.let { r ->
+                        Row(Modifier.fillMaxWidth().padding(horizontal = 12.dp), verticalAlignment = Alignment.CenterVertically) {
+                            Text("ZZ Cash −${r.reward.amount.format()} applied", Modifier.weight(1f),
+                                fontSize = 13.sp, color = Color(0xFF2E7D32))
+                            TextButton({ vm.removeZzCash() }) { Text("Remove", fontSize = 12.sp) }
+                        }
+                    }
+                    val totalNow = s.totals?.totalIncl
+                    val balance = s.zzCash?.takeIf { it.partnerId == cust.id }
+                    if (s.zzRedemption == null && balance != null && totalNow != null) {
+                        val options = ZzCashRules.eligible(balance, s.zzRewards, totalNow)
+                        if (options.isNotEmpty()) {
+                            Row(Modifier.fillMaxWidth().padding(horizontal = 12.dp),
+                                horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                                options.take(3).forEach { r ->
+                                    OutlinedButton({ vm.applyZzCash(r) }) {
+                                        Text("Use ${r.amount.format()} ZZ Cash", fontSize = 12.sp)
+                                    }
+                                }
+                            }
+                        }
                     }
                 } else {
                     OutlinedTextField(s.phone, vm::setPhone, Modifier.fillMaxWidth(), singleLine = true,

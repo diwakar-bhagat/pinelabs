@@ -11,6 +11,9 @@ import com.bohemian.odoo.pos.odoo.CartLine
 import com.bohemian.odoo.pos.odoo.CartTotals
 import com.bohemian.odoo.pos.odoo.Customer
 import com.bohemian.odoo.pos.odoo.ZzCashBalance
+import com.bohemian.odoo.pos.odoo.ZzCashReward
+import com.bohemian.odoo.pos.odoo.ZzCashRedemption
+import com.bohemian.odoo.pos.odoo.ZzCashRules
 import com.bohemian.odoo.pos.odoo.FiscalPosition
 import com.bohemian.odoo.pos.odoo.OdooException
 import com.bohemian.odoo.pos.odoo.PaidSale
@@ -81,6 +84,10 @@ data class SellState(
     val customerMatches: List<Customer> = emptyList(),
     /** ZZ Cash balance of [customer], read live from Odoo. Null while loading or if none. */
     val zzCash: ZzCashBalance? = null,
+    /** Rewards the card can pay for, from loyalty.reward. Empty until the balance loads. */
+    val zzRewards: List<ZzCashReward> = emptyList(),
+    /** The ZZ Cash reward applied to this sale, priced by Odoo once the cart is priced. */
+    val zzRedemption: ZzCashRedemption? = null,
     /**
      * The fiscal position the cart was priced with. It must be the one sent to Odoo,
      * otherwise our totals and Odoo's disagree on an inter-state B2B sale.
@@ -235,11 +242,15 @@ class PosViewModel(private val c: AppContainer) : ViewModel() {
 
     /** Pick a customer from the search results (cashier tapped a match). */
     fun pickCustomer(customer: Customer) {
+        val changed = _sell.value.customer?.id != customer.id
         _sell.update { it.copy(
             customer = customer,
             customerName = customer.name,
             phone = customer.phone?.filter { it.isDigit() || it == '+' } ?: _sell.value.phone,
             customerMatches = emptyList(),
+            // A different customer has a different card: the old reward must not carry over.
+            zzRedemption = if (changed) null else it.zzRedemption,
+            totals = if (changed) null else it.totals,
         ) }
         // Re-resolve fiscal position for the picked customer's state.
         viewModelScope.launch {
@@ -255,18 +266,62 @@ class PosViewModel(private val c: AppContainer) : ViewModel() {
      * just sees no balance. The result is only applied if the same customer is still attached.
      */
     private fun refreshZzCash(customer: Customer) = viewModelScope.launch {
-        val balance = try {
-            c.zzCash.balance(customer.id)
+        val (balance, rewards) = try {
+            val b = c.zzCash.balance(customer.id)
+            b to (if (b == null) emptyList() else c.zzCash.rewards())
         } catch (e: Exception) {
             PosLog.w("ZZ_CASH_LOOKUP_FAILED", "partner" to customer.id, "err" to e.message)
-            null
+            null to emptyList()
         }
-        _sell.update { s -> if (s.customer?.id == customer.id) s.copy(zzCash = balance) else s }
+        _sell.update { s ->
+            if (s.customer?.id == customer.id) s.copy(zzCash = balance, zzRewards = rewards) else s
+        }
     }
 
-    /** Clear the attached customer, search results and ZZ Cash balance. */
+    /**
+     * Apply a ZZ Cash reward to this sale. It is priced by Odoo on the next reprice, and the
+     * payment total includes it. Refused when the cart has mixed tax rates or the card cannot pay.
+     */
+    fun applyZzCash(reward: ZzCashReward) {
+        val s = _sell.value
+        if (s.pay is PayUi.Working) return
+        val balance = s.zzCash?.takeIf { s.customer?.id == it.partnerId }
+        if (balance == null) {
+            _sell.update { it.copy(error = "ZZ Cash balance not loaded for this customer") }; return
+        }
+        if (s.lines.isEmpty() || s.lines.any { !it.isPriced }) {
+            _sell.update { it.copy(error = "Wait for Odoo prices before applying ZZ Cash") }; return
+        }
+        if (ZzCashRules.singleTaxSet(s.lines.map { it.product.taxIds }) == null) {
+            _sell.update { it.copy(error = "ZZ Cash works when every item has the same tax rate") }; return
+        }
+        if (reward.points > balance.redeemable) {
+            _sell.update { it.copy(error = "Not enough ZZ Cash for ${reward.description}") }; return
+        }
+        val cartTotal = c.pricing.totals(s.lines)?.totalIncl
+        if (cartTotal == null || reward.amount >= cartTotal) {
+            _sell.update { it.copy(error = "ZZ Cash reward is more than the bill") }; return
+        }
+        _sell.update {
+            it.copy(
+                zzRedemption = ZzCashRedemption(balance.cardId, reward, ZzCashRules.newRewardCode()),
+                totals = null, error = null,
+            )
+        }
+        reprice()
+    }
+
+    /** Take the ZZ Cash reward off this sale. */
+    fun removeZzCash() {
+        if (_sell.value.pay is PayUi.Working) return
+        _sell.update { it.copy(zzRedemption = null, totals = null) }
+        reprice()
+    }
+
+    /** Clear the attached customer, search results, ZZ Cash balance and any reward. */
     fun clearCustomer() = _sell.update {
-        it.copy(customer = null, customerMatches = emptyList(), phone = "", customerName = "", zzCash = null)
+        it.copy(customer = null, customerMatches = emptyList(), phone = "", customerName = "",
+            zzCash = null, zzRewards = emptyList(), zzRedemption = null)
     }
 
     private var phoneSearchJob: kotlinx.coroutines.Job? = null
@@ -304,14 +359,51 @@ class PosViewModel(private val c: AppContainer) : ViewModel() {
         try {
             val position = _sell.value.fiscalPosition
             val priced = c.pricing.priceAll(_sell.value.lines, position)
+            val wanted = _sell.value.zzRedemption
+            val pricedRedemption = wanted?.let { priceRedemption(it, priced, position) }
+            val dropped = wanted != null && pricedRedemption == null
             _sell.update { s ->
                 // Ignore if the cart changed while we were pricing.
                 if (s.lines.map { it.uuid to it.qty } != priced.map { it.uuid to it.qty }) s
-                else s.copy(lines = priced, totals = c.pricing.totals(priced), pricing = false)
+                else s.copy(
+                    lines = priced,
+                    zzRedemption = pricedRedemption,
+                    totals = totalsWith(priced, pricedRedemption),
+                    pricing = false,
+                    error = if (dropped) "ZZ Cash reward removed: the cart no longer qualifies. Check the total." else s.error,
+                )
             }
         } catch (e: Exception) {
             _sell.update { it.copy(pricing = false, error = "Could not get prices from Odoo: ${friendly(e)}") }
         }
+    }
+
+    /**
+     * Price the reward line with Odoo's compute_all, using the cart's single tax rate.
+     * Null when the reward no longer applies (mixed taxes, or the bill fell to or below it).
+     */
+    private suspend fun priceRedemption(r: ZzCashRedemption, lines: List<CartLine>, position: FiscalPosition?): ZzCashRedemption? {
+        val taxIds = ZzCashRules.singleTaxSet(lines.map { it.product.taxIds }) ?: return null
+        val cartTotal = c.pricing.totals(lines)?.totalIncl ?: return null
+        if (r.reward.amount >= cartTotal) return null
+        val line = c.pricing.price(
+            CartLine(
+                uuid = "zz-${r.rewardCode}",
+                product = Product(r.reward.discountProductId, r.reward.description, Paise(-r.reward.amount.value), null, null, taxIds),
+                qty = 1,
+            ),
+            position,
+        )
+        return r.copy(totalIncl = line.totalIncl, totalExcl = line.totalExcl, taxIds = taxIds)
+    }
+
+    /** Cart total plus the priced reward (a negative line). Null until every line is priced. */
+    private fun totalsWith(lines: List<CartLine>, redemption: ZzCashRedemption?): CartTotals? {
+        val base = c.pricing.totals(lines) ?: return null
+        if (redemption == null) return base
+        val incl = redemption.totalIncl ?: return null
+        val excl = redemption.totalExcl ?: return null
+        return CartTotals(base.totalIncl + incl, base.totalExcl + excl)
     }
 
     // ------------------------------------------------------------------ payment
@@ -363,7 +455,12 @@ class PosViewModel(private val c: AppContainer) : ViewModel() {
             reprice()
             return null
         }
-        val snap = SaleSnapshot.of(s.orderUuid, cfg, s.lines, totals, customer, s.fiscalPosition?.id)
+        if (s.zzRedemption != null && s.zzCash?.partnerId != customer?.id) {
+            _sell.update { it.copy(error = "Customer changed. ZZ Cash was removed; check the total and charge again.") }
+            removeZzCash()
+            return null
+        }
+        val snap = SaleSnapshot.of(s.orderUuid, cfg, s.lines, totals, customer, s.fiscalPosition?.id, s.zzRedemption)
         c.finalizer.save(snap) // HARD RULE 4/7: the cart survives a crash mid-payment
         return snap
     }
@@ -428,7 +525,7 @@ class PosViewModel(private val c: AppContainer) : ViewModel() {
     fun attachCustomer() = viewModelScope.launch {
         val found = resolveCustomer()
         val fposId = c.fiscalPositions.resolve(_sell.value.config ?: return@launch, found)
-        _sell.update { it.copy(customer = found, fiscalPosition = fiscalPositionsById[fposId], zzCash = null) }
+        _sell.update { it.copy(customer = found, fiscalPosition = fiscalPositionsById[fposId], zzCash = null, zzRewards = emptyList(), zzRedemption = null) }
         reprice()
         found?.let { refreshZzCash(it) }
     }
@@ -448,6 +545,7 @@ class PosViewModel(private val c: AppContainer) : ViewModel() {
         it.copy(
             orderUuid = UUID.randomUUID().toString(), lines = emptyList(), totals = null,
             phone = "", customerName = "", customer = null, customerMatches = emptyList(), zzCash = null,
+            zzRewards = emptyList(), zzRedemption = null,
             fiscalPosition = fiscalPositionsById[it.config?.defaultFiscalPositionId],
             pay = PayUi.Idle, error = null,
         )
