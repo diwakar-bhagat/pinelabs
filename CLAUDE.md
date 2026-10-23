@@ -519,4 +519,5 @@ in the repo root (`ODOO_URL`, `ODOO_DB`, `ODOO_USER`, `ODOO_API_KEY`). Writes ne
 | `ZZ_CASH.md` | ZZ Cash balance (3a) and redemption (3b): payload, open items, UAT case |
 | `UI_PARITY.md` | Screen-by-screen parity with Odoo 19 POS, split payment rules |
 | `INFOSEC.md` | Infosec pack for Pine: permissions, endpoints, data at rest, logging, kiosk requirement |
+| `PINE_CASE_2026-10-24.md` | Integration case for Pine: routes (AppToApp / Cloud / PadController), what works vs blocked, questions |
 | `AGENT_PROMPT_E700_A2A.md` | Prompt for an on-device AI agent (adb) to run and report the App-to-App flow safely |
