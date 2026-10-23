@@ -374,7 +374,9 @@ Private (`_x`) methods are not callable.
 
 ### Toolchain
 
-- JDK 17+ (JDK 21 temurin confirmed on dev Mac)
+- JDK 17+ (JDK 21 temurin confirmed on dev Mac). Not pinned in the repo's `gradle.properties`:
+  Android Studio uses its bundled JDK; on the Mac CLI run
+  `export JAVA_HOME=/Library/Java/JavaVirtualMachines/temurin-21.jdk/Contents/Home` first.
 - Android Gradle Plugin 8.x, Kotlin 2.x
 - `compileSdk 35`, **`minSdk 25`** (matches E700 Android 7.1.2)
 - Gradle wrapper 8.11.1

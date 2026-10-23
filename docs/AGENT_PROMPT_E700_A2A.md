@@ -29,7 +29,13 @@ Read `CLAUDE.md` §3 (HARD RULES), §10 (UAT script) and `docs/PINE_LABS_VERIFIE
    other apps' logs.
 6. A **human** must tap/insert the card or scan the UPI QR. When the terminal asks for that,
    pause, tell the user exactly what to do, and wait for them to confirm.
-7. If anything in this list would be needed to continue, **stop and report**. Don't work around it.
+7. **Never run `adb uninstall com.bohemian.odoo.pos` or clear its data without asking the user
+   first.** It deletes the payment journal, the unsynced-order outbox and the saved Odoo API key.
+   An `INSTALL_FAILED_UPDATE_INCOMPATIBLE` (signature mismatch) error means: stop and ask.
+8. **Do not edit any project file** (Gradle files, `gradle.properties`, source). Report build
+   errors instead.
+9. When a step says **STOP**, stop: run nothing further except collecting the report.
+10. If anything in this list would be needed to continue, **stop and report**. Don't work around it.
 
 ## Step 0: Device and Pine payment service (gate)
 
@@ -45,7 +51,17 @@ adb shell dumpsys package com.pinelabs.masterapp | findstr /i "versionName versi
   "MasterApp not provisioned; Pine must install it". Card/UPI cannot work without it
   (`docs/PINE_LABS_VERIFIED.md` §6). Skip to the report.
 
-## Step 1: Build and install the latest app
+## Step 1: Install the app (prebuilt APK preferred)
+
+The Pine SDK is proprietary and git-ignored, so a fresh clone builds a **stub** with no
+payments. Prefer the prebuilt APK the user received (built with Pine SDK 2.0.0):
+
+```bat
+adb install -r C:\Users\Admin\Downloads\bohemian-pos-uat-debug-sdk2.0.0.apk
+```
+
+Build from source only if `app\libs\pine-billing-sdk-android-maven\com\pinelabs\billing\pine-billing-sdk-android\2.0.0`
+exists:
 
 ```bat
 cd C:\Users\Admin\StudioProjects\pinelabs
@@ -55,8 +71,8 @@ git pull --ff-only
 gradlew.bat installUatDebug
 ```
 
-If the build fails because the Pine SDK bundle is missing from `app\libs\pine-billing-sdk-android-maven`,
-stop and report. Do not edit Gradle files. Confirm `adb shell pm list packages | findstr bohemian`.
+Confirm `adb shell pm list packages | findstr bohemian`. If the install fails with a signature
+mismatch, **stop and ask** (rule 7).
 
 ## Step 2: Start logs, open the app, run the built-in check
 
@@ -68,10 +84,14 @@ adb shell am start -n com.bohemian.odoo.pos/.ui.MainActivity
 Find buttons by their text with `adb shell uiautomator dump /sdcard/ui.xml` + `adb pull /sdcard/ui.xml`
 (screen is 1920×1008 landscape), then `adb shell input tap X Y` at the centre of the element.
 
-1. Tap **Setup**, then **Check Pine payment app**. Record the full text it shows
+1. The top bar / Setup title must **not** say `NO PINE SDK`. If it does, the installed build
+   has no payments: **STOP** and report.
+2. Tap **Setup**, then **Check Pine payment app**. Record the full text it shows
    (SDK present, App ID, MasterApp installed/version, payment service exported/permission).
-2. If it says MasterApp NOT INSTALLED or the payment service NOT FOUND, stop and report.
-3. Go back to selling (**Start selling** if shown, without changing any choice).
+3. If it says `Pine SDK in this build: NO`, MasterApp NOT INSTALLED, or the payment service
+   NOT FOUND: **STOP** and report.
+4. Go back to selling (**Start selling** if shown, without changing any choice). If Setup asks
+   for the Odoo API key, **ask the user to type it themselves**. Never type or read it.
 
 ## Step 3: Session
 
