@@ -82,6 +82,10 @@ data class SetupState(
     val useFake: Boolean = false,
     val upiPrimary: String = "",
     val upiFallback: String = "",
+    val kioskMode: Boolean = false,
+    /** Local crash reports (newest first): count and the first lines of the latest. */
+    val crashCount: Int = 0,
+    val latestCrash: String? = null,
     val busy: Boolean = false,
     val error: String? = null,
 )
@@ -130,6 +134,8 @@ data class SellState(
     val pay: PayUi = PayUi.Idle,
     /** Cashier's choice on the cart: use the backup UPI ID instead of the primary. */
     val upiUseFallback: Boolean = false,
+    /** Set when Odoo was unreachable and the catalogue comes from the device cache (Phase 5). */
+    val offlineCatalogSavedAt: Long? = null,
 ) {
     val filtered: List<Product>
         get() = if (query.isBlank()) products.take(60)
@@ -150,8 +156,25 @@ class PosViewModel(private val c: AppContainer) : ViewModel() {
             useFake = c.settings.useFakeGateway,
             upiPrimary = c.settings.upiPrimaryVpa,
             upiFallback = c.settings.upiFallbackVpa,
-        )
+            kioskMode = c.settings.kioskMode,
+        ).withCrashes()
     )
+
+    private fun SetupState.withCrashes(): SetupState {
+        val reports = c.crashLog.reports()
+        return copy(crashCount = reports.size, latestCrash = reports.firstOrNull()?.readLines()?.take(12)?.joinToString("\n"))
+    }
+
+    /** Takes effect at once; MainActivity applies lock task on resume, Setup applies it on toggle. */
+    fun setKioskMode(v: Boolean) {
+        c.settings.kioskMode = v
+        _setup.update { it.copy(kioskMode = v) }
+    }
+
+    fun clearCrashReports() {
+        c.crashLog.clear()
+        _setup.update { it.withCrashes() }
+    }
     val setup: StateFlow<SetupState> = _setup.asStateFlow()
 
     private val _sell = MutableStateFlow(SellState())
@@ -234,9 +257,19 @@ class PosViewModel(private val c: AppContainer) : ViewModel() {
             c.fiscalPositions.primeTaxFiscalPositions(products.flatMap { it.taxIds })
             _sell.update {
                 it.copy(
-                    config = cfg, products = products, loading = false,
+                    config = cfg, products = products, loading = false, offlineCatalogSavedAt = null,
                     fiscalPosition = fiscalPositionsById[cfg.defaultFiscalPositionId],
                 )
+            }
+            runCatching { c.catalogCache.save(cfg, products) }.onFailure { PosLog.w("CATALOG_CACHE_SAVE_FAILED", "err" to it.message) }
+        } catch (e: OdooException.Network) {
+            // Phase 5: show the last catalogue so the till is usable for browsing; selling
+            // still needs Odoo pricing (I2), which fails with a friendly error until it is back.
+            val cached = c.catalogCache.load()
+            _sell.update {
+                if (cached == null) it.copy(loading = false, error = friendly(e))
+                else it.copy(config = cached.config, products = cached.products, loading = false,
+                    offlineCatalogSavedAt = cached.savedAt, error = null)
             }
         } catch (e: Exception) {
             _sell.update { it.copy(loading = false, error = friendly(e)) }

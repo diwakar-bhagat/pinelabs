@@ -1,11 +1,14 @@
 package com.bohemian.odoo.pos.ui
 
+import android.app.Activity
 import android.os.Bundle
 import android.view.WindowManager
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.grid.GridCells
@@ -19,6 +22,7 @@ import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.ImeAction
 import androidx.compose.ui.text.input.KeyboardType
@@ -50,6 +54,11 @@ class MainActivity : ComponentActivity() {
         })[PosViewModel::class.java]
     }
 
+    override fun onResume() {
+        super.onResume()
+        Kiosk.apply(this, (application as PosApp).container.settings.kioskMode)
+    }
+
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         window.addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
@@ -73,7 +82,7 @@ fun PosRoot(vm: PosViewModel) {
 fun SetupScreen(vm: PosViewModel) {
     val s by vm.setup.collectAsStateWithLifecycle()
     var key by remember { mutableStateOf("") }
-    Column(Modifier.fillMaxSize().padding(24.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
+    Column(Modifier.fillMaxSize().verticalScroll(rememberScrollState()).padding(24.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
         Text("Bohemian Odoo POS · Setup (${vm.envLabel})", fontSize = 22.sp, fontWeight = FontWeight.Bold)
         s.error?.let { Text(it, color = MaterialTheme.colorScheme.error) }
 
@@ -124,6 +133,21 @@ fun SetupScreen(vm: PosViewModel) {
                 label = { Text("Backup UPI ID, used if the primary bank is down (optional)") })
             Button({ vm.finishSetup() }, enabled = !s.busy) { Text("Start selling") }
         }
+
+        val activity = LocalContext.current as Activity
+        Text("Terminal", fontWeight = FontWeight.Bold)
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            Switch(s.kioskMode, { v -> vm.setKioskMode(v); Kiosk.apply(activity, v) }); Spacer(Modifier.width(8.dp))
+            Text(
+                "Kiosk mode — start the till on boot and pin it to the screen" +
+                    if (Kiosk.permitted(activity)) "" else " (pinning needs PAXSTORE to allow this app and the Pine payment app)"
+            )
+        }
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            Text(if (s.crashCount == 0) "No crash reports." else "${s.crashCount} crash report(s) on this terminal.", Modifier.weight(1f))
+            if (s.crashCount > 0) OutlinedButton({ vm.clearCrashReports() }) { Text("Clear") }
+        }
+        s.latestCrash?.let { Text(it, fontSize = 11.sp, maxLines = 12, overflow = TextOverflow.Ellipsis) }
         if (s.busy) LinearProgressIndicator(Modifier.fillMaxWidth())
     }
 }
@@ -152,7 +176,15 @@ fun SellScreen(vm: PosViewModel) {
             TextButton({ vm.reopenSetup() }) { Text("Setup", color = Color.White) }
         }
         s.error?.let { Text(it, color = MaterialTheme.colorScheme.error, modifier = Modifier.padding(8.dp)) }
-        if (s.config != null && !s.config!!.sessionOpen) {
+        s.offlineCatalogSavedAt?.let { at ->
+            Row(Modifier.fillMaxWidth().background(Color(0xFFFFF59D)).padding(8.dp), verticalAlignment = Alignment.CenterVertically) {
+                Text("No connection to Odoo — showing the catalogue saved " +
+                    SimpleDateFormat("dd-MMM HH:mm", Locale("en", "IN")).format(Date(at)) +
+                    ". Prices and payment need Odoo. ", Modifier.weight(1f))
+                OutlinedButton({ vm.loadCatalog() }) { Text("Retry") }
+            }
+        }
+        if (s.config != null && !s.config!!.sessionOpen && s.offlineCatalogSavedAt == null) {
             Row(Modifier.padding(8.dp), verticalAlignment = Alignment.CenterVertically) {
                 Text("No open session for ${s.config!!.name}. ")
                 Button({ vm.openSession() }) { Text("Open session") }

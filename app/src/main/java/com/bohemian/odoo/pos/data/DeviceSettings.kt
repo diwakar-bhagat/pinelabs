@@ -59,6 +59,14 @@ class DeviceSettings(context: Context) {
         get() = prefs.getString("upi_fallback_vpa", "") ?: ""
         set(v) = prefs.edit().putString("upi_fallback_vpa", v.trim()).apply()
 
+    /**
+     * Kiosk mode (Phase 5): start the till on boot and pin it with lock task when the
+     * device policy allows it. Off by default; set on the Setup screen.
+     */
+    var kioskMode: Boolean
+        get() = prefs.getBoolean("kiosk_mode", false)
+        set(v) = prefs.edit().putBoolean("kiosk_mode", v).apply()
+
     val isConfigured: Boolean
         get() = !odooApiKey.isNullOrBlank() && posConfigId > 0 && terminalPaymentMethodId > 0
 }

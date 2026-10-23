@@ -50,6 +50,8 @@
 - Offline catalogue cache in Room; sell offline for Cash only; card/UPI need network anyway.
 - Lock-task (kiosk) mode, auto-start on boot, screen always on.
 - Infosec pack for Pine: permissions list, network endpoints, data-at-rest, logging policy.
+- **Built (2026-10-24):** catalogue cache, kiosk mode, local crash log, `docs/INFOSEC.md`.
+  Offline *selling* not built: it needs local tax math, which I2 forbids (see CLAUDE.md §5).
 
 ## UAT test script (run on the E700 with the UAT App ID)
 
@@ -66,6 +68,8 @@
 | 9 | Printer out of paper | Payment still SUCCESS; "reprint" offered |
 | 10 | Two taps on Pay | Second tap ignored (single in-flight) |
 | 11 | Close session with an unconfirmed payment, then resolve it and close | First close blocked (I9, nothing sent to Odoo); second closes, Z-report matches Odoo's session report |
+| 12 | Kiosk on, reboot the E700, then take a card payment | Till starts by itself and is pinned; MasterApp payment screen opens normally; payment SUCCESS |
+| 13 | Wi-Fi off, restart the app | Cached catalogue shown with the yellow offline bar; pricing/payment refused with a friendly error; Retry recovers when Wi-Fi is back |
 
 ## Open items
 

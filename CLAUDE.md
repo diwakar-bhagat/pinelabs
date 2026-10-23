@@ -86,8 +86,8 @@ ui (Compose)  ──►  viewmodels  ──►  domain services  ──►  adap
 
 | Package | Responsibility | May depend on |
 |---|---|---|
-| `core` | `Paise` money type, `BillingRef`, clock, `Redact`, logging | nothing |
-| `odoo` | JSON-2 client, DTOs, catalog/pricing/order/session/customer services, `SaleFinalizer`, ZZ Cash balance + redemption | core |
+| `core` | `Paise` money type, `BillingRef`, clock, `Redact`, logging, `CrashLog` | nothing |
+| `odoo` | JSON-2 client, DTOs, catalog/pricing/order/session/customer/refund services, `CatalogCache`, `SaleFinalizer`, ZZ Cash balance + redemption | core |
 | `gst` | `GstTreatment`, `InvoiceDecision` — fiscal positions & GSTIN | core, odoo |
 | `pine` | `PaymentGateway` interface + `PineSdkGateway` + `FakePaymentGateway` | core |
 | `payment` | `PaymentCoordinator`, `Reconciler`, `PaymentAttempt` states, `PaymentSplit` rules, `UpiPayee` | core, pine, data |
@@ -116,10 +116,10 @@ val pineSdkPresent = pineSdkDir.resolve("com/pinelabs/billing").exists()
 
 This lets the project build and test everywhere without distributing the proprietary SDK.
 
-### Codebase stats (2026-10-23, after Phase 4c void refund)
+### Codebase stats (2026-10-24, after Phase 5)
 
-- **56 Kotlin files**, **6,177 lines** total (37 in `main`, 17 tests, real + stub gateway)
-- **17 unit test files, 136 `@Test` methods** (all pass on the dev Mac) covering: `Paise`,
+- **61 Kotlin files**, **6,529 lines** total (40 in `main`, 19 tests, real + stub gateway)
+- **19 unit test files, 143 `@Test` methods** (all pass on the dev Mac) covering: `Paise`, `CrashLog`, `CatalogCache`,
   `BillingRef`, `PaymentCoordinator`, `PaymentSplit`, `UpiPayee`, `ReceiptFormatter`, `TicketQr`,
   `ZReportFormatter`, `OrderPayload`, `CustomerService`, `SessionService`, `RefundService`, `GstFoundation`,
   `ZzCashService`, `ZzCashRedemption`, `ZzCashRewardCatalog`, `ZzCashPayload`
@@ -186,12 +186,11 @@ This lets the project build and test everywhere without distributing the proprie
 | **2** | Payments: Card / UPI / BQR / Cash, journal, GetStatus, reconciliation, Odoo sync + outbox, receipt | ✅ **in code — needs on-device UAT** |
 | **3** | Customer lookup by phone, ZZ Cash balance + redeem | ✅ **in code — needs on-device UAT** (3a balance + 3b redeem; see `docs/ZZ_CASH.md`) |
 | **4** | Session open/close from the till, Z-report print, Void | ✅ **in code — needs on-device UAT** — session close (I9) + Z-report; card Void on the terminal + automatic Odoo refund order. Refund of *settled* sales (Pine `REFUND`) not built |
-| **5** | Hardening: offline cache, kiosk mode, crash reporting, infosec checklist | ⬜ before PROD |
+| **5** | Hardening: offline cache, kiosk mode, crash reporting, infosec checklist | ✅ **in code — needs on-device UAT** (offline *selling* deliberately not built, see Phase 5) |
 
-**Where we are (2026-10-23):** code is through Phase 4 (session close + Z-report, card
-Void with its Odoo refund). Next in code: Phase 5 hardening. Nothing has been run on the
-E700 yet, so the real gate is **UAT on device** (§10) — Phases 2–4 are unproven until the
-UAT script passes.
+**Where we are (2026-10-24):** all planned phases (0–5) are in code. Nothing has been run
+on the E700 yet, so the real gate is **UAT on device** (§10): build the signed UAT APK,
+send it to Pine with `docs/INFOSEC.md`, push via PAXSTORE, run the UAT script.
 
 **Built beyond the original plan:** split payment and Odoo 19 POS UI parity
 (`docs/UI_PARITY.md`), UPI payee (primary + fallback) with UPI IDs on Setup, Odoo e-bill QR
@@ -281,9 +280,22 @@ in Odoo, no open session. Why not `pos.order.refund()` + `pos.make.payment`: tha
 POS-manager only (`ir.model.access.csv`) and the E700 user is POS User (§12).
 **Not built:** refund of a settled card sale (Pine `REFUND` + the same Odoo refund order).
 
-**Phase 5 — Hardening** ⬜
-Offline catalogue cache in Room (Cash-only offline). Lock-task kiosk mode, auto-start on
-boot. Crash reporting. Infosec pack for Pine review.
+**Phase 5 — Hardening** ✅ (needs on-device UAT)
+**Offline catalogue:** `CatalogCache` (JSON in private files, atomic write) saves config +
+products after each successful load; on `OdooException.Network` the till shows the cached
+catalogue with a yellow "No connection to Odoo" bar and Retry. **Offline selling is not
+built, on purpose:** every line must be priced by Odoo (I2, HARD RULE 2) and the server
+rejects paid ≠ total, so a cash sale priced offline would need local tax math. Revisit only
+with a verified way to reproduce `compute_all` (`round_per_line`) exactly.
+**Kiosk mode** (Setup switch, off by default): `BootReceiver` starts the till after boot;
+`Kiosk.apply` calls `startLockTask()` on resume only when `isLockTaskPermitted` — never the
+screen-pinning prompt. PAXSTORE must whitelist this app **and** `com.pinelabs.masterapp`
+for lock task, or payments break (`docs/INFOSEC.md` §6). Screen stays on (`FLAG_KEEP_SCREEN_ON`).
+**Crash reporting:** `CrashLog` — local only (no third-party SDK, no new endpoint), redacted
+before writing (10+ digit runs → last 4, bearer / api_key values removed), newest 10 kept,
+shown on Setup with Clear. Payment recovery after a crash stays with the Reconciler.
+**Infosec pack:** `docs/INFOSEC.md` — permissions, the single network endpoint, exported
+components, data at rest, logging policy, kiosk requirement, money-safety summary.
 
 ---
 
@@ -434,6 +446,8 @@ company password manager + encrypted drive.
 | 9 | Printer out of paper | Payment still SUCCESS; "reprint" offered |
 | 10 | Two taps on Pay | Second tap ignored (single in-flight) |
 | 11 | Close session with an unconfirmed payment, then resolve it and close | First close blocked (I9, nothing sent to Odoo); second closes, Z-report matches Odoo's session report |
+| 12 | Kiosk on, reboot the E700, then take a card payment | Till starts by itself and is pinned; MasterApp payment screen opens normally; payment SUCCESS |
+| 13 | Wi-Fi off, restart the app | Cached catalogue shown with the yellow offline bar; pricing/payment refused with a friendly error; Retry recovers when Wi-Fi is back |
 
 ---
 
@@ -475,6 +489,8 @@ company password manager + encrypted drive.
 - [ ] Written confirmation from Pine Labs on WebView/PAXSTORE position
 - [x] Run unit tests on Mac (`./gradlew testUatDebugUnitTest`) — 47 pass with real SDK (2026-10-23)
 - [ ] Rotate exposed release keystore password
+- [ ] PAXSTORE: lock-task whitelist for `com.bohemian.odoo.pos` **and** `com.pinelabs.masterapp` (kiosk mode, UAT case 12)
+- [ ] Setup screen (kiosk switch, API key) has no supervisor PIN — any cashier can open it
 - [ ] Odoo API key in use belongs to Ankur (internal user, res.users 28) — create a POS-User-only user for the E700 and issue its own key
 
 ---
@@ -496,3 +512,4 @@ in the repo root (`ODOO_URL`, `ODOO_DB`, `ODOO_USER`, `ODOO_API_KEY`). Writes ne
 | `DEPLOY_E700.md` | Mac setup, signing key, development vs release deployment pipeline |
 | `ZZ_CASH.md` | ZZ Cash balance (3a) and redemption (3b): payload, open items, UAT case |
 | `UI_PARITY.md` | Screen-by-screen parity with Odoo 19 POS, split payment rules |
+| `INFOSEC.md` | Infosec pack for Pine: permissions, endpoints, data at rest, logging, kiosk requirement |
