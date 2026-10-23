@@ -53,7 +53,7 @@ class FakePaymentGateway(private val latencyMs: Long = 1200) : PaymentGateway {
     override suspend fun void(request: VoidRequest, onStarted: (String) -> Unit): GatewayResult {
         onStarted("fake-void-" + UUID.randomUUID())
         delay(latencyMs)
-        return GatewayResult.Approved(TxnDetails(responseCode = "00", responseMessage = "VOIDED", simulated = true))
+        return GatewayResult.Approved(TxnDetails(responseCode = "00", responseMessage = "VOIDED", amountPaise = request.amount.value, simulated = true))
     }
 
     override suspend fun print(lines: List<PrintLine>, printRef: String): PrintResult {

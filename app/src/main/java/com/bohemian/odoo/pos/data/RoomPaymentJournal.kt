@@ -4,6 +4,9 @@ import com.bohemian.odoo.pos.core.Paise
 import com.bohemian.odoo.pos.payment.AttemptState
 import com.bohemian.odoo.pos.payment.PaymentAttempt
 import com.bohemian.odoo.pos.payment.PaymentJournal
+import com.bohemian.odoo.pos.payment.VoidAttempt
+import com.bohemian.odoo.pos.payment.VoidJournal
+import com.bohemian.odoo.pos.payment.VoidState
 import com.bohemian.odoo.pos.pine.PayMode
 import com.bohemian.odoo.pos.pine.TxnDetails
 import kotlinx.serialization.Serializable
@@ -50,9 +53,33 @@ class RoomPaymentJournal(private val dao: PaymentAttemptDao) : PaymentJournal {
     override suspend fun get(billingRef: String) = dao.get(billingRef)?.toDomain()
     override suspend fun forOrder(orderUuid: String) = dao.forOrder(orderUuid).map { it.toDomain() }
     override suspend fun unresolved() = dao.unresolved().map { it.toDomain() }
+    /** Card sales since [since] that the cashier may void, newest first. */
+    suspend fun paidCardSince(since: Long) = dao.paidCardSince(since).map { it.toDomain() }
     override suspend fun setEventId(billingRef: String, eventId: String, now: Long) = dao.setEventId(billingRef, eventId, now)
 
     override suspend fun transition(
         billingRef: String, state: AttemptState, now: Long, details: TxnDetails?, note: String?, incrementStatusChecks: Boolean,
     ) = dao.transition(billingRef, state.name, now, details?.encode(), note, if (incrementStatusChecks) 1 else 0)
+}
+
+private fun VoidAttemptEntity.toDomain() = VoidAttempt(
+    billingRef = billingRef, saleRef = saleRef, orderUuid = orderUuid, amount = Paise(amountPaise),
+    state = VoidState.valueOf(state), eventId = eventId, details = detailsJson?.decodeDetails(), note = note,
+    createdAt = createdAt, updatedAt = updatedAt,
+)
+
+class RoomVoidJournal(private val dao: VoidAttemptDao) : VoidJournal {
+    override suspend fun insert(attempt: VoidAttempt) = dao.insert(
+        VoidAttemptEntity(
+            attempt.billingRef, attempt.saleRef, attempt.orderUuid, attempt.amount.value, attempt.state.name,
+            attempt.eventId, attempt.details?.encode(), attempt.note, attempt.createdAt, attempt.updatedAt,
+        )
+    )
+
+    override suspend fun get(billingRef: String) = dao.get(billingRef)?.toDomain()
+    override suspend fun forSale(saleRef: String) = dao.forSale(saleRef).map { it.toDomain() }
+    override suspend fun open() = dao.open().map { it.toDomain() }
+    override suspend fun setEventId(billingRef: String, eventId: String, now: Long) = dao.setEventId(billingRef, eventId, now)
+    override suspend fun transition(billingRef: String, state: VoidState, now: Long, details: TxnDetails?, note: String?) =
+        dao.transition(billingRef, state.name, now, details?.encode(), note)
 }

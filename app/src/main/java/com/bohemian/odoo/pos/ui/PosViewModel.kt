@@ -26,6 +26,7 @@ import com.bohemian.odoo.pos.odoo.Product
 import com.bohemian.odoo.pos.odoo.SaleSnapshot
 import com.bohemian.odoo.pos.payment.PaymentAttempt
 import com.bohemian.odoo.pos.payment.PaymentOutcome
+import com.bohemian.odoo.pos.payment.VoidOutcome
 import com.bohemian.odoo.pos.pine.PayMode
 import com.bohemian.odoo.pos.pine.PrintResult
 import com.bohemian.odoo.pos.receipt.ReceiptData
@@ -59,6 +60,14 @@ data class ClosingUi(
     val closed: Boolean = false,
     /** null until the Z-report print was tried. */
     val printed: Boolean? = null,
+)
+
+/** The void dialog: today's card sales, then a confirm step for the chosen one. */
+data class VoidUi(
+    val sales: List<PaymentAttempt> = emptyList(),
+    val confirm: PaymentAttempt? = null,
+    val busy: Boolean = false,
+    val message: String? = null,
 )
 
 data class SetupState(
@@ -283,6 +292,7 @@ class PosViewModel(private val c: AppContainer) : ViewModel() {
                     it?.copy(busy = false, error = buildList {
                         if (r.pending.unresolvedAttempts > 0) add("${r.pending.unresolvedAttempts} payment(s) still to check")
                         if (r.pending.unsyncedOrders > 0) add("${r.pending.unsyncedOrders} paid bill(s) not yet in Odoo")
+                        if (r.pending.openVoids > 0) add("${r.pending.openVoids} void(s) to finish")
                     }.joinToString(" and ") + ". Resolve before closing.")
                 }
                 is CloseResult.Refused -> _closing.update {
@@ -321,6 +331,51 @@ class PosViewModel(private val c: AppContainer) : ViewModel() {
         val closed = _closing.value?.closed == true
         _closing.value = null
         if (closed) loadCatalog() // config now shows no open session
+    }
+
+    // ------------------------------------------------------------------ void (Phase 4b)
+
+    val openVoids: StateFlow<List<com.bohemian.odoo.pos.data.VoidAttemptEntity>> =
+        c.db.voids().observeOpen().stateIn(viewModelScope, SharingStarted.Eagerly, emptyList())
+
+    private val _voiding = MutableStateFlow<VoidUi?>(null)
+    val voiding: StateFlow<VoidUi?> = _voiding.asStateFlow()
+
+    /** Today's card sales (a void only works before the terminal settles the batch). */
+    fun startVoid() = viewModelScope.launch {
+        _voiding.value = VoidUi(busy = true)
+        val since = java.util.Calendar.getInstance().apply {
+            set(java.util.Calendar.HOUR_OF_DAY, 0); set(java.util.Calendar.MINUTE, 0)
+            set(java.util.Calendar.SECOND, 0); set(java.util.Calendar.MILLISECOND, 0)
+        }.timeInMillis
+        _voiding.update { it?.copy(sales = c.journal.paidCardSince(since), busy = false) }
+    }
+
+    fun chooseVoid(sale: PaymentAttempt?) = _voiding.update { it?.copy(confirm = sale, message = null) }
+
+    fun confirmVoid() = viewModelScope.launch {
+        val sale = _voiding.value?.confirm ?: return@launch
+        _voiding.update { it?.copy(busy = true, message = null) }
+        val msg = when (val o = c.payments.void(sale.billingRef)) {
+            is VoidOutcome.Voided ->
+                "✓ Voided ${o.attempt.amount.format()} on the terminal.\nNow refund bill ${sale.billingRef} in Odoo, then tap 'Refund recorded in Odoo'."
+            is VoidOutcome.NotVoided -> "✕ Not voided: ${o.reason}\nIf the batch is settled, refund instead."
+            is VoidOutcome.NotSent -> "Void not sent: ${o.reason}"
+            is VoidOutcome.Unresolved ->
+                "⚠ Void status not confirmed. Do NOT void again — a supervisor must check the terminal report.\nRef ${o.attempt.billingRef}"
+            is VoidOutcome.Refused -> o.reason
+        }
+        _voiding.update { it?.copy(busy = false, confirm = null, message = msg) }
+    }
+
+    fun dismissVoid() { _voiding.value = null }
+
+    fun resolveVoid(ref: String, voided: Boolean) = viewModelScope.launch {
+        runCatching { c.payments.resolveVoid(ref, voided) }.onFailure { _sell.update { s -> s.copy(error = it.message) } }
+    }
+
+    fun confirmOdooRefund(ref: String) = viewModelScope.launch {
+        runCatching { c.payments.confirmOdooRefund(ref) }.onFailure { _sell.update { s -> s.copy(error = it.message) } }
     }
 
     fun setQuery(q: String) = _sell.update { it.copy(query = q) }

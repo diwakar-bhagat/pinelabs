@@ -30,7 +30,12 @@ private class ScriptedGateway : PaymentGateway {
     override suspend fun getStatus(billingRef: String, amount: Paise, mode: PayMode, onStarted: (String) -> Unit): GatewayResult {
         statusCalls++; return statusResults.removeFirstOrNull() ?: GatewayResult.Ambiguous("Timeout", null)
     }
-    override suspend fun void(request: VoidRequest, onStarted: (String) -> Unit) = GatewayResult.Rejected("NotSupported", null)
+    val voidResults = ArrayDeque<GatewayResult>()
+    val voidRequests = mutableListOf<VoidRequest>()
+    override suspend fun void(request: VoidRequest, onStarted: (String) -> Unit): GatewayResult {
+        voidRequests += request; onStarted("void-evt-${voidRequests.size}")
+        return voidResults.removeFirstOrNull() ?: GatewayResult.Rejected("NotSupported", null)
+    }
     override suspend fun print(lines: List<PrintLine>, printRef: String): PrintResult = PrintResult.Printed
 }
 
@@ -51,13 +56,28 @@ class InMemoryJournal : PaymentJournal {
     }
 }
 
+class InMemoryVoidJournal : VoidJournal {
+    val rows = LinkedHashMap<String, VoidAttempt>()
+    override suspend fun insert(attempt: VoidAttempt) { check(attempt.billingRef !in rows); rows[attempt.billingRef] = attempt }
+    override suspend fun get(billingRef: String) = rows[billingRef]
+    override suspend fun forSale(saleRef: String) = rows.values.filter { it.saleRef == saleRef }
+    override suspend fun open() = rows.values.filter { it.state.isOpen }
+    override suspend fun setEventId(billingRef: String, eventId: String, now: Long) {
+        rows[billingRef] = rows[billingRef]!!.let { it.copy(eventId = eventId, state = if (it.state == VoidState.STARTING) VoidState.IN_FLIGHT else it.state) }
+    }
+    override suspend fun transition(billingRef: String, state: VoidState, now: Long, details: TxnDetails?, note: String?) {
+        rows[billingRef] = rows[billingRef]!!.let { it.copy(state = state, details = details ?: it.details, note = note ?: it.note, updatedAt = now) }
+    }
+}
+
 @OptIn(ExperimentalCoroutinesApi::class)
 class PaymentCoordinatorTest {
     private val gw = ScriptedGateway()
     private val journal = InMemoryJournal()
+    private val voids = InMemoryVoidJournal()
     private val gen = BillingRefGenerator("TEST")
     private fun TestScope.coordinator() = PaymentCoordinator(
-        gateway = { gw }, journal = journal, refs = { gen },
+        gateway = { gw }, journal = journal, voids = voids, refs = { gen },
         policy = StatusPolicy(maxChecks = 3, intervalMs = 5_000), backgroundScope = backgroundScope,
     )
     private val ok = GatewayResult.Approved(TxnDetails(rrn = "123", authCode = "A1"))
@@ -166,5 +186,123 @@ class PaymentCoordinatorTest {
         assertTrue(c.resolveManually(ref, paid = false, note = "not on terminal report") is PaymentOutcome.NotPaid)
         gw.saleResults += ok
         assertTrue(c.pay("o1", amt, PayMode.CARD) is PaymentOutcome.Paid)
+    }
+
+    // ------------------------------------------------------------------ void (Phase 4b)
+
+    private val cardOk = GatewayResult.Approved(TxnDetails(transactionId = "TXN77", rrn = "123", authCode = "A1", amountPaise = 52800))
+
+    private suspend fun paidCardSale(c: PaymentCoordinator): String {
+        gw.saleResults += cardOk
+        return (c.pay("o1", amt, PayMode.CARD) as PaymentOutcome.Paid).attempt.billingRef
+    }
+
+    @Test fun `void sends a new ref, the sale amount, bank code and original txn id`() = runTest {
+        val c = coordinator()
+        val saleRef = paidCardSale(c)
+        gw.voidResults += GatewayResult.Approved(TxnDetails(responseCode = "00", amountPaise = 52800))
+
+        val out = c.void(saleRef)
+
+        assertTrue(out is VoidOutcome.Voided)
+        val req = gw.voidRequests.single()
+        assertTrue(req.billingRef != saleRef)
+        assertEquals(amt, req.amount)
+        assertEquals(PINE_VOID_BANK_CODE, req.bankCode)
+        assertEquals("TXN77", req.originalTransactionId)
+        val v = voids.rows.values.single()
+        assertEquals(VoidState.VOIDED, v.state) // open until the Odoo refund is recorded
+        assertTrue(v.state.isOpen)
+        assertEquals(AttemptState.SUCCESS, journal.rows[saleRef]!!.state) // the sale record is never rewritten
+    }
+
+    @Test fun `void is persisted before the terminal is called`() = runTest {
+        val c = coordinator()
+        val saleRef = paidCardSale(c)
+        var seenBeforeCall: VoidState? = null
+        val probe = object : PaymentGateway by gw {
+            override suspend fun void(request: VoidRequest, onStarted: (String) -> Unit): GatewayResult {
+                seenBeforeCall = voids.rows[request.billingRef]?.state
+                return GatewayResult.Approved(TxnDetails())
+            }
+        }
+        PaymentCoordinator({ probe }, journal, voids, { gen }, backgroundScope = backgroundScope).void(saleRef)
+        assertEquals(VoidState.STARTING, seenBeforeCall)
+    }
+
+    @Test fun `ambiguous void goes to review and is never replayed`() = runTest {
+        val c = coordinator()
+        val saleRef = paidCardSale(c)
+        gw.voidResults += GatewayResult.Ambiguous("Timeout", null)
+
+        assertTrue(c.void(saleRef) is VoidOutcome.Unresolved)
+        assertEquals(VoidState.NEEDS_REVIEW, voids.rows.values.single().state)
+        assertTrue(c.void(saleRef) is VoidOutcome.Refused) // second tap: refused, nothing sent
+        assertEquals(1, gw.voidRequests.size)
+    }
+
+    @Test fun `void amount mismatch goes to review (Invariant I6)`() = runTest {
+        val c = coordinator()
+        val saleRef = paidCardSale(c)
+        gw.voidResults += GatewayResult.Approved(TxnDetails(amountPaise = 100))
+        assertTrue(c.void(saleRef) is VoidOutcome.Unresolved)
+        assertEquals(VoidState.NEEDS_REVIEW, voids.rows.values.single().state)
+    }
+
+    @Test fun `declined void leaves the sale standing and may be retried`() = runTest {
+        val c = coordinator()
+        val saleRef = paidCardSale(c)
+        gw.voidResults += GatewayResult.Declined("12", "TXN ALREADY SETTLED")
+        gw.voidResults += GatewayResult.Approved(TxnDetails())
+
+        assertTrue(c.void(saleRef) is VoidOutcome.NotVoided)
+        assertTrue(c.void(saleRef) is VoidOutcome.Voided)
+        assertEquals(listOf(VoidState.FAILED, VoidState.VOIDED), voids.rows.values.map { it.state })
+    }
+
+    @Test fun `a voided sale cannot be voided twice`() = runTest {
+        val c = coordinator()
+        val saleRef = paidCardSale(c)
+        gw.voidResults += GatewayResult.Approved(TxnDetails())
+        c.void(saleRef)
+        assertTrue(c.void(saleRef) is VoidOutcome.Refused)
+        assertEquals(1, gw.voidRequests.size)
+    }
+
+    @Test fun `only paid card sales with a terminal txn id can be voided`() = runTest {
+        val c = coordinator()
+        journal.insert(PaymentAttempt("U1", "o2", amt, PayMode.UPI, AttemptState.SUCCESS, details = TxnDetails(transactionId = "T"), createdAt = 0, updatedAt = 0))
+        journal.insert(PaymentAttempt("C1", "o3", amt, PayMode.CARD, AttemptState.DECLINED, createdAt = 0, updatedAt = 0))
+        journal.insert(PaymentAttempt("C2", "o4", amt, PayMode.CARD, AttemptState.RESOLVED_PAID, createdAt = 0, updatedAt = 0))
+
+        assertTrue(c.void("U1") is VoidOutcome.Refused)
+        assertTrue(c.void("C1") is VoidOutcome.Refused)
+        assertTrue(c.void("C2") is VoidOutcome.Refused) // no transaction id
+        assertTrue(c.void("nope") is VoidOutcome.Refused)
+        assertEquals(0, gw.voidRequests.size)
+        assertTrue(voids.rows.isEmpty())
+    }
+
+    @Test fun `supervisor resolves a review, then confirms the Odoo refund`() = runTest {
+        val c = coordinator()
+        val saleRef = paidCardSale(c)
+        gw.voidResults += GatewayResult.Ambiguous("Timeout", null)
+        c.void(saleRef)
+        val ref = voids.rows.keys.single()
+
+        assertTrue(c.resolveVoid(ref, voided = true) is VoidOutcome.Voided)
+        c.confirmOdooRefund(ref)
+        assertEquals(VoidState.ODOO_REFUNDED, voids.rows[ref]!!.state)
+        assertTrue(voids.open().isEmpty())
+    }
+
+    @Test fun `reconciler sends a void interrupted by a crash to review`() = runTest {
+        val c = coordinator()
+        voids.insert(VoidAttempt("V1", "S1", "o1", amt, VoidState.IN_FLIGHT, createdAt = 0, updatedAt = 0))
+        voids.insert(VoidAttempt("V2", "S2", "o2", amt, VoidState.VOIDED, createdAt = 0, updatedAt = 0))
+        Reconciler(journal, c) {}.run()
+        assertEquals(VoidState.NEEDS_REVIEW, voids.rows["V1"]!!.state)
+        assertEquals(VoidState.VOIDED, voids.rows["V2"]!!.state)
+        assertEquals(0, gw.voidRequests.size)
     }
 }

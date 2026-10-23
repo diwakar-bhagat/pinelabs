@@ -49,10 +49,17 @@ class SessionServiceTest {
         assertEquals(0, server.requestCount)
     }
 
-    @Test fun `pending work is clear only when both counts are zero`() {
+    @Test fun `pending work is clear only when all counts are zero`() {
         assertTrue(PendingWork(0, 0).isClear)
         assertFalse(PendingWork(1, 0).isClear)
         assertFalse(PendingWork(0, 1).isClear)
+        assertFalse(PendingWork(0, 0, openVoids = 1).isClear)
+    }
+
+    @Test fun `open void blocks close without calling Odoo`() = runTest {
+        val r = service(PendingWork(0, 0, openVoids = 1)).close(7, cashControl = false, countedCash = null, notes = "")
+        assertEquals(CloseResult.Blocked(PendingWork(0, 0, 1)), r)
+        assertEquals(0, server.requestCount)
     }
 
     // ------------------------------------------------------------ Odoo 19 closing sequence

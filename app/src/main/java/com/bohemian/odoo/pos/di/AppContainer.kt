@@ -7,6 +7,7 @@ import com.bohemian.odoo.pos.core.PosLog
 import com.bohemian.odoo.pos.data.AppDatabase
 import com.bohemian.odoo.pos.data.DeviceSettings
 import com.bohemian.odoo.pos.data.RoomPaymentJournal
+import com.bohemian.odoo.pos.data.RoomVoidJournal
 import com.bohemian.odoo.pos.odoo.CatalogService
 import com.bohemian.odoo.pos.odoo.CustomerService
 import com.bohemian.odoo.pos.odoo.OdooJson2Client
@@ -39,7 +40,11 @@ class AppContainer(context: Context) {
     val fiscalPositions = com.bohemian.odoo.pos.odoo.FiscalPositionService(odoo)
     val pricing = PricingService(odoo, fiscalPositions)
     val sessions = SessionService(odoo, pendingWork = {
-        PendingWork(unresolvedAttempts = journal.unresolved().size, unsyncedOrders = db.outbox().count())
+        PendingWork(
+            unresolvedAttempts = journal.unresolved().size,
+            unsyncedOrders = db.outbox().count(),
+            openVoids = voidJournal.open().size,
+        )
     })
     val customers = CustomerService(odoo)
     val zzCash = com.bohemian.odoo.pos.odoo.ZzCashService(odoo)
@@ -76,9 +81,11 @@ class AppContainer(context: Context) {
     }
 
     val journal = RoomPaymentJournal(db.attempts())
+    val voidJournal = RoomVoidJournal(db.voids())
     val payments = PaymentCoordinator(
         gateway = { gateway },
         journal = journal,
+        voids = voidJournal,
         refs = ::refs,
         backgroundScope = appScope,
     )
