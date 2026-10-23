@@ -63,6 +63,19 @@ class OrderSyncService(
         return trySend(sale.orderUuid, payload)
     }
 
+    /**
+     * The pos.order.access_token Odoo generated for this sale, used for the e-bill QR.
+     * Null when the order is not in Odoo yet (the outbox will deliver it later).
+     */
+    suspend fun accessTokenFor(uuid: String): String? {
+        val rows = odoo.call("pos.order", "search_read", jsonOf(
+            "domain" to listOf(listOf("uuid", "=", uuid)),
+            "fields" to listOf("access_token"),
+            "limit" to 1,
+        )).objects()
+        return rows.firstOrNull()?.str("access_token")?.takeIf { it.isNotBlank() }
+    }
+
     /** Called by the background loop (every 30 s) and after each sale. */
     suspend fun flushDue(): Int {
         var sent = 0

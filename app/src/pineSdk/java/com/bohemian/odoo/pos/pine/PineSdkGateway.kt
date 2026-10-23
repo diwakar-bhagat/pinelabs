@@ -105,9 +105,9 @@ class PineSdkGateway : PaymentGateway {
         val req = PrintRequest(
             data = lines.map { l ->
                 PrintItem(
-                    text = l.text,
+                    text = if (l.imageBase64 != null) null else l.text,
                     imagePath = null,
-                    imageData = null,
+                    imageData = l.imageBase64,
                     isCenterAligned = l.center,
                     printerWidth = null,
                     printDataType = null,
