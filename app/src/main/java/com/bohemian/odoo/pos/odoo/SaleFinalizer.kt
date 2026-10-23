@@ -10,6 +10,15 @@ import kotlinx.serialization.decodeFromString
 import kotlinx.serialization.encodeToString
 import kotlinx.serialization.json.Json
 
+/** ZZ Cash reward as stored with the sale, so a crash or retry sends the same reward and code. */
+@Serializable
+data class SnapshotRedemption(
+    val cardId: Int, val rewardId: Int, val description: String,
+    val pointsPaise: Long, val amountPaise: Long, val discountProductId: Int,
+    val rewardCode: String, val taxIds: List<Int>,
+    val totalInclPaise: Long, val totalExclPaise: Long,
+)
+
 @Serializable
 data class SnapshotLine(
     val uuid: String, val productId: Int, val name: String, val pricePaise: Long,
@@ -33,7 +42,20 @@ data class SaleSnapshot(
     val customerGstTreatment: String? = null,
     val customerStateId: Int? = null,
     val fiscalPositionId: Int? = null,
+    /** Absent in snapshots written before ZZ Cash redemption existed. */
+    val redemption: SnapshotRedemption? = null,
 ) {
+    fun zzRedemption(): ZzCashRedemption? = redemption?.let {
+        ZzCashRedemption(
+            cardId = it.cardId,
+            reward = ZzCashReward(it.rewardId, it.description, Paise(it.pointsPaise), Paise(it.amountPaise), it.discountProductId),
+            rewardCode = it.rewardCode,
+            totalIncl = Paise(it.totalInclPaise),
+            totalExcl = Paise(it.totalExclPaise),
+            taxIds = it.taxIds,
+        )
+    }
+
     fun cartLines() = lines.map {
         CartLine(it.uuid, Product(it.productId, it.name, Paise(it.pricePaise), it.barcode, null, it.taxIds), it.qty,
             Paise(it.totalInclPaise), Paise(it.totalExclPaise))
@@ -56,6 +78,7 @@ data class SaleSnapshot(
             totals: CartTotals,
             customer: Customer?,
             fiscalPositionId: Int? = null,
+            redemption: ZzCashRedemption? = null,
         ) = SaleSnapshot(
             orderUuid = orderUuid,
             sessionId = cfg.currentSessionId ?: error("no open session"),
@@ -70,6 +93,16 @@ data class SaleSnapshot(
             customerGstTreatment = customer?.gstTreatment?.odoo,
             customerStateId = customer?.stateId,
             fiscalPositionId = fiscalPositionId,
+            redemption = redemption?.let {
+                SnapshotRedemption(
+                    cardId = it.cardId, rewardId = it.reward.rewardId, description = it.reward.description,
+                    pointsPaise = it.reward.points.value, amountPaise = it.reward.amount.value,
+                    discountProductId = it.reward.discountProductId, rewardCode = it.rewardCode,
+                    taxIds = it.taxIds,
+                    totalInclPaise = requireNotNull(it.totalIncl) { "ZZ Cash reward must be priced" }.value,
+                    totalExclPaise = requireNotNull(it.totalExcl) { "ZZ Cash reward must be priced" }.value,
+                )
+            },
         )
     }
 }
@@ -105,6 +138,7 @@ class SaleFinalizer(
             orderUuid = snap.orderUuid, sessionId = snap.sessionId, lines = snap.cartLines(),
             totals = snap.totals(), customer = snap.customer(), payments = listOf(payment),
             paidAtMillis = clock(), fiscalPositionId = snap.fiscalPositionId,
+            redemption = snap.zzRedemption(),
         )
         orderSync.submit(sale)          // outbox row written first inside submit()
         snapshots.delete(snap.orderUuid)

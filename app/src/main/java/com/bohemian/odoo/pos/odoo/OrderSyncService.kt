@@ -38,6 +38,8 @@ data class PaidSale(
      * IGST in the books when this is sent.
      */
     val fiscalPositionId: Int? = null,
+    /** ZZ Cash reward on this sale, sent as a negative reward line. Its amount is inside [totals]. */
+    val redemption: ZzCashRedemption? = null,
 ) {
     val amountPaid: Paise get() = payments.fold(Paise.ZERO) { a, p -> a + p.amount }
 }
@@ -92,6 +94,21 @@ class OrderSyncService(
             require(s.lines.all { it.isPriced }) { "all lines must be priced by Odoo before sync" }
             require(s.amountPaid == s.totals.totalIncl) { "paid ${s.amountPaid} != total ${s.totals.totalIncl}" }
             val date = odooUtc(s.paidAtMillis)
+            val lines: List<Any> = s.lines.map { l ->
+                listOf(0, 0, mapOf(
+                    "uuid" to l.uuid,
+                    "product_id" to l.product.id,
+                    "full_product_name" to l.product.name,
+                    "qty" to l.qty,
+                    "price_unit" to l.product.price.toRupees(),
+                    "discount" to 0,
+                    // Unmapped product taxes on purpose: pos.order.line.tax_ids holds the
+                    // original taxes and Odoo computes tax_ids_after_fiscal_position itself.
+                    "tax_ids" to listOf(listOf(6, 0, l.product.taxIds)),
+                    "price_subtotal" to l.totalExcl!!.toRupees(),
+                    "price_subtotal_incl" to l.totalIncl!!.toRupees(),
+                ))
+            } + listOfNotNull(s.redemption?.let { rewardLine(it) })
             val order = mapOf(
                 "uuid" to s.orderUuid,
                 "session_id" to s.sessionId,
@@ -106,21 +123,7 @@ class OrderSyncService(
                 "amount_tax" to s.totals.tax.toRupees(),
                 "amount_paid" to s.amountPaid.toRupees(),
                 "amount_return" to 0,
-                "lines" to s.lines.map { l ->
-                    listOf(0, 0, mapOf(
-                        "uuid" to l.uuid,
-                        "product_id" to l.product.id,
-                        "full_product_name" to l.product.name,
-                        "qty" to l.qty,
-                        "price_unit" to l.product.price.toRupees(),
-                        "discount" to 0,
-                        // Unmapped product taxes on purpose: pos.order.line.tax_ids holds the
-                        // original taxes and Odoo computes tax_ids_after_fiscal_position itself.
-                        "tax_ids" to listOf(listOf(6, 0, l.product.taxIds)),
-                        "price_subtotal" to l.totalExcl!!.toRupees(),
-                        "price_subtotal_incl" to l.totalIncl!!.toRupees(),
-                    ))
-                },
+                "lines" to lines,
                 "payment_ids" to s.payments.map { p ->
                     listOf(0, 0, buildMap<String, Any?> {
                         put("uuid", UUID.randomUUID().toString())
@@ -140,6 +143,32 @@ class OrderSyncService(
                 },
             )
             return jsonOf("orders" to listOf(order))
+        }
+
+        /**
+         * The ZZ Cash reward as Odoo's POS sends it: a qty-1 line at a negative price, flagged
+         * as a reward. Odoo checks the card's points against `points_cost` at sync.
+         * Shape taken from a captured web-POS redemption (tools/payload-ref, 2026-10-23).
+         */
+        private fun rewardLine(r: ZzCashRedemption): List<Any> {
+            val incl = requireNotNull(r.totalIncl) { "ZZ Cash reward must be priced before sync" }
+            val excl = requireNotNull(r.totalExcl) { "ZZ Cash reward must be priced before sync" }
+            return listOf(0, 0, mapOf(
+                "uuid" to UUID.randomUUID().toString(),
+                "product_id" to r.reward.discountProductId,
+                "full_product_name" to r.reward.description,
+                "qty" to 1,
+                "price_unit" to Paise(-r.reward.amount.value).toRupees(),
+                "discount" to 0,
+                "tax_ids" to listOf(listOf(6, 0, r.taxIds)),
+                "price_subtotal" to excl.toRupees(),
+                "price_subtotal_incl" to incl.toRupees(),
+                "is_reward_line" to true,
+                "reward_id" to r.reward.rewardId,
+                "coupon_id" to r.cardId,
+                "reward_identifier_code" to r.rewardCode,
+                "points_cost" to r.reward.points.toRupees(),
+            ))
         }
     }
 }
