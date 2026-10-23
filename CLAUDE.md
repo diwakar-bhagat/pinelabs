@@ -87,11 +87,11 @@ ui (Compose)  ──►  viewmodels  ──►  domain services  ──►  adap
 | Package | Responsibility | May depend on |
 |---|---|---|
 | `core` | `Paise` money type, `BillingRef`, clock, `Redact`, logging | nothing |
-| `odoo` | JSON-2 client, DTOs, catalog/pricing/order/session/customer services | core |
+| `odoo` | JSON-2 client, DTOs, catalog/pricing/order/session/customer services, `SaleFinalizer`, ZZ Cash balance + redemption | core |
 | `gst` | `GstTreatment`, `InvoiceDecision` — fiscal positions & GSTIN | core, odoo |
 | `pine` | `PaymentGateway` interface + `PineSdkGateway` + `FakePaymentGateway` | core |
-| `payment` | `PaymentCoordinator`, `Reconciler`, `PaymentAttempt` states | core, pine, data |
-| `receipt` | `ReceiptFormatter` (pure) | core |
+| `payment` | `PaymentCoordinator`, `Reconciler`, `PaymentAttempt` states, `PaymentSplit` rules, `UpiPayee` | core, pine, data |
+| `receipt` | `ReceiptFormatter` (pure), `TicketQr` (Odoo e-bill QR) | core |
 | `data` | Room DB (payment journal, order outbox), `DeviceSettings` | core |
 | `ui` | Compose screens (`MainActivity`) + `PosViewModel` | everything above |
 | `di` | `AppContainer` (manual DI; no Hilt — fewer moving parts on API 25) | everything |
@@ -112,15 +112,16 @@ val pineSdkPresent = pineSdkDir.resolve("com/pinelabs/billing").exists()
 ```
 
 - **`src/pineSdk/java`** — real `PineSdkGateway` (282 lines), compiled only when SDK is present.
-- **`src/pineStub/java`** — stub gateway (24 lines), compiled when SDK is absent (CI, clean clones).
+- **`src/pineStub/java`** — stub gateway (23 lines), compiled when SDK is absent (CI, clean clones).
 
 This lets the project build and test everywhere without distributing the proprietary SDK.
 
-### Codebase stats (as of latest commit)
+### Codebase stats (as of `59f5ba6`, 2026-10-23)
 
-- **38 Kotlin files**, **3,538 lines** total
-- **7 unit test files** covering: `Paise`, `BillingRef`, `PaymentCoordinator`, `ReceiptFormatter`,
-  `OrderPayload`, `CustomerService`, `GstFoundation`
+- **50 Kotlin files**, **4,736 lines** total (34 in `main`, 14 tests, real + stub gateway)
+- **14 unit test files, 100 `@Test` methods** covering: `Paise`, `BillingRef`, `PaymentCoordinator`,
+  `PaymentSplit`, `UpiPayee`, `ReceiptFormatter`, `TicketQr`, `OrderPayload`, `CustomerService`,
+  `GstFoundation`, `ZzCashService`, `ZzCashRedemption`, `ZzCashRewardCatalog`, `ZzCashPayload`
 
 ---
 
@@ -168,7 +169,7 @@ This lets the project build and test everywhere without distributing the proprie
 | I6 | Amount equality check — terminal amount must match requested | `payment/PaymentCoordinator.kt` |
 | I7 | Durable Outbox — paid orders in Room, idempotent via Odoo UUID dedup | `odoo/OrderSyncService.kt` |
 | I8 | Decoupled Printing — print failure never un-pays an order | `pine/PineSdkGateway.kt` |
-| I9 | Session Close Protection — can't close with unresolved attempts/outbox | `odoo/SessionService.kt` |
+| I9 | Session Close Protection — can't close with unresolved attempts/outbox | `odoo/SessionService.kt` (**not yet** — close is Phase 4) |
 | I10 | Zero Secrets Leakage — no keys/passwords/PANs/phones in source or logs | `core/Redact.kt` |
 
 ---
@@ -182,15 +183,34 @@ This lets the project build and test everywhere without distributing the proprie
 | **0** | Skeleton, flavors, signing, SDK wiring, CLAUDE.md | ✅ **in code** |
 | **1** | Setup screen, catalogue from Odoo, cart, Odoo-priced totals | ✅ **in code** |
 | **2** | Payments: Card / UPI / BQR / Cash, journal, GetStatus, reconciliation, Odoo sync + outbox, receipt | ✅ **in code — needs on-device UAT** |
-| **3** | Customer lookup by phone, ZZ Cash balance + redeem | 🔶 **3a balance + 3b redeem built**; redeem not yet run on the E700 (see `docs/ZZ_CASH.md`) |
-| **4** | Session open/close from the till, Z-report print, Void | ⬜ next |
+| **3** | Customer lookup by phone, ZZ Cash balance + redeem | ✅ **in code — needs on-device UAT** (3a balance + 3b redeem; see `docs/ZZ_CASH.md`) |
+| **4** | Session open/close from the till, Z-report print, Void | 🔶 **started** — session open + gateway `void()` only; close, Z-report, Void flow not built |
 | **5** | Hardening: offline cache, kiosk mode, crash reporting, infosec checklist | ⬜ before PROD |
 
-### What's been built (commits)
+**Where we are (2026-10-23):** code is through Phase 3 and Phase 4 has begun. Nothing has
+been run on the E700 yet, so the real gate is **UAT on device** (§10) — Phases 2 and 3 are
+unproven until the UAT script passes.
+
+**Built beyond the original plan:** split payment and Odoo 19 POS UI parity
+(`docs/UI_PARITY.md`), UPI payee (primary + fallback) with UPI IDs on Setup, Odoo e-bill QR
+on the printed receipt.
+
+### What's been built (commits, newest first, merges omitted)
 
 ```
+59f5ba6 receipt: print the Odoo e-bill QR on the E700 receipt
+95e8dd6 payment: UPI ID toggle on the cart and UPI IDs on the Setup screen
+ae9debb payment: UPI payee (primary + fallback) and UPI deep link
+ad58c9e payment: split payment rules and UI parity spec (Odoo 19 POS)
+ad33cb1 payment: apply ZZ Cash reward on sale, sent as Odoo reward line (Phase 3b)
+5055f62 tools: redact captured POS payloads before diffing (Phase 3b prep)
+699de7e chore: ignore local .env (Odoo credentials) on this branch
+c489f69 payment: show ZZ Cash balance for the attached customer (Phase 3a)
+64c2948 chore: add run-tests.sh build script
+ed59dc4 tooling: add bohemian-pos Claude Code plugin and resolve SDK doc contradictions
+f107db4 docs: rewrite CLAUDE.md as comprehensive end-to-end project context
+040fc72 fix: PineSdkGateway UniFFI type mapping and MainActivity customer binding
 4167f21 customer: add partial phone search with live dropdown in cart
-438b948 merge: initial GitHub commit
 09db0a6 fix(pine): correct the SDK adapter against the official documentation
 e7d511d feat(payment): enforce Invariant I6 amount match, payload diff tool, and invariants doc
 004debc chore: stop tracking .kotlin compiler session files
@@ -219,18 +239,24 @@ On SUCCESS: `sync_from_ui(state=paid)` with payment line (transaction id, RRN, a
 Failure → Room outbox with backoff. Receipt via SDK `print`. `Reconciler` on app start.
 GST fiscal positions and GSTIN customer handling.
 
-**Phase 3 — Customer & ZZ Cash** 🔶 in progress
+**Phase 3 — Customer & ZZ Cash** ✅ (needs on-device UAT)
 Customer phone lookup coded (partial search via `=ilike`, debounced dropdown in cart view).
 **3a (done):** `ZzCashService` reads the card balance live (`loyalty.card`, program 4); the
 cart shows the whole-rupee redeemable amount. No Odoo writes.
-**3b (next):** redemption through Odoo's own POS loyalty flow (`validate_coupon_programs`
-and reward lines on `sync_from_ui`), not a custom server action. Needs a captured UAT
-payload first. Details and open items: `docs/ZZ_CASH.md`.
+**3b (built):** cashier taps **Use ₹N ZZ Cash**; `ZzCashRedemption` adds a reward line on
+`sync_from_ui` (`is_reward_line`, `reward_id`, `coupon_id`, `points_cost`,
+`reward_identifier_code`) — Odoo's own POS loyalty flow, not a custom server action.
+Diffed field-by-field against a captured web POS sale (`tools/payload-ref`). Mixed-rate
+carts are refused. `validate_coupon_programs` is not called. Not yet run on the E700, nor
+an outbox retry of a redeemed sale. Details and open items: `docs/ZZ_CASH.md`.
 
-**Phase 4 — Session & Void** ⬜
-Open session (`pos.session.create` + `set_opening_control`), close (`close_session_from_ui`).
-Void via `TransactionType.VOID` (bank_code source to be confirmed at UAT). Refund via Odoo
-order refund for settled transactions.
+**Phase 4 — Session & Void** 🔶 started
+Built: `SessionService.open()` (`pos.session.create` + `set_opening_control`) and
+`PosViewModel.openSession()`; `PaymentGateway.void()` wired to `TransactionType.VOID` in
+`PineSdkGateway` (nothing calls it yet).
+To build: close (`close_session_from_ui`) with Invariant I9 checks, Z-report print, Void
+flow in coordinator + UI (bank_code source to be confirmed at UAT), refund via Odoo order
+refund for settled transactions.
 
 **Phase 5 — Hardening** ⬜
 Offline catalogue cache in Room (Cash-only offline). Lock-task kiosk mode, auto-start on
@@ -264,8 +290,9 @@ Private (`_x`) methods are not callable.
   `close_session_from_ui()` closes. Check via `pos.config.current_session_id/state`.
 - **Payment methods:** Dedicated "Pine Labs E700 (A2A)" method (type bank,
   `use_payment_terminal` empty — app drives terminal). Cash = config's `is_cash_count` method.
-- **ZZ Cash:** `loyalty.program` id 4 (30 rules, 10 rewards). Phase 3 — applied by Odoo
-  server action, not in Kotlin.
+- **ZZ Cash:** `loyalty.program` id 4 (30 rules, 10 rewards). Balance read from
+  `loyalty.card`; redemption sent as a reward line on `sync_from_ui`, and Odoo deducts the
+  points when it syncs the order (Phase 3b). Earning stays server-side.
 - **Automations:** WhatsApp bill, ZZ Cash expiry, dashboard webhook fire server-side on
   `sync_from_ui` orders. E700 `pos.config` id must be added to their filters.
 
@@ -441,3 +468,5 @@ in the repo root (`ODOO_URL`, `ODOO_DB`, `ODOO_USER`, `ODOO_API_KEY`). Writes ne
 | `INVARIANTS.md` | The 10 invariants with enforcement locations |
 | `PINE_LABS_VERIFIED.md` | Corrections to earlier assumptions, verified SDK facts, contradictions to resolve |
 | `DEPLOY_E700.md` | Mac setup, signing key, development vs release deployment pipeline |
+| `ZZ_CASH.md` | ZZ Cash balance (3a) and redemption (3b): payload, open items, UAT case |
+| `UI_PARITY.md` | Screen-by-screen parity with Odoo 19 POS, split payment rules |
