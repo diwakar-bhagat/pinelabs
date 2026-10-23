@@ -190,11 +190,40 @@ fun SellScreen(vm: PosViewModel) {
                 TotalRow("TOTAL", t?.totalIncl, big = true)
                 if (s.pricing) Text("Getting prices from Odoo…", fontSize = 12.sp)
 
-                OutlinedTextField(s.phone, vm::setPhone, Modifier.fillMaxWidth(), singleLine = true,
-                    label = { Text("Customer mobile (for WhatsApp bill)") },
-                    keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Phone))
-                OutlinedTextField(s.customerName, vm::setCustomerName, Modifier.fillMaxWidth(), singleLine = true,
-                    label = { Text("Name (new customers)") })
+                // ---- Customer section ----
+                if (s.customer != null) {
+                    Row(Modifier.fillMaxWidth().background(Color(0xFFE8F5E9)).padding(horizontal = 12.dp, vertical = 6.dp),
+                        verticalAlignment = Alignment.CenterVertically) {
+                        Text("✓ ${s.customer.name}", Modifier.weight(1f), fontSize = 14.sp,
+                            fontWeight = FontWeight.Bold, color = Color(0xFF2E7D32))
+                        s.customer.phone?.let { Text(it, fontSize = 12.sp, color = Color.Gray) }
+                        Spacer(Modifier.width(8.dp))
+                        TextButton({ vm.clearCustomer() }) { Text("Clear", fontSize = 12.sp) }
+                    }
+                } else {
+                    OutlinedTextField(s.phone, vm::setPhone, Modifier.fillMaxWidth(), singleLine = true,
+                        label = { Text("Customer mobile (for WhatsApp bill)") },
+                        keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Phone))
+                    if (s.customerMatches.isNotEmpty()) {
+                        Card(Modifier.fillMaxWidth().heightIn(max = 120.dp),
+                            colors = CardDefaults.cardColors(containerColor = Color.White)) {
+                            LazyColumn {
+                                items(s.customerMatches, key = { it.id }) { match ->
+                                    Row(Modifier.fillMaxWidth().clickable { vm.pickCustomer(match) }
+                                        .padding(horizontal = 12.dp, vertical = 6.dp),
+                                        verticalAlignment = Alignment.CenterVertically) {
+                                        Column(Modifier.weight(1f)) {
+                                            Text(match.name, fontSize = 14.sp, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                                            Text(match.phone ?: "", fontSize = 12.sp, color = Color.Gray)
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    OutlinedTextField(s.customerName, vm::setCustomerName, Modifier.fillMaxWidth(), singleLine = true,
+                        label = { Text("Name (new customers)") })
+                }
 
                 val canPay = t != null && !s.pricing && s.pay == PayUi.Idle && s.config?.sessionOpen == true
                 Row(Modifier.fillMaxWidth().padding(top = 8.dp), horizontalArrangement = Arrangement.spacedBy(6.dp)) {

@@ -23,6 +23,24 @@ class CustomerService(private val odoo: OdooJson2Client) {
     /** Odoo 19 has no res.partner.mobile; phone_sanitized holds E.164 ("+919910605187"). */
     suspend fun findByPhone(e164: String): Customer? = search(listOf("phone_sanitized", "=", e164))
 
+    /**
+     * Search by the last N digits of the phone number (minimum 4).
+     * Cashiers remember the last few digits; this lets them find the customer without
+     * typing the full number. Returns up to [limit] matches.
+     *
+     * Uses Odoo's `=ilike` operator: `phone_sanitized =ilike %<digits>` matches phones
+     * ending with those digits.
+     */
+    suspend fun searchByPhoneSuffix(digits: String, limit: Int = 5): List<Customer> {
+        val clean = digits.filter { it.isDigit() }
+        if (clean.length < 4) return emptyList()
+        return odoo.call("res.partner", "search_read", jsonOf(
+            "domain" to listOf(listOf("phone_sanitized", "=ilike", "%$clean")),
+            "fields" to PARTNER_FIELDS,
+            "limit" to limit,
+        )).objects().map { it.toCustomer() }
+    }
+
     /** Look a business up by its GSTIN, so a repeat B2B customer is not re-created. */
     suspend fun findByGstin(gstin: String): Customer? =
         search(listOf("vat", "=", gstin.trim().uppercase()))

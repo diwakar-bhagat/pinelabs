@@ -74,8 +74,10 @@ data class SellState(
     val pricing: Boolean = false,
     val phone: String = "",
     val customerName: String = "",
-    /** Resolved customer. Set by [PosViewModel.attachCustomer], not at payment time. */
+    /** Resolved customer. Set by [PosViewModel.attachCustomer] or [PosViewModel.pickCustomer]. */
     val customer: Customer? = null,
+    /** Matches returned by partial phone search (last N digits). */
+    val customerMatches: List<Customer> = emptyList(),
     /**
      * The fiscal position the cart was priced with. It must be the one sent to Odoo,
      * otherwise our totals and Odoo's disagree on an inter-state B2B sale.
@@ -220,8 +222,58 @@ class PosViewModel(private val c: AppContainer) : ViewModel() {
 
     fun remove(uuid: String) = editCart { lines -> lines.filterNot { it.uuid == uuid } }
 
-    fun setPhone(v: String) = _sell.update { it.copy(phone = v.filter { ch -> ch.isDigit() || ch == '+' }.take(14)) }
+    fun setPhone(v: String) {
+        val cleaned = v.filter { ch -> ch.isDigit() || ch == '+' }.take(14)
+        _sell.update { it.copy(phone = cleaned) }
+        searchCustomerByPhone(cleaned)
+    }
+
     fun setCustomerName(v: String) = _sell.update { it.copy(customerName = v.take(60)) }
+
+    /** Pick a customer from the search results (cashier tapped a match). */
+    fun pickCustomer(customer: Customer) {
+        _sell.update { it.copy(
+            customer = customer,
+            customerName = customer.name,
+            phone = customer.phone?.filter { it.isDigit() || it == '+' } ?: _sell.value.phone,
+            customerMatches = emptyList(),
+        ) }
+        // Re-resolve fiscal position for the picked customer's state.
+        viewModelScope.launch {
+            val fposId = c.fiscalPositions.resolve(_sell.value.config ?: return@launch, customer)
+            _sell.update { it.copy(fiscalPosition = fiscalPositionsById[fposId]) }
+            reprice()
+        }
+    }
+
+    /** Clear the attached customer and search results. */
+    fun clearCustomer() = _sell.update {
+        it.copy(customer = null, customerMatches = emptyList(), phone = "", customerName = "")
+    }
+
+    private var phoneSearchJob: kotlinx.coroutines.Job? = null
+
+    /**
+     * Fire a background search when the cashier types ≥4 digits. Debounced: only the
+     * last keystroke's search runs. Clears matches when input is too short.
+     */
+    private fun searchCustomerByPhone(digits: String) {
+        val clean = digits.filter { it.isDigit() }
+        if (clean.length < 4) {
+            _sell.update { it.copy(customerMatches = emptyList()) }
+            return
+        }
+        phoneSearchJob?.cancel()
+        phoneSearchJob = viewModelScope.launch {
+            kotlinx.coroutines.delay(300) // debounce keystrokes
+            try {
+                val matches = c.customers.searchByPhoneSuffix(clean)
+                _sell.update { it.copy(customerMatches = matches) }
+            } catch (_: Exception) {
+                // search failure is silent — the cashier can still type the full number
+            }
+        }
+    }
 
     private fun editCart(f: (List<CartLine>) -> List<CartLine>) {
         if (_sell.value.pay is PayUi.Working) return // cart frozen while paying
@@ -376,7 +428,7 @@ class PosViewModel(private val c: AppContainer) : ViewModel() {
     fun newSale() = _sell.update {
         it.copy(
             orderUuid = UUID.randomUUID().toString(), lines = emptyList(), totals = null,
-            phone = "", customerName = "", customer = null,
+            phone = "", customerName = "", customer = null, customerMatches = emptyList(),
             fiscalPosition = fiscalPositionsById[it.config?.defaultFiscalPositionId],
             pay = PayUi.Idle, error = null,
         )
