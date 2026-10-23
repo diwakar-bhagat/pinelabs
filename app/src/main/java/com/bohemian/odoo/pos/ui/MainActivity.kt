@@ -33,6 +33,7 @@ import androidx.compose.ui.unit.sp
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.ViewModelProvider
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
+import com.bohemian.odoo.pos.BuildConfig
 import com.bohemian.odoo.pos.PosApp
 import com.bohemian.odoo.pos.core.Paise
 import com.bohemian.odoo.pos.odoo.ZzCashRules
@@ -148,6 +149,11 @@ fun SetupScreen(vm: PosViewModel) {
             if (s.crashCount > 0) OutlinedButton({ vm.clearCrashReports() }) { Text("Clear") }
         }
         s.latestCrash?.let { Text(it, fontSize = 11.sp, maxLines = 12, overflow = TextOverflow.Ellipsis) }
+        var pineReport by remember { mutableStateOf<String?>(null) }
+        OutlinedButton({ pineReport = PineCheck.report(activity, BuildConfig.PINE_APPLICATION_ID, BuildConfig.PINE_SDK_PRESENT) }) {
+            Text("Check Pine payment app")
+        }
+        pineReport?.let { Text(it, fontSize = 13.sp) }
         if (s.busy) LinearProgressIndicator(Modifier.fillMaxWidth())
     }
 }
