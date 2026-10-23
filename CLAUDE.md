@@ -116,12 +116,12 @@ val pineSdkPresent = pineSdkDir.resolve("com/pinelabs/billing").exists()
 
 This lets the project build and test everywhere without distributing the proprietary SDK.
 
-### Codebase stats (2026-10-23, after Phase 4b void)
+### Codebase stats (2026-10-23, after Phase 4c void refund)
 
-- **54 Kotlin files**, **5,775 lines** total (36 in `main`, 16 tests, real + stub gateway)
-- **16 unit test files, 124 `@Test` methods** (all pass on the dev Mac) covering: `Paise`,
+- **56 Kotlin files**, **6,177 lines** total (37 in `main`, 17 tests, real + stub gateway)
+- **17 unit test files, 136 `@Test` methods** (all pass on the dev Mac) covering: `Paise`,
   `BillingRef`, `PaymentCoordinator`, `PaymentSplit`, `UpiPayee`, `ReceiptFormatter`, `TicketQr`,
-  `ZReportFormatter`, `OrderPayload`, `CustomerService`, `SessionService`, `GstFoundation`,
+  `ZReportFormatter`, `OrderPayload`, `CustomerService`, `SessionService`, `RefundService`, `GstFoundation`,
   `ZzCashService`, `ZzCashRedemption`, `ZzCashRewardCatalog`, `ZzCashPayload`
 
 ---
@@ -185,13 +185,13 @@ This lets the project build and test everywhere without distributing the proprie
 | **1** | Setup screen, catalogue from Odoo, cart, Odoo-priced totals | ✅ **in code** |
 | **2** | Payments: Card / UPI / BQR / Cash, journal, GetStatus, reconciliation, Odoo sync + outbox, receipt | ✅ **in code — needs on-device UAT** |
 | **3** | Customer lookup by phone, ZZ Cash balance + redeem | ✅ **in code — needs on-device UAT** (3a balance + 3b redeem; see `docs/ZZ_CASH.md`) |
-| **4** | Session open/close from the till, Z-report print, Void | 🔶 **4a + 4b in code** — session close (I9) + Z-report; card Void on the terminal. **4c Odoo refund order not built** (supervisor records it in Odoo) |
+| **4** | Session open/close from the till, Z-report print, Void | ✅ **in code — needs on-device UAT** — session close (I9) + Z-report; card Void on the terminal + automatic Odoo refund order. Refund of *settled* sales (Pine `REFUND`) not built |
 | **5** | Hardening: offline cache, kiosk mode, crash reporting, infosec checklist | ⬜ before PROD |
 
-**Where we are (2026-10-23):** code is through Phase 4b (session close + Z-report, card
-Void). Next in code: 4c Odoo refund order (needs a captured web POS refund payload first).
-Nothing has been run on the E700 yet, so the real gate is **UAT on device** (§10) —
-Phases 2–4 are unproven until the UAT script passes.
+**Where we are (2026-10-23):** code is through Phase 4 (session close + Z-report, card
+Void with its Odoo refund). Next in code: Phase 5 hardening. Nothing has been run on the
+E700 yet, so the real gate is **UAT on device** (§10) — Phases 2–4 are unproven until the
+UAT script passes.
 
 **Built beyond the original plan:** split payment and Odoo 19 POS UI parity
 (`docs/UI_PARITY.md`), UPI payee (primary + fallback) with UPI IDs on Setup, Odoo e-bill QR
@@ -252,7 +252,7 @@ Diffed field-by-field against a captured web POS sale (`tools/payload-ref`). Mix
 carts are refused. `validate_coupon_programs` is not called. Not yet run on the E700, nor
 an outbox retry of a redeemed sale. Details and open items: `docs/ZZ_CASH.md`.
 
-**Phase 4 — Session & Void** 🔶 4a + 4b built, 4c next
+**Phase 4 — Session & Void** ✅ (needs on-device UAT)
 **4a (built):** `SessionService.open()` (`pos.session.create` + `set_opening_control`).
 `SessionService.close()` follows the Odoo 19 web POS closing popup (`closing_popup.js`):
 flush the outbox → I9 check (no unresolved attempt, empty outbox, no open void; blocks
@@ -268,11 +268,18 @@ sends a new `billing_reference_id`, the sale amount, `bank_code = PINE_VOID_BANK
 I6 amount check; ambiguous → `NEEDS_REVIEW`, never replayed; declined (e.g. settled) →
 `FAILED`, sale stands, retry allowed; one live void per sale. Reconciler sends voids
 interrupted by a crash to review. A `VOIDED` void stays open (red bar, blocks close via I9)
-until a supervisor taps "Refund recorded in Odoo". UI: top-bar "Void" lists today's card sales.
-**4c (next):** create the Odoo refund order from the till (`sync_from_ui` refund lines +
-negative payment) so the supervisor step goes away — needs a captured web POS refund
-payload first (§0: don't guess keys). Refund for settled transactions uses the same flow
-plus Pine `REFUND`.
+until its Odoo refund exists. UI: top-bar "Void" lists today's card sales.
+**4c (built):** right after a void, `RefundService` builds a full refund order and sends it
+through `sync_from_ui` + the outbox, the way the Odoo 19 web POS ticket screen does
+(`ticket_screen.js`): per line `qty` negated and `refunded_orderline_id` = original line id;
+order `is_refund`, same partner / fiscal position / `to_invoice`; one negative payment on
+the E700 method. Lines are read from Odoo's own `pos.order.line` records, not the cart (I2).
+The refund uuid is derived from the void ref, so retries are deduplicated by Odoo. Refused
+(supervisor does it in Odoo, "Supervisor: refunded in Odoo"): split bills (Odoo total ≠
+voided card amount), ZZ Cash redemptions, partly refunded bills, non-whole qty, sale not yet
+in Odoo, no open session. Why not `pos.order.refund()` + `pos.make.payment`: that wizard is
+POS-manager only (`ir.model.access.csv`) and the E700 user is POS User (§12).
+**Not built:** refund of a settled card sale (Pine `REFUND` + the same Odoo refund order).
 
 **Phase 5 — Hardening** ⬜
 Offline catalogue cache in Room (Cash-only offline). Lock-task kiosk mode, auto-start on
@@ -423,7 +430,7 @@ company password manager + encrypted drive.
 | 5 | UPI sale, pay, kill app before result | Reconciler → GetStatus → SUCCESS, order synced |
 | 6 | Bharat QR sale | SUCCESS |
 | 7 | Wi-Fi off after payment success | Outbox, red badge, syncs when Wi-Fi returns |
-| 8 | Void a card sale (same day) | Void accepted with `bank_code` "01" and `original_transaction_id` = sale txn id; red bar until refund recorded in Odoo |
+| 8 | Void a card sale (same day) | Void accepted with `bank_code` "01" and `original_transaction_id` = sale txn id; Odoo shows a "… REFUND" order linked to the sale, stock returned, no red bar |
 | 9 | Printer out of paper | Payment still SUCCESS; "reprint" offered |
 | 10 | Two taps on Pay | Second tap ignored (single in-flight) |
 | 11 | Close session with an unconfirmed payment, then resolve it and close | First close blocked (I9, nothing sent to Odoo); second closes, Z-report matches Odoo's session report |
@@ -459,7 +466,7 @@ company password manager + encrypted drive.
 - [ ] PROD Pine Application ID (Pine issues after UAT sign-off)
 - [ ] Confirm `bank_code = "01"` for ZenZebra's acquirer (UAT case 8)
 - [ ] Confirm Void's `original_transaction_id` = sale `transaction_id` (assumed; docs only say it is required) (UAT case 8)
-- [ ] Capture a web POS refund `sync_from_ui` payload on the UAT config (unblocks 4c Odoo refund order)
+- [ ] Capture a web POS refund `sync_from_ui` payload on the UAT config and diff it against `RefundService.buildPayload` (`tools/payload_diff.py`) — 4c was built from Odoo 19 source, not a capture
 - [x] Confirm SDK 1.0.0 `init` arity and `amount` type against `classes.jar` in AAR (2026-10-23)
 - [ ] Add E700 `pos.config` id to WhatsApp / ZZ Cash automation filters in Odoo
 - [ ] E700 printer width in dots and chars per line (measure on device)

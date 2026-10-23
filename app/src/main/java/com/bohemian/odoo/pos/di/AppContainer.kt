@@ -13,6 +13,7 @@ import com.bohemian.odoo.pos.odoo.CustomerService
 import com.bohemian.odoo.pos.odoo.OdooJson2Client
 import com.bohemian.odoo.pos.odoo.OrderSyncService
 import com.bohemian.odoo.pos.odoo.PendingWork
+import com.bohemian.odoo.pos.odoo.RefundService
 import com.bohemian.odoo.pos.odoo.PricingService
 import com.bohemian.odoo.pos.odoo.SaleFinalizer
 import com.bohemian.odoo.pos.odoo.SessionService
@@ -64,6 +65,7 @@ class AppContainer(context: Context) {
             }
         }
     )
+    val refunds = RefundService(odoo, orderSync, terminalPaymentMethodId = { settings.terminalPaymentMethodId })
     val finalizer = SaleFinalizer(db.snapshots(), orderSync, terminalPaymentMethodId = { settings.terminalPaymentMethodId })
 
     private val realGateway: PaymentGateway by lazy { PineSdkGateway() }

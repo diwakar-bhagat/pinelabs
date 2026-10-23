@@ -34,6 +34,7 @@ import com.bohemian.odoo.pos.receipt.ReceiptFormatter
 import com.bohemian.odoo.pos.receipt.ReceiptItem
 import com.bohemian.odoo.pos.odoo.ClosingSummary
 import com.bohemian.odoo.pos.odoo.CloseResult
+import com.bohemian.odoo.pos.odoo.RefundResult
 import com.bohemian.odoo.pos.receipt.ZReportCash
 import com.bohemian.odoo.pos.receipt.ZReportData
 import com.bohemian.odoo.pos.receipt.ZReportFormatter
@@ -357,8 +358,7 @@ class PosViewModel(private val c: AppContainer) : ViewModel() {
         val sale = _voiding.value?.confirm ?: return@launch
         _voiding.update { it?.copy(busy = true, message = null) }
         val msg = when (val o = c.payments.void(sale.billingRef)) {
-            is VoidOutcome.Voided ->
-                "✓ Voided ${o.attempt.amount.format()} on the terminal.\nNow refund bill ${sale.billingRef} in Odoo, then tap 'Refund recorded in Odoo'."
+            is VoidOutcome.Voided -> "✓ Voided ${o.attempt.amount.format()} on the terminal.\n" + recordRefund(o.attempt)
             is VoidOutcome.NotVoided -> "✕ Not voided: ${o.reason}\nIf the batch is settled, refund instead."
             is VoidOutcome.NotSent -> "Void not sent: ${o.reason}"
             is VoidOutcome.Unresolved ->
@@ -375,7 +375,33 @@ class PosViewModel(private val c: AppContainer) : ViewModel() {
     }
 
     fun confirmOdooRefund(ref: String) = viewModelScope.launch {
-        runCatching { c.payments.confirmOdooRefund(ref) }.onFailure { _sell.update { s -> s.copy(error = it.message) } }
+        runCatching { c.payments.confirmOdooRefund(ref, "manual: supervisor recorded the refund in Odoo") }
+            .onFailure { _sell.update { s -> s.copy(error = it.message) } }
+    }
+
+    /** Red-bar retry for a voided sale whose Odoo refund was not created yet. */
+    fun retryOdooRefund(ref: String) = viewModelScope.launch {
+        val v = c.voidJournal.get(ref) ?: return@launch
+        _sell.update { it.copy(error = recordRefund(v)) }
+    }
+
+    /**
+     * Phase 4c: the Odoo refund order for a voided sale. Once it is in Odoo or durably in the
+     * outbox, the void is closed. Anything else leaves the void open for a retry or a supervisor.
+     */
+    private suspend fun recordRefund(v: com.bohemian.odoo.pos.payment.VoidAttempt): String = try {
+        val last4 = c.journal.get(v.saleRef)?.details?.last4
+        when (val r = c.refunds.refundVoidedSale(v, _sell.value.config?.currentSessionId, last4)) {
+            is RefundResult.Recorded -> {
+                c.payments.confirmOdooRefund(v.billingRef,
+                    "refund order ${r.refundUuid} " + if (r.syncedNow) "synced to Odoo" else "queued in outbox")
+                if (r.syncedNow) "Refund recorded in Odoo." else "Refund queued — it reaches Odoo when the connection is back."
+            }
+            is RefundResult.NotEligible -> "Odoo refund not created: ${r.reason}"
+        }
+    } catch (e: Exception) {
+        PosLog.w("REFUND_BUILD_FAILED", "void" to v.billingRef, "err" to e.message)
+        "Odoo refund not created (${friendly(e)}). Retry from the red bar."
     }
 
     fun setQuery(q: String) = _sell.update { it.copy(query = q) }

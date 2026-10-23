@@ -56,11 +56,13 @@ class OrderSyncService(
     private val onPayloadGenerated: ((uuid: String, payload: JsonObject) -> Unit)? = null,
 ) {
     /** Persist first, then try once. Returns true if Odoo confirmed now. */
-    suspend fun submit(sale: PaidSale): Boolean {
-        val payload = buildPayload(sale)
-        onPayloadGenerated?.invoke(sale.orderUuid, payload)
-        outbox.upsert(OutboxEntity(sale.orderUuid, payload.toString(), sale.totals.totalIncl.value, 0, null, clock(), 0))
-        return trySend(sale.orderUuid, payload)
+    suspend fun submit(sale: PaidSale): Boolean = submitPayload(sale.orderUuid, buildPayload(sale), sale.totals.totalIncl.value)
+
+    /** Any ready sync_from_ui payload (sale or refund): persist first, then try once. */
+    suspend fun submitPayload(uuid: String, payload: JsonObject, amountPaise: Long): Boolean {
+        onPayloadGenerated?.invoke(uuid, payload)
+        outbox.upsert(OutboxEntity(uuid, payload.toString(), amountPaise, 0, null, clock(), 0))
+        return trySend(uuid, payload)
     }
 
     /**

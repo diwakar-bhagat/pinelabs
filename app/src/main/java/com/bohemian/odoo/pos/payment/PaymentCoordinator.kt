@@ -159,11 +159,14 @@ class PaymentCoordinator(
         if (voided) VoidOutcome.Voided(fresh) else VoidOutcome.NotVoided(fresh, "Confirmed not voided")
     }
 
-    /** Supervisor confirms the refund for a voided sale is recorded in Odoo. Closes the void. */
-    suspend fun confirmOdooRefund(billingRef: String) = mutex.withLock {
+    /**
+     * The refund for a voided sale is in Odoo: sent / queued by the till (4c), or recorded by
+     * a supervisor in the back office. Closes the void.
+     */
+    suspend fun confirmOdooRefund(billingRef: String, note: String = "refund recorded in Odoo") = mutex.withLock {
         val v = voids.get(billingRef) ?: error("no void $billingRef")
         check(v.state == VoidState.VOIDED) { "void not voided: ${v.state}" }
-        voids.transition(billingRef, VoidState.ODOO_REFUNDED, clock(), note = "refund recorded in Odoo")
+        voids.transition(billingRef, VoidState.ODOO_REFUNDED, clock(), note = note)
         PosLog.i("VOID_ODOO_REFUNDED", "ref" to billingRef)
     }
 

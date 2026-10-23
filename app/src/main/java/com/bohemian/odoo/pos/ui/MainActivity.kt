@@ -316,8 +316,10 @@ private fun VoidBar(v: VoidAttemptEntity, vm: PosViewModel) {
                 OutlinedButton({ vm.resolveVoid(v.billingRef, voided = false) }) { Text("Supervisor: NOT voided") }
             }
             VoidState.VOIDED.name -> {
-                Text("Sale ${v.saleRef} voided ($amount). Refund it in Odoo, then confirm. ", Modifier.weight(1f))
-                OutlinedButton({ vm.confirmOdooRefund(v.billingRef) }) { Text("Refund recorded in Odoo") }
+                Text("Sale ${v.saleRef} voided ($amount) — Odoo refund still missing. ", Modifier.weight(1f))
+                OutlinedButton({ vm.retryOdooRefund(v.billingRef) }) { Text("Create Odoo refund") }
+                Spacer(Modifier.width(6.dp))
+                OutlinedButton({ vm.confirmOdooRefund(v.billingRef) }) { Text("Supervisor: refunded in Odoo") }
             }
             else -> Text("Void ${v.billingRef} in progress…", Modifier.weight(1f))
         }
