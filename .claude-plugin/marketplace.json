@@ -1,0 +1,14 @@
+{
+  "name": "pinelabs",
+  "description": "Claude Code plugins for the Bohemian Odoo POS (Pine Labs E700) project.",
+  "owner": {
+    "name": "Diwakar Bhagat"
+  },
+  "plugins": [
+    {
+      "name": "bohemian-pos",
+      "source": "./claude-plugin/bohemian-pos",
+      "description": "Project plugin for the Bohemian Odoo POS on Pine Labs E700."
+    }
+  ]
+}

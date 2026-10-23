@@ -1,0 +1,8 @@
+{
+  "name": "bohemian-pos",
+  "version": "0.1.0",
+  "description": "Bohemian Odoo POS (Pine Labs E700): money-safety review, Pine SDK and Odoo 19 JSON-2 knowledge, build/UAT/deploy runbooks, and a read-only Odoo MCP server.",
+  "author": { "name": "Diwakar Bhagat" },
+  "repository": "https://github.com/diwakar-bhagat/pinelabs",
+  "keywords": ["odoo", "pine-labs", "pos", "android", "e700"]
+}
