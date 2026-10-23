@@ -39,6 +39,7 @@ class AppContainer(context: Context) {
     val pricing = PricingService(odoo, fiscalPositions)
     val sessions = SessionService(odoo)
     val customers = CustomerService(odoo)
+    val zzCash = com.bohemian.odoo.pos.odoo.ZzCashService(odoo)
     val orderSync = OrderSyncService(
         odoo = odoo,
         outbox = db.outbox(),

@@ -198,6 +198,12 @@ fun SellScreen(vm: PosViewModel) {
                         Text("✓ ${cust.name}", Modifier.weight(1f), fontSize = 14.sp,
                             fontWeight = FontWeight.Bold, color = Color(0xFF2E7D32))
                         cust.phone?.let { Text(it, fontSize = 12.sp, color = Color.Gray) }
+                        // Only show a balance that belongs to the customer on screen.
+                        s.zzCash?.takeIf { it.partnerId == cust.id }?.let { z ->
+                            Spacer(Modifier.width(8.dp))
+                            Text("ZZ Cash ${z.redeemable.format()}", fontSize = 12.sp,
+                                fontWeight = FontWeight.Bold, color = Color(0xFF2E7D32))
+                        }
                         Spacer(Modifier.width(8.dp))
                         TextButton({ vm.clearCustomer() }) { Text("Clear", fontSize = 12.sp) }
                     }

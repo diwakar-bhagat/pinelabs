@@ -16,6 +16,6 @@ app/libs/pine-billing-sdk-android-maven/
 *.apk
 .kotlin/
 
-# Local Odoo credentials for the bohemian-pos plugin MCP server
+# Local Odoo credentials (MCP server reads this file)
 .env
 .env.*

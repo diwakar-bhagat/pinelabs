@@ -182,7 +182,7 @@ This lets the project build and test everywhere without distributing the proprie
 | **0** | Skeleton, flavors, signing, SDK wiring, CLAUDE.md | ✅ **in code** |
 | **1** | Setup screen, catalogue from Odoo, cart, Odoo-priced totals | ✅ **in code** |
 | **2** | Payments: Card / UPI / BQR / Cash, journal, GetStatus, reconciliation, Odoo sync + outbox, receipt | ✅ **in code — needs on-device UAT** |
-| **3** | Customer lookup by phone, ZZ Cash balance + redeem (Odoo server action) | 🔶 **in progress** (customer search coded, ZZ Cash next) |
+| **3** | Customer lookup by phone, ZZ Cash balance + redeem | 🔶 **3a balance shipped**; 3b redeem waits on a captured POS payload (see `docs/ZZ_CASH.md`) |
 | **4** | Session open/close from the till, Z-report print, Void | ⬜ next |
 | **5** | Hardening: offline cache, kiosk mode, crash reporting, infosec checklist | ⬜ before PROD |
 
@@ -221,9 +221,11 @@ GST fiscal positions and GSTIN customer handling.
 
 **Phase 3 — Customer & ZZ Cash** 🔶 in progress
 Customer phone lookup coded (partial search via `=ilike`, debounced dropdown in cart view).
-**Next:** ZZ Cash integration — Odoo server action for balance quote + redeem via
-`ir.actions.server.run` with context. Cannot reimplement loyalty logic in Kotlin (30 rules,
-10 rewards on `loyalty.program` id 4).
+**3a (done):** `ZzCashService` reads the card balance live (`loyalty.card`, program 4); the
+cart shows the whole-rupee redeemable amount. No Odoo writes.
+**3b (next):** redemption through Odoo's own POS loyalty flow (`validate_coupon_programs`
+and reward lines on `sync_from_ui`), not a custom server action. Needs a captured UAT
+payload first. Details and open items: `docs/ZZ_CASH.md`.
 
 **Phase 4 — Session & Void** ⬜
 Open session (`pos.session.create` + `set_opening_control`), close (`close_session_from_ui`).
