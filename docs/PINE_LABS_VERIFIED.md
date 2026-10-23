@@ -122,3 +122,14 @@ provision the compatible payments application / Master service for AppToApp on t
   `bank_code` "01". The 1.0.0 Void template sends neither `original_transaction_id` nor `invoice_number`.
   Our 1.0.0 void currently also sends `original_transaction_id` = sale `transaction_id`, which is an assumption.
 - `currency` becomes an ISO-4217 string (`"INR"`) instead of the `CurrencyCode` enum.
+
+**Payments app screens (photos, 2026-10-24):**
+- **Live store E700:** the Pine Payments app lists every payment option. These include Card, Dynamic QR (UPI),
+  Static QR, Bank/Brand EMI, Pay By Points, Pine 360 and **"Cloud Based Transaction"**.
+- **UAT E700 SN 1340055807:** the Payments app shows only **Settle Batch**, with no payment methods. Its menu has
+  **Activate**, Set/Test Connection and Device Details, and the header says "logged in: 1234". It carries the DEBUG
+  badge. Reading: the UAT payments app is **not activated / not configured** with payment methods. Activation needs
+  Pine (no public SDK doc covers it), so don't try **Activate** with guessed values.
+- The "Cloud Based Transaction" option on the live terminal suggests these Plutus Plus terminals take bills from Pine
+  Cloud (SDK `Cloud` transport). Ask Pine whether this terminal family supports AppToApp (MasterApp) at all, or
+  whether Cloud is the intended route.
