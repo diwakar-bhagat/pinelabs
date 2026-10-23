@@ -134,7 +134,7 @@ class PineSdkGateway : PaymentGateway {
                 finish(PrintResult.Failed(e.kind() + ": " + e.message))
             }
         }
-    }
+    } }
 
     // ---------------------------------------------------------------- internals
 
@@ -235,7 +235,7 @@ class PineSdkGateway : PaymentGateway {
         originalTransactionId: String? = null,
         isSwipe: Boolean? = null,
     ) = TransactionOptions(
-        currency = "INR",
+        currency = CurrencyCode.INR,
         billingReferenceId = billingRef,
         // UDL v0.19: `i64? amount` → Long. (Older docs said u64 → use amount.value.toULong() if 1.0.0 wants ULong.)
         amount = amount.value,

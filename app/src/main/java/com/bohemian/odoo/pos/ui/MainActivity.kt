@@ -191,12 +191,13 @@ fun SellScreen(vm: PosViewModel) {
                 if (s.pricing) Text("Getting prices from Odoo…", fontSize = 12.sp)
 
                 // ---- Customer section ----
-                if (s.customer != null) {
+                val cust = s.customer
+                if (cust != null) {
                     Row(Modifier.fillMaxWidth().background(Color(0xFFE8F5E9)).padding(horizontal = 12.dp, vertical = 6.dp),
                         verticalAlignment = Alignment.CenterVertically) {
-                        Text("✓ ${s.customer.name}", Modifier.weight(1f), fontSize = 14.sp,
+                        Text("✓ ${cust.name}", Modifier.weight(1f), fontSize = 14.sp,
                             fontWeight = FontWeight.Bold, color = Color(0xFF2E7D32))
-                        s.customer.phone?.let { Text(it, fontSize = 12.sp, color = Color.Gray) }
+                        cust.phone?.let { Text(it, fontSize = 12.sp, color = Color.Gray) }
                         Spacer(Modifier.width(8.dp))
                         TextButton({ vm.clearCustomer() }) { Text("Clear", fontSize = 12.sp) }
                     }
