@@ -19,3 +19,6 @@ app/libs/pine-billing-sdk-android-maven/
 # Local Odoo credentials (MCP server reads this file)
 .env
 .env.*
+
+# Raw captured POS payloads contain customer data — never commit
+tools/payload-ref/
