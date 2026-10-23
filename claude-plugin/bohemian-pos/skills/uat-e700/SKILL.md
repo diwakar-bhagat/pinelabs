@@ -1,6 +1,6 @@
 ---
 name: uat-e700
-description: Run and record the 10-case Pine Labs UAT script for the Bohemian POS on the UAT E700 (SN 1630005644), and turn results into fixes or resolved open items. Use when preparing for, running, or reporting on UAT, or when the user pastes on-device results or logcat.
+description: Run and record the 10-case Pine Labs UAT script for the Bohemian POS on the UAT E700 (SN 1340055807), and turn results into fixes or resolved open items. Use when preparing for, running, or reporting on UAT, or when the user pastes on-device results or logcat.
 ---
 
 # UAT on the E700

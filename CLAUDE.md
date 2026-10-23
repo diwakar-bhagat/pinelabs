@@ -43,6 +43,7 @@ uses **Odoo 19 (Odoo Online, `zenzebra1.odoo.com`) as the system of record**.
 | Package (applicationId) | `com.bohemian.odoo.pos` — **never change** (registered with Pine Labs) |
 | Company | Bohemian Curations Pvt Ltd (brand: ZenZebra) |
 | Device | PAX E700 ("Aries6"), PayDroid **Android 7.1.2 (API 25)**, firmware Scorpio V10.1.32 |
+| UAT terminal | PAX E700 **SN 1340055807**; payments app installed: Pine **Plutus Plus** (`com.pinelabs.plutusplus`); App-to-App MasterApp **not yet provisioned** |
 | Printer | Pine SDK `print`, line width **24 / 32 / 48 chars** (configurable) |
 | Pine SDK | `com.pinelabs.billing:pine-billing-sdk-android` **2.0.0** (latest stable, 2026-10-24; 1.0.0 kept in `app/libs` for rollback) |
 | Pine App ID (UAT) | `771aabd360b64cd59d11806bd88d87b4` |
@@ -418,7 +419,7 @@ The dev Mac at `~/Downloads/pine-billing-sdk-android-1.0.0-prod/bohemian-odoo-po
 ```
 Build signed APK  →  Email to Pine Labs  →  Pine infosec review  →  PAXSTORE
                                                                       │
-                                              Push to UAT E700 (SN 1630005644)
+                                              Push to UAT E700 (SN 1340055807)
                                                                       │
                                               Run UAT test script (10 cases)
                                                                       │

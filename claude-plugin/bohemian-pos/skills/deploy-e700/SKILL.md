@@ -6,7 +6,7 @@ description: Release pipeline for the Bohemian POS — signed APK, Pine Labs inf
 # Deploy to the E700
 
 ```
-assembleUatRelease → email APK to Pine → infosec review → PAXSTORE → UAT E700 (SN 1630005644)
+assembleUatRelease → email APK to Pine → infosec review → PAXSTORE → UAT E700 (SN 1340055807)
   → 10-case UAT (uat-e700 skill) → sign-off → PROD App ID issued → set pineProdAppId → assembleProdRelease → PAXSTORE PROD
 ```
 
