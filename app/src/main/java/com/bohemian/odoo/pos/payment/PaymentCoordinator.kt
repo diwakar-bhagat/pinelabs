@@ -202,7 +202,7 @@ class PaymentCoordinator(
         }
         is GatewayResult.Rejected -> {
             voids.transition(v.billingRef, VoidState.FAILED, clock(), note = "${r.kind}: ${r.detail}")
-            VoidOutcome.NotSent(voids.get(v.billingRef)!!, friendly(r.kind))
+            VoidOutcome.NotSent(voids.get(v.billingRef)!!, friendly(r.kind, r.detail))
         }
         is GatewayResult.Ambiguous -> {
             voids.transition(v.billingRef, VoidState.NEEDS_REVIEW, clock(), note = "${r.kind}: ${r.detail}")
@@ -235,7 +235,7 @@ class PaymentCoordinator(
         }
         is GatewayResult.Rejected -> {
             journal.transition(a.billingRef, AttemptState.REJECTED, clock(), note = "${r.kind}: ${r.detail}")
-            PaymentOutcome.NotSent(journal.get(a.billingRef)!!, friendly(r.kind))
+            PaymentOutcome.NotSent(journal.get(a.billingRef)!!, friendly(r.kind, r.detail))
         }
         is GatewayResult.Declined ->
             if (a.mode.needsStatusCheckOnFailure) {
@@ -301,6 +301,14 @@ class PaymentCoordinator(
         a.state.isFinal -> PaymentOutcome.NotPaid(a, reason)
         else -> PaymentOutcome.Unresolved(a)
     }
+
+    /**
+     * Cashier text plus the SDK's own reason on a second line, so a photo of the screen is
+     * enough to diagnose (e.g. "bindService returned false" vs "MasterApp is not installed").
+     * SDK reasons carry no card or customer data.
+     */
+    internal fun friendly(kind: String, detail: String?): String =
+        friendly(kind) + (detail?.takeIf { it.isNotBlank() }?.let { "\n[$kind: ${it.take(200)}]" } ?: "\n[$kind]")
 
     private fun friendly(kind: String) = when (kind) {
         "OperationInProgress" -> "Terminal is busy with another operation. Wait and retry."

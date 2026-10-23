@@ -305,4 +305,10 @@ class PaymentCoordinatorTest {
         assertEquals(VoidState.VOIDED, voids.rows["V2"]!!.state)
         assertEquals(0, gw.voidRequests.size)
     }
+
+    @Test fun `not-sent reason shows the SDK cause for diagnosis`() = runTest {
+        gw.saleResults += GatewayResult.Rejected("TransportUnavailable", "bindService returned false")
+        val out = coordinator().pay("o1", amt, PayMode.CARD) as PaymentOutcome.NotSent
+        assertEquals("Pine Labs payment app not reachable on this device.\n[TransportUnavailable: bindService returned false]", out.reason)
+    }
 }
