@@ -31,6 +31,12 @@ import com.bohemian.odoo.pos.pine.PrintResult
 import com.bohemian.odoo.pos.receipt.ReceiptData
 import com.bohemian.odoo.pos.receipt.ReceiptFormatter
 import com.bohemian.odoo.pos.receipt.ReceiptItem
+import com.bohemian.odoo.pos.odoo.ClosingSummary
+import com.bohemian.odoo.pos.odoo.CloseResult
+import com.bohemian.odoo.pos.receipt.ZReportCash
+import com.bohemian.odoo.pos.receipt.ZReportData
+import com.bohemian.odoo.pos.receipt.ZReportFormatter
+import com.bohemian.odoo.pos.receipt.ZReportMethod
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.StateFlow
@@ -42,6 +48,18 @@ import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
 import java.util.UUID
+
+/** The close-session dialog. Figures come from Odoo; the cashier types only counted cash and notes. */
+data class ClosingUi(
+    val summary: ClosingSummary? = null,
+    val counted: String = "",
+    val notes: String = "",
+    val busy: Boolean = false,
+    val error: String? = null,
+    val closed: Boolean = false,
+    /** null until the Z-report print was tried. */
+    val printed: Boolean? = null,
+)
 
 data class SetupState(
     val apiKeyEntered: Boolean = false,
@@ -223,6 +241,86 @@ class PosViewModel(private val c: AppContainer) : ViewModel() {
         } catch (e: Exception) {
             _sell.update { it.copy(loading = false, error = friendly(e)) }
         }
+    }
+
+    // ------------------------------------------------------------------ session close (Phase 4)
+
+    private val _closing = MutableStateFlow<ClosingUi?>(null)
+    val closing: StateFlow<ClosingUi?> = _closing.asStateFlow()
+
+    /** Sync the outbox like the web POS does, then load Odoo's closing figures. */
+    fun startClose() = viewModelScope.launch {
+        val sessionId = _sell.value.config?.currentSessionId ?: return@launch
+        _closing.value = ClosingUi(busy = true)
+        runCatching { c.orderSync.flushAll() }.onFailure { PosLog.w("CLOSE_FLUSH_FAILED", "err" to it.message) }
+        try {
+            val summary = c.sessions.closingSummary(sessionId)
+            _closing.update { it?.copy(summary = summary, busy = false) }
+        } catch (e: Exception) {
+            _closing.update { it?.copy(busy = false, error = friendly(e)) }
+        }
+    }
+
+    fun setCountedCash(v: String) = _closing.update { it?.copy(counted = v, error = null) }
+    fun setClosingNotes(v: String) = _closing.update { it?.copy(notes = v) }
+
+    fun confirmClose() = viewModelScope.launch {
+        val ui = _closing.value ?: return@launch
+        val cfg = _sell.value.config ?: return@launch
+        val sessionId = cfg.currentSessionId ?: return@launch
+        val counted = if (cfg.cashControl) {
+            Paise.parse(ui.counted) ?: return@launch _closing.update { it?.copy(error = "Enter the cash counted in the drawer") }
+        } else null
+        _closing.update { it?.copy(busy = true, error = null) }
+        try {
+            when (val r = c.sessions.close(sessionId, cfg.cashControl, counted, ui.notes.trim())) {
+                CloseResult.Closed -> {
+                    PosLog.i("SESSION_CLOSED", "session" to sessionId)
+                    _closing.update { it?.copy(busy = false, closed = true) }
+                    printZReport()
+                }
+                is CloseResult.Blocked -> _closing.update {
+                    it?.copy(busy = false, error = buildList {
+                        if (r.pending.unresolvedAttempts > 0) add("${r.pending.unresolvedAttempts} payment(s) still to check")
+                        if (r.pending.unsyncedOrders > 0) add("${r.pending.unsyncedOrders} paid bill(s) not yet in Odoo")
+                    }.joinToString(" and ") + ". Resolve before closing.")
+                }
+                is CloseResult.Refused -> _closing.update {
+                    it?.copy(busy = false, error = r.message + if (r.redirect) "\nFinish closing in the Odoo back office." else "")
+                }
+            }
+        } catch (e: Exception) {
+            _closing.update { it?.copy(busy = false, error = friendly(e)) }
+        }
+    }
+
+    /** Prints from the figures shown at close. A print failure never reopens or blocks anything (I8). */
+    fun printZReport() = viewModelScope.launch {
+        val ui = _closing.value ?: return@launch
+        val summary = ui.summary ?: return@launch
+        val cfg = _sell.value.config
+        val data = ZReportData(
+            storeName = cfg?.companyName?.ifBlank { null } ?: "ZenZebra",
+            configName = cfg?.name ?: "",
+            sessionName = "#${cfg?.currentSessionId ?: "?"}",
+            printedAt = SimpleDateFormat("dd-MMM-yyyy HH:mm", Locale("en", "IN")).format(Date()),
+            orderCount = summary.orderCount,
+            orderTotal = summary.orderTotal,
+            cash = summary.cash?.let { ZReportCash(it.name, it.opening, it.payments, it.moves, it.expected, Paise.parse(ui.counted)) },
+            methods = summary.nonCash.map { ZReportMethod(it.name, it.count, it.amount) },
+            notes = ui.notes.trim().ifBlank { null },
+        )
+        val printed = when (val r = c.gateway.print(ZReportFormatter(c.settings.printerWidth).format(data), "Z${cfg?.currentSessionId ?: 0}")) {
+            PrintResult.Printed -> true
+            is PrintResult.Failed -> { PosLog.w("ZREPORT_PRINT_FAILED", "reason" to r.reason); false }
+        }
+        _closing.update { it?.copy(printed = printed) }
+    }
+
+    fun dismissClosing() {
+        val closed = _closing.value?.closed == true
+        _closing.value = null
+        if (closed) loadCatalog() // config now shows no open session
     }
 
     fun setQuery(q: String) = _sell.update { it.copy(query = q) }

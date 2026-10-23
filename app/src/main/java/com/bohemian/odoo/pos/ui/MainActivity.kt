@@ -142,6 +142,7 @@ fun SellScreen(vm: PosViewModel) {
             if (outbox > 0) Badge(containerColor = Color.Red) { Text("$outbox not synced to Odoo", color = Color.White) }
             if (unresolved.isNotEmpty()) { Spacer(Modifier.width(8.dp)); Badge(containerColor = Color(0xFFFF6F00)) { Text("${unresolved.size} payment(s) to check", color = Color.White) } }
             Spacer(Modifier.width(12.dp))
+            if (s.config?.sessionOpen == true) TextButton({ vm.startClose() }) { Text("Close session", color = Color.White) }
             TextButton({ vm.reopenSetup() }) { Text("Setup", color = Color.White) }
         }
         s.error?.let { Text(it, color = MaterialTheme.colorScheme.error, modifier = Modifier.padding(8.dp)) }
@@ -288,6 +289,51 @@ fun SellScreen(vm: PosViewModel) {
         }
     }
     PaymentDialog(s.pay, vm)
+    val closing by vm.closing.collectAsStateWithLifecycle()
+    closing?.let { ClosingDialog(it, cashControl = s.config?.cashControl == true, vm) }
+}
+
+@Composable
+private fun ClosingDialog(ui: ClosingUi, cashControl: Boolean, vm: PosViewModel) {
+    AlertDialog(
+        onDismissRequest = { if (!ui.busy) vm.dismissClosing() },
+        title = { Text(if (ui.closed) "✓ Session closed" else "Close session", fontWeight = FontWeight.Bold) },
+        text = {
+            Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                val sum = ui.summary
+                if (sum != null) {
+                    TotalRow("Sales (${sum.orderCount} orders)", sum.orderTotal)
+                    sum.cash?.let { Text("${it.name}: expected ${it.expected.format()} (opening ${it.opening.format()} + sales ${it.payments.format()})") }
+                    sum.nonCash.forEach { Text("${it.name}: ${it.count} · ${it.amount.format()}") }
+                }
+                if (!ui.closed && sum != null) {
+                    if (cashControl) OutlinedTextField(ui.counted, vm::setCountedCash, Modifier.fillMaxWidth(), singleLine = true,
+                        label = { Text("Cash counted in drawer (₹)") },
+                        keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Decimal))
+                    OutlinedTextField(ui.notes, vm::setClosingNotes, Modifier.fillMaxWidth(), label = { Text("Closing notes (optional)") })
+                }
+                if (ui.closed) Text(when (ui.printed) {
+                    true -> "Z-report printed."
+                    false -> "Z-report did not print — check paper."
+                    null -> "Printing Z-report…"
+                })
+                ui.error?.let { Text(it, color = MaterialTheme.colorScheme.error) }
+                if (ui.busy) LinearProgressIndicator(Modifier.fillMaxWidth())
+            }
+        },
+        confirmButton = {
+            when {
+                ui.closed -> Button({ vm.dismissClosing() }) { Text("DONE") }
+                else -> Button({ vm.confirmClose() }, enabled = !ui.busy && ui.summary != null) { Text("CLOSE SESSION") }
+            }
+        },
+        dismissButton = {
+            when {
+                ui.closed && ui.printed == false -> TextButton({ vm.printZReport() }) { Text("Print again") }
+                !ui.closed -> TextButton({ vm.dismissClosing() }, enabled = !ui.busy) { Text("Cancel") }
+            }
+        },
+    )
 }
 
 @Composable

@@ -116,12 +116,13 @@ val pineSdkPresent = pineSdkDir.resolve("com/pinelabs/billing").exists()
 
 This lets the project build and test everywhere without distributing the proprietary SDK.
 
-### Codebase stats (as of `59f5ba6`, 2026-10-23)
+### Codebase stats (2026-10-23, after Phase 4 session close)
 
-- **50 Kotlin files**, **4,736 lines** total (34 in `main`, 14 tests, real + stub gateway)
-- **14 unit test files, 100 `@Test` methods** covering: `Paise`, `BillingRef`, `PaymentCoordinator`,
-  `PaymentSplit`, `UpiPayee`, `ReceiptFormatter`, `TicketQr`, `OrderPayload`, `CustomerService`,
-  `GstFoundation`, `ZzCashService`, `ZzCashRedemption`, `ZzCashRewardCatalog`, `ZzCashPayload`
+- **53 Kotlin files**, **5,254 lines** total (35 in `main`, 16 tests, real + stub gateway)
+- **16 unit test files, 114 `@Test` methods** (all pass on the dev Mac) covering: `Paise`,
+  `BillingRef`, `PaymentCoordinator`, `PaymentSplit`, `UpiPayee`, `ReceiptFormatter`, `TicketQr`,
+  `ZReportFormatter`, `OrderPayload`, `CustomerService`, `SessionService`, `GstFoundation`,
+  `ZzCashService`, `ZzCashRedemption`, `ZzCashRewardCatalog`, `ZzCashPayload`
 
 ---
 
@@ -169,7 +170,7 @@ This lets the project build and test everywhere without distributing the proprie
 | I6 | Amount equality check — terminal amount must match requested | `payment/PaymentCoordinator.kt` |
 | I7 | Durable Outbox — paid orders in Room, idempotent via Odoo UUID dedup | `odoo/OrderSyncService.kt` |
 | I8 | Decoupled Printing — print failure never un-pays an order | `pine/PineSdkGateway.kt` |
-| I9 | Session Close Protection — can't close with unresolved attempts/outbox | `odoo/SessionService.kt` (**not yet** — close is Phase 4) |
+| I9 | Session Close Protection — can't close with unresolved attempts/outbox | `odoo/SessionService.kt` |
 | I10 | Zero Secrets Leakage — no keys/passwords/PANs/phones in source or logs | `core/Redact.kt` |
 
 ---
@@ -184,12 +185,12 @@ This lets the project build and test everywhere without distributing the proprie
 | **1** | Setup screen, catalogue from Odoo, cart, Odoo-priced totals | ✅ **in code** |
 | **2** | Payments: Card / UPI / BQR / Cash, journal, GetStatus, reconciliation, Odoo sync + outbox, receipt | ✅ **in code — needs on-device UAT** |
 | **3** | Customer lookup by phone, ZZ Cash balance + redeem | ✅ **in code — needs on-device UAT** (3a balance + 3b redeem; see `docs/ZZ_CASH.md`) |
-| **4** | Session open/close from the till, Z-report print, Void | 🔶 **started** — session open + gateway `void()` only; close, Z-report, Void flow not built |
+| **4** | Session open/close from the till, Z-report print, Void | 🔶 **4a in code** — session open/close (I9 enforced) + Z-report print; **4b Void/refund not built** |
 | **5** | Hardening: offline cache, kiosk mode, crash reporting, infosec checklist | ⬜ before PROD |
 
-**Where we are (2026-10-23):** code is through Phase 3 and Phase 4 has begun. Nothing has
-been run on the E700 yet, so the real gate is **UAT on device** (§10) — Phases 2 and 3 are
-unproven until the UAT script passes.
+**Where we are (2026-10-23):** code is through Phase 3 and Phase 4a (session close +
+Z-report). Next in code: 4b Void. Nothing has been run on the E700 yet, so the real gate
+is **UAT on device** (§10) — Phases 2–4 are unproven until the UAT script passes.
 
 **Built beyond the original plan:** split payment and Odoo 19 POS UI parity
 (`docs/UI_PARITY.md`), UPI payee (primary + fallback) with UPI IDs on Setup, Odoo e-bill QR
@@ -250,12 +251,17 @@ Diffed field-by-field against a captured web POS sale (`tools/payload-ref`). Mix
 carts are refused. `validate_coupon_programs` is not called. Not yet run on the E700, nor
 an outbox retry of a redeemed sale. Details and open items: `docs/ZZ_CASH.md`.
 
-**Phase 4 — Session & Void** 🔶 started
-Built: `SessionService.open()` (`pos.session.create` + `set_opening_control`) and
-`PosViewModel.openSession()`; `PaymentGateway.void()` wired to `TransactionType.VOID` in
-`PineSdkGateway` (nothing calls it yet).
-To build: close (`close_session_from_ui`) with Invariant I9 checks, Z-report print, Void
-flow in coordinator + UI (bank_code source to be confirmed at UAT), refund via Odoo order
+**Phase 4 — Session & Void** 🔶 4a built, 4b next
+**4a (built):** `SessionService.open()` (`pos.session.create` + `set_opening_control`).
+`SessionService.close()` follows the Odoo 19 web POS closing popup (`closing_popup.js`):
+flush the outbox → I9 check (no unresolved attempt, empty outbox; blocks before any Odoo
+call) → `post_closing_cash_details(counted_cash)` only when `pos.config.cash_control` →
+`update_closing_control_state_session(notes)` → `close_session_from_ui(bank_payment_method_diff_pairs=[])`.
+`{'successful': False}` answers are shown to the cashier, never retried. Closing figures and
+the Z-report come from `get_closing_control_data`; `ZReportFormatter` prints them after the
+close (print failure → "Print again", never blocks).
+**4b (next):** Void flow in coordinator + UI on top of `PaymentGateway.void()` (already wired
+to `TransactionType.VOID`; bank_code source to be confirmed at UAT), refund via Odoo order
 refund for settled transactions.
 
 **Phase 5 — Hardening** ⬜
@@ -410,6 +416,7 @@ company password manager + encrypted drive.
 | 8 | Void a card sale (same day) | Void accepted; note `bank_code` source |
 | 9 | Printer out of paper | Payment still SUCCESS; "reprint" offered |
 | 10 | Two taps on Pay | Second tap ignored (single in-flight) |
+| 11 | Close session with an unconfirmed payment, then resolve it and close | First close blocked (I9, nothing sent to Odoo); second closes, Z-report matches Odoo's session report |
 
 ---
 

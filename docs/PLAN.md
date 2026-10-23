@@ -42,6 +42,7 @@
 
 ### 4 — Session & Void (days 15–17)
 - Open session (`pos.session.create` + `set_opening_control`), close (`close_session_from_ui`).
+  **4a built:** close with I9 guard + Z-report from `get_closing_control_data` (see CLAUDE.md §5).
 - Void last card sale (UAT test to confirm `bank_code` source), refund via Odoo order refund.
 
 ### 5 — Hardening (days 18–21)
@@ -63,6 +64,7 @@
 | 8 | Void a card sale (same day) | Void accepted; note which field gave `bank_code` |
 | 9 | Printer out of paper | Payment still SUCCESS; "reprint" offered |
 | 10 | Two taps on Pay | Second tap ignored (single in-flight) |
+| 11 | Close session with an unconfirmed payment, then resolve it and close | First close blocked (I9, nothing sent to Odoo); second closes, Z-report matches Odoo's session report |
 
 ## Open items
 

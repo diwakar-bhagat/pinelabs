@@ -101,6 +101,9 @@ interface OutboxDao {
     @Query("SELECT COUNT(*) FROM order_outbox")
     fun observeCount(): Flow<Int>
 
+    @Query("SELECT COUNT(*) FROM order_outbox")
+    suspend fun count(): Int
+
     @Query("DELETE FROM order_outbox WHERE orderUuid = :uuid")
     suspend fun delete(uuid: String)
 
