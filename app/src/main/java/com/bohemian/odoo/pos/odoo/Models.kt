@@ -17,6 +17,8 @@ data class PosConfig(
     val defaultFiscalPositionId: Int? = null,
     /** pos.config.fiscal_position_ids — the only positions selectable on this till. */
     val fiscalPositionIds: List<Int> = emptyList(),
+    /** pos.config.cash_control (computed: a cash-count method exists) — closing needs counted cash. */
+    val cashControl: Boolean = false,
 )
 
 /** res.company GST settings, needed before the till may sell. */

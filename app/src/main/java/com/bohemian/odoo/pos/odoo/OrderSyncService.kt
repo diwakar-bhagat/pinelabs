@@ -86,6 +86,16 @@ class OrderSyncService(
         return sent
     }
 
+    /** Session close: try every outbox order now, ignoring backoff (the web POS syncs before closing too). */
+    suspend fun flushAll(): Int {
+        var sent = 0
+        for (e in outbox.due(Long.MAX_VALUE)) {
+            val payload = odoo.json.parseToJsonElement(e.payloadJson).jsonObject
+            if (trySend(e.orderUuid, payload, e.attempts)) sent++
+        }
+        return sent
+    }
+
     private suspend fun trySend(uuid: String, payload: JsonObject, attempts: Int = 0): Boolean = try {
         odoo.call("pos.order", "sync_from_ui", payload)
         outbox.delete(uuid)

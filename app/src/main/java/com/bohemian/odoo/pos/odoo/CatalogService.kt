@@ -53,6 +53,7 @@ class CatalogService(private val odoo: OdooJson2Client) {
         invoiceJournalId = m2oId("invoice_journal_id"),
         defaultFiscalPositionId = m2oId("default_fiscal_position_id"),
         fiscalPositionIds = ids("fiscal_position_ids"),
+        cashControl = bool("cash_control"),
     )
 
     private fun JsonObject.toProduct() = Product(
@@ -86,6 +87,7 @@ class CatalogService(private val odoo: OdooJson2Client) {
         val CONFIG_FIELDS = listOf(
             "name", "current_session_id", "current_session_state", "payment_method_ids",
             "company_id", "invoice_journal_id", "default_fiscal_position_id", "fiscal_position_ids",
+            "cash_control",
         )
     }
 }

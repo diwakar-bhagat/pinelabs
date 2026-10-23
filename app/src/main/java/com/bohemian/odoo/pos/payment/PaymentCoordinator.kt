@@ -7,6 +7,7 @@ import com.bohemian.odoo.pos.pine.GatewayResult
 import com.bohemian.odoo.pos.pine.PayMode
 import com.bohemian.odoo.pos.pine.PaymentGateway
 import com.bohemian.odoo.pos.pine.SaleRequest
+import com.bohemian.odoo.pos.pine.VoidRequest
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.NonCancellable
 import kotlinx.coroutines.delay
@@ -38,6 +39,7 @@ sealed interface PaymentOutcome {
 class PaymentCoordinator(
     private val gateway: () -> PaymentGateway,
     private val journal: PaymentJournal,
+    private val voids: VoidJournal,
     private val refs: () -> BillingRefGenerator,
     private val policy: StatusPolicy = StatusPolicy(),
     private val clock: () -> Long = System::currentTimeMillis,
@@ -109,6 +111,100 @@ class PaymentCoordinator(
                     PaymentOutcome.Unresolved(journal.get(fresh.billingRef)!!)
                 }
             }
+        }
+    }
+
+    // ------------------------------------------------------------------ void (Phase 4b)
+
+    /**
+     * Void a confirmed card sale on the terminal. Same rules as a sale: one operation in
+     * flight (shared mutex), persisted before the SDK call, amount must match (I6), and an
+     * ambiguous outcome is never replayed (HARD RULE 5) — it goes to NEEDS_REVIEW.
+     */
+    suspend fun void(saleRef: String): VoidOutcome = withContext(NonCancellable) {
+        mutex.withLock {
+            val sale = journal.get(saleRef) ?: return@withLock VoidOutcome.Refused("Payment $saleRef not found")
+            if (!sale.state.isPaid) return@withLock VoidOutcome.Refused("Only a paid sale can be voided")
+            if (sale.mode != PayMode.CARD) return@withLock VoidOutcome.Refused("Only card sales can be voided on the terminal")
+            val originalTxnId = sale.details?.transactionId
+                ?: return@withLock VoidOutcome.Refused("No terminal transaction id for $saleRef — void it from the terminal menu")
+            voids.forSale(saleRef).firstOrNull { it.state != VoidState.FAILED }?.let {
+                return@withLock VoidOutcome.Refused("Sale $saleRef already has a void (${it.billingRef}, ${it.state})")
+            }
+
+            val now = clock()
+            val v = VoidAttempt(
+                billingRef = refs().next(), saleRef = saleRef, orderUuid = sale.orderUuid, amount = sale.amount,
+                state = VoidState.STARTING, createdAt = now, updatedAt = now,
+            )
+            voids.insert(v) // HARD RULE 4: persist before acting
+            PosLog.i("VOID_START", "ref" to v.billingRef, "sale" to saleRef, "amount" to v.amount)
+
+            val result = gateway().void(VoidRequest(v.billingRef, v.amount, PINE_VOID_BANK_CODE, originalTxnId)) { eventId ->
+                backgroundScope.launch { voids.setEventId(v.billingRef, eventId, clock()) }
+            }
+            PosLog.i("VOID_RESPONSE", "ref" to v.billingRef, "result" to result::class.simpleName)
+            settleVoid(v, result)
+        }
+    }
+
+    /** Supervisor decision for a void in NEEDS_REVIEW, after checking the terminal report. */
+    suspend fun resolveVoid(billingRef: String, voided: Boolean): VoidOutcome = mutex.withLock {
+        val v = voids.get(billingRef) ?: error("no void $billingRef")
+        check(v.state == VoidState.NEEDS_REVIEW) { "void not in review: ${v.state}" }
+        val state = if (voided) VoidState.VOIDED else VoidState.FAILED
+        voids.transition(billingRef, state, clock(), note = if (voided) "manual: voided on terminal" else "manual: not voided")
+        PosLog.w("VOID_MANUAL_RESOLVE", "ref" to billingRef, "voided" to voided)
+        val fresh = voids.get(billingRef)!!
+        if (voided) VoidOutcome.Voided(fresh) else VoidOutcome.NotVoided(fresh, "Confirmed not voided")
+    }
+
+    /** Supervisor confirms the refund for a voided sale is recorded in Odoo. Closes the void. */
+    suspend fun confirmOdooRefund(billingRef: String) = mutex.withLock {
+        val v = voids.get(billingRef) ?: error("no void $billingRef")
+        check(v.state == VoidState.VOIDED) { "void not voided: ${v.state}" }
+        voids.transition(billingRef, VoidState.ODOO_REFUNDED, clock(), note = "refund recorded in Odoo")
+        PosLog.i("VOID_ODOO_REFUNDED", "ref" to billingRef)
+    }
+
+    /** App start: a void left STARTING/IN_FLIGHT by a dead process has an unknown outcome. */
+    internal suspend fun reconcileVoids(): Int = withContext(NonCancellable) {
+        mutex.withLock {
+            val stuck = voids.open().filter { it.state == VoidState.STARTING || it.state == VoidState.IN_FLIGHT }
+            stuck.forEach {
+                voids.transition(it.billingRef, VoidState.NEEDS_REVIEW, clock(), note = "App restarted during void — verify on terminal")
+            }
+            stuck.size
+        }
+    }
+
+    private suspend fun settleVoid(v: VoidAttempt, r: GatewayResult): VoidOutcome = when (r) {
+        is GatewayResult.Approved -> {
+            val observed = r.details.amountPaise
+            if (observed != null && observed != v.amount.value) {
+                // INVARIANT I6 applies to reversals too.
+                PosLog.e("VOID_AMOUNT_MISMATCH", null, "ref" to v.billingRef, "expected" to v.amount.value, "observed" to observed)
+                voids.transition(v.billingRef, VoidState.NEEDS_REVIEW, clock(), details = r.details,
+                    note = "Amount mismatch! Sale: ${v.amount.value} paise, Terminal reported: $observed paise")
+                VoidOutcome.Unresolved(voids.get(v.billingRef)!!)
+            } else {
+                voids.transition(v.billingRef, VoidState.VOIDED, clock(), details = r.details, note = "Odoo refund pending")
+                PosLog.i("VOID_SUCCESS", "ref" to v.billingRef)
+                VoidOutcome.Voided(voids.get(v.billingRef)!!)
+            }
+        }
+        is GatewayResult.Declined -> {
+            voids.transition(v.billingRef, VoidState.FAILED, clock(), details = r.details, note = r.message)
+            VoidOutcome.NotVoided(voids.get(v.billingRef)!!, r.message ?: "Void declined by terminal")
+        }
+        is GatewayResult.Rejected -> {
+            voids.transition(v.billingRef, VoidState.FAILED, clock(), note = "${r.kind}: ${r.detail}")
+            VoidOutcome.NotSent(voids.get(v.billingRef)!!, friendly(r.kind))
+        }
+        is GatewayResult.Ambiguous -> {
+            voids.transition(v.billingRef, VoidState.NEEDS_REVIEW, clock(), note = "${r.kind}: ${r.detail}")
+            PosLog.w("VOID_NEEDS_REVIEW", "ref" to v.billingRef, "kind" to r.kind)
+            VoidOutcome.Unresolved(voids.get(v.billingRef)!!)
         }
     }
 

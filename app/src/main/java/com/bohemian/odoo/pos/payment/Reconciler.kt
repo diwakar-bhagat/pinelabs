@@ -13,6 +13,7 @@ class Reconciler(
     private val onPaid: suspend (PaymentAttempt) -> Unit,
 ) {
     suspend fun run(): List<PaymentOutcome> {
+        coordinator.reconcileVoids().let { if (it > 0) PosLog.w("RECONCILE_VOIDS_TO_REVIEW", "count" to it) }
         val pending = journal.unresolved().filter { it.state != AttemptState.NEEDS_REVIEW }
         if (pending.isNotEmpty()) PosLog.w("RECONCILE_START", "count" to pending.size)
         return pending.map { a ->

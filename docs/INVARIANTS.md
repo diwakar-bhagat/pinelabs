@@ -12,5 +12,5 @@ Every phase and feature modification in the application must preserve these inva
 | **I6** | **Amount equality check.** An attempt is marked paid ONLY if the amount returned by the terminal matches the requested `attempt.amount`. Mismatches transition to `NEEDS_REVIEW`. | `payment/PaymentCoordinator.kt` |
 | **I7** | **Durable Outbox.** Paid orders are written to a Room Outbox table first. Retries are idempotent because Odoo ignores duplicate order UUIDs. | `odoo/OrderSyncService.kt` |
 | **I8** | **Decoupled Printing.** Printing is separate from payment state; print failure never un-pays an order. | `pine/PineSdkGateway.kt` |
-| **I9** | **Session Close Protection.** A POS session cannot close with unresolved payment attempts or pending outbox items. | `odoo/SessionService.kt` |
+| **I9** | **Session Close Protection.** A POS session cannot close with unresolved payment attempts, pending outbox items, or open voids (in review, or voided on the terminal with the Odoo refund not yet recorded). | `odoo/SessionService.kt` |
 | **I10** | **Zero Secrets Leakage.** No API keys, keystore passwords, full card PANs, or customer phone numbers in source, committed files, or Logcat. | `core/Redact.kt` |

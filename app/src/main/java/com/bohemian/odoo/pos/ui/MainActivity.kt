@@ -34,7 +34,12 @@ import com.bohemian.odoo.pos.core.Paise
 import com.bohemian.odoo.pos.odoo.ZzCashRules
 import com.bohemian.odoo.pos.payment.PaymentOutcome
 import com.bohemian.odoo.pos.payment.UpiPayee
+import com.bohemian.odoo.pos.payment.VoidState
+import com.bohemian.odoo.pos.data.VoidAttemptEntity
 import com.bohemian.odoo.pos.pine.PayMode
+import java.text.SimpleDateFormat
+import java.util.Date
+import java.util.Locale
 
 class MainActivity : ComponentActivity() {
     private val vm: PosViewModel by lazy {
@@ -142,6 +147,8 @@ fun SellScreen(vm: PosViewModel) {
             if (outbox > 0) Badge(containerColor = Color.Red) { Text("$outbox not synced to Odoo", color = Color.White) }
             if (unresolved.isNotEmpty()) { Spacer(Modifier.width(8.dp)); Badge(containerColor = Color(0xFFFF6F00)) { Text("${unresolved.size} payment(s) to check", color = Color.White) } }
             Spacer(Modifier.width(12.dp))
+            TextButton({ vm.startVoid() }) { Text("Void", color = Color.White) }
+            if (s.config?.sessionOpen == true) TextButton({ vm.startClose() }) { Text("Close session", color = Color.White) }
             TextButton({ vm.reopenSetup() }) { Text("Setup", color = Color.White) }
         }
         s.error?.let { Text(it, color = MaterialTheme.colorScheme.error, modifier = Modifier.padding(8.dp)) }
@@ -152,6 +159,8 @@ fun SellScreen(vm: PosViewModel) {
             }
         }
         if (unresolved.isNotEmpty()) UnresolvedBar(unresolved.first().billingRef, unresolved.first().mode, vm)
+        val openVoids by vm.openVoids.collectAsStateWithLifecycle()
+        openVoids.firstOrNull()?.let { VoidBar(it, vm) }
 
         Row(Modifier.fillMaxSize()) {
             // Products
@@ -288,6 +297,110 @@ fun SellScreen(vm: PosViewModel) {
         }
     }
     PaymentDialog(s.pay, vm)
+    val closing by vm.closing.collectAsStateWithLifecycle()
+    closing?.let { ClosingDialog(it, cashControl = s.config?.cashControl == true, vm) }
+    val voiding by vm.voiding.collectAsStateWithLifecycle()
+    voiding?.let { VoidDialog(it, vm) }
+}
+
+/** A void that still needs a person: review on the terminal, or the Odoo refund. */
+@Composable
+private fun VoidBar(v: VoidAttemptEntity, vm: PosViewModel) {
+    Row(Modifier.fillMaxWidth().background(Color(0xFFFFCDD2)).padding(8.dp), verticalAlignment = Alignment.CenterVertically) {
+        val amount = Paise(v.amountPaise).format()
+        when (v.state) {
+            VoidState.NEEDS_REVIEW.name -> {
+                Text("Void ${v.billingRef} ($amount) not confirmed. Check the terminal report. ", Modifier.weight(1f))
+                OutlinedButton({ vm.resolveVoid(v.billingRef, voided = true) }) { Text("Supervisor: VOIDED") }
+                Spacer(Modifier.width(6.dp))
+                OutlinedButton({ vm.resolveVoid(v.billingRef, voided = false) }) { Text("Supervisor: NOT voided") }
+            }
+            VoidState.VOIDED.name -> {
+                Text("Sale ${v.saleRef} voided ($amount). Refund it in Odoo, then confirm. ", Modifier.weight(1f))
+                OutlinedButton({ vm.confirmOdooRefund(v.billingRef) }) { Text("Refund recorded in Odoo") }
+            }
+            else -> Text("Void ${v.billingRef} in progress…", Modifier.weight(1f))
+        }
+    }
+}
+
+@Composable
+private fun VoidDialog(ui: VoidUi, vm: PosViewModel) {
+    AlertDialog(
+        onDismissRequest = { if (!ui.busy) vm.dismissVoid() },
+        title = { Text("Void a card sale", fontWeight = FontWeight.Bold) },
+        text = {
+            Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                val confirm = ui.confirm
+                when {
+                    confirm != null -> Text("Void ${confirm.amount.format()} — card ****${confirm.details?.last4 ?: "?"}, " +
+                        "RRN ${confirm.details?.rrn ?: "?"}?\nThis reverses the charge on the terminal. Same-day, unsettled sales only.")
+                    ui.message == null && !ui.busy && ui.sales.isEmpty() -> Text("No card sales today.")
+                    ui.message == null -> LazyColumn(Modifier.heightIn(max = 320.dp)) {
+                        items(ui.sales, key = { it.billingRef }) { a ->
+                            Row(Modifier.fillMaxWidth().clickable { vm.chooseVoid(a) }.padding(vertical = 8.dp)) {
+                                Text(SimpleDateFormat("HH:mm", Locale("en", "IN")).format(Date(a.createdAt)), Modifier.width(56.dp))
+                                Text("****${a.details?.last4 ?: "?"}  ${a.billingRef}", Modifier.weight(1f))
+                                Text(a.amount.format(), fontWeight = FontWeight.Bold)
+                            }
+                        }
+                    }
+                }
+                ui.message?.let { Text(it) }
+                if (ui.busy) LinearProgressIndicator(Modifier.fillMaxWidth())
+            }
+        },
+        confirmButton = {
+            if (ui.confirm != null) Button({ vm.confirmVoid() }, enabled = !ui.busy) { Text("VOID ON TERMINAL") }
+            else Button({ vm.dismissVoid() }, enabled = !ui.busy) { Text(if (ui.message != null) "DONE" else "CLOSE") }
+        },
+        dismissButton = {
+            if (ui.confirm != null) TextButton({ vm.chooseVoid(null) }, enabled = !ui.busy) { Text("Back") }
+        },
+    )
+}
+
+@Composable
+private fun ClosingDialog(ui: ClosingUi, cashControl: Boolean, vm: PosViewModel) {
+    AlertDialog(
+        onDismissRequest = { if (!ui.busy) vm.dismissClosing() },
+        title = { Text(if (ui.closed) "✓ Session closed" else "Close session", fontWeight = FontWeight.Bold) },
+        text = {
+            Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                val sum = ui.summary
+                if (sum != null) {
+                    TotalRow("Sales (${sum.orderCount} orders)", sum.orderTotal)
+                    sum.cash?.let { Text("${it.name}: expected ${it.expected.format()} (opening ${it.opening.format()} + sales ${it.payments.format()})") }
+                    sum.nonCash.forEach { Text("${it.name}: ${it.count} · ${it.amount.format()}") }
+                }
+                if (!ui.closed && sum != null) {
+                    if (cashControl) OutlinedTextField(ui.counted, vm::setCountedCash, Modifier.fillMaxWidth(), singleLine = true,
+                        label = { Text("Cash counted in drawer (₹)") },
+                        keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Decimal))
+                    OutlinedTextField(ui.notes, vm::setClosingNotes, Modifier.fillMaxWidth(), label = { Text("Closing notes (optional)") })
+                }
+                if (ui.closed) Text(when (ui.printed) {
+                    true -> "Z-report printed."
+                    false -> "Z-report did not print — check paper."
+                    null -> "Printing Z-report…"
+                })
+                ui.error?.let { Text(it, color = MaterialTheme.colorScheme.error) }
+                if (ui.busy) LinearProgressIndicator(Modifier.fillMaxWidth())
+            }
+        },
+        confirmButton = {
+            when {
+                ui.closed -> Button({ vm.dismissClosing() }) { Text("DONE") }
+                else -> Button({ vm.confirmClose() }, enabled = !ui.busy && ui.summary != null) { Text("CLOSE SESSION") }
+            }
+        },
+        dismissButton = {
+            when {
+                ui.closed && ui.printed == false -> TextButton({ vm.printZReport() }) { Text("Print again") }
+                !ui.closed -> TextButton({ vm.dismissClosing() }, enabled = !ui.busy) { Text("Cancel") }
+            }
+        },
+    )
 }
 
 @Composable
