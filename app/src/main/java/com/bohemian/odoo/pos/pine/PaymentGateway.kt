@@ -80,7 +80,13 @@ sealed interface GatewayResult {
     data class Rejected(val kind: String, val detail: String?) : GatewayResult
 }
 
-data class PrintLine(val text: String, val center: Boolean = false, val bold: Boolean = false)
+data class PrintLine(
+    val text: String,
+    val center: Boolean = false,
+    val bold: Boolean = false,
+    /** Base64 PNG to print instead of text (e.g. the e-bill QR). */
+    val imageBase64: String? = null,
+)
 
 sealed interface PrintResult {
     data object Printed : PrintResult

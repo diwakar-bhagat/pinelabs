@@ -21,6 +21,8 @@ data class ReceiptData(
     val customerName: String?,
     val footer: List<String>,
     val reprint: Boolean = false,
+    /** Base64 PNG of the e-bill QR (Odoo ticket link). Null when the order is not yet in Odoo. */
+    val qrImageBase64: String? = null,
 )
 
 /**
@@ -59,6 +61,10 @@ class ReceiptFormatter(private val width: Int) {
         r.paymentRef?.let { kv("Ref", it) }
         r.authCode?.let { kv("Auth", it) }
         rule('=')
+        r.qrImageBase64?.let {
+            add(PrintLine("", center = true, imageBase64 = it))
+            center("Scan for your e-bill")
+        }
         r.footer.forEach { center(it) }
     }
 
