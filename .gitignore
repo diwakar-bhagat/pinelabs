@@ -7,6 +7,7 @@ local.properties
 captures/
 # Secrets & vendor binaries — never commit
 keystore.properties
+upi.properties
 *.jks
 *.keystore
 app/libs/pine-billing-sdk-android-maven/

@@ -21,6 +21,19 @@ if (!pineSdkPresent) {
 val pineUatAppId = "771aabd360b64cd59d11806bd88d87b4"
 val pineProdAppId = ""   // TODO(pine): issued after UAT sign-off
 
+// ---- UPI IDs pre-filled on the Setup screen ----------------------------------
+// From git-ignored upi.properties (see upi.properties.example), so the public repo never holds
+// them. Only defaults: the Setup screen can still change them on the device.
+val upiProps = Properties().apply {
+    val f = rootProject.file("upi.properties")
+    if (f.exists()) f.inputStream().use { load(it) }
+}
+fun upiDefault(key: String): String {
+    val v = upiProps.getProperty(key, "").trim()
+    require(Regex("^[A-Za-z0-9._-]*(@[A-Za-z0-9.-]+)?$").matches(v)) { "upi.properties: $key is not a UPI ID" }
+    return v
+}
+
 // ---- Release signing ---------------------------------------------------------
 val keystoreProps = Properties().apply {
     val f = rootProject.file("keystore.properties")
@@ -42,6 +55,8 @@ android {
         buildConfigField("String", "ODOO_BASE_URL", "\"https://zenzebra1.odoo.com\"")
         buildConfigField("String", "ODOO_DB", "\"zenzebra1\"")
         buildConfigField("boolean", "PINE_SDK_PRESENT", pineSdkPresent.toString())
+        buildConfigField("String", "UPI_PRIMARY_DEFAULT", "\"${upiDefault("upi.primary")}\"")
+        buildConfigField("String", "UPI_FALLBACK_DEFAULT", "\"${upiDefault("upi.fallback")}\"")
 
         ndk { abiFilters += listOf("arm64-v8a", "armeabi-v7a") } // SDK ships only these
     }

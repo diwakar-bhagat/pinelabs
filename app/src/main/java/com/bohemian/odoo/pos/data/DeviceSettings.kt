@@ -4,6 +4,7 @@ import android.content.Context
 import android.content.SharedPreferences
 import androidx.security.crypto.EncryptedSharedPreferences
 import androidx.security.crypto.MasterKey
+import com.bohemian.odoo.pos.BuildConfig
 
 /** Per-terminal settings. The Odoo API key lives only here, encrypted at rest. */
 class DeviceSettings(context: Context) {
@@ -49,14 +50,15 @@ class DeviceSettings(context: Context) {
     /**
      * Business UPI collection IDs, entered on the Setup screen. Primary is used normally,
      * backup when the primary's bank is down. Business identifiers, not secrets: kept on the
-     * device only, never in the repo.
+     * device, never in the repo. Until Setup saves a value, the build's defaults apply
+     * (BuildConfig, from the git-ignored upi.properties), so a reinstall comes back pre-filled.
      */
     var upiPrimaryVpa: String
-        get() = prefs.getString("upi_primary_vpa", "") ?: ""
+        get() = prefs.getString("upi_primary_vpa", null) ?: BuildConfig.UPI_PRIMARY_DEFAULT
         set(v) = prefs.edit().putString("upi_primary_vpa", v.trim()).apply()
 
     var upiFallbackVpa: String
-        get() = prefs.getString("upi_fallback_vpa", "") ?: ""
+        get() = prefs.getString("upi_fallback_vpa", null) ?: BuildConfig.UPI_FALLBACK_DEFAULT
         set(v) = prefs.edit().putString("upi_fallback_vpa", v.trim()).apply()
 
     /**

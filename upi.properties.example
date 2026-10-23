@@ -1,0 +1,4 @@
+# Copy to upi.properties (git-ignored) and fill in. Pre-fills the UPI IDs on the Setup screen
+# in every APK built on this machine. The Setup screen can still change them on the device.
+upi.primary=name@bank
+upi.fallback=
