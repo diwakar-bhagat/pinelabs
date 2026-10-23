@@ -33,6 +33,7 @@ import com.bohemian.odoo.pos.PosApp
 import com.bohemian.odoo.pos.core.Paise
 import com.bohemian.odoo.pos.odoo.ZzCashRules
 import com.bohemian.odoo.pos.payment.PaymentOutcome
+import com.bohemian.odoo.pos.payment.UpiPayee
 import com.bohemian.odoo.pos.pine.PayMode
 
 class MainActivity : ComponentActivity() {
@@ -111,6 +112,11 @@ fun SetupScreen(vm: PosViewModel) {
                 Switch(s.useFake, { vm.setUseFake(it) }); Spacer(Modifier.width(8.dp))
                 Text("Use FAKE payment gateway (debug only — no real money)")
             }
+            Text("6. Business UPI IDs (shown on the UPI QR)")
+            OutlinedTextField(s.upiPrimary, vm::setUpiPrimary, Modifier.fillMaxWidth(), singleLine = true,
+                label = { Text("Primary UPI ID (name@bank)") })
+            OutlinedTextField(s.upiFallback, vm::setUpiFallback, Modifier.fillMaxWidth(), singleLine = true,
+                label = { Text("Backup UPI ID, used if the primary bank is down (optional)") })
             Button({ vm.finishSetup() }, enabled = !s.busy) { Text("Start selling") }
         }
         if (s.busy) LinearProgressIndicator(Modifier.fillMaxWidth())
@@ -257,6 +263,21 @@ fun SellScreen(vm: PosViewModel) {
                 }
 
                 val canPay = t != null && !s.pricing && s.pay == PayUi.Idle && s.config?.sessionOpen == true
+                // UPI ID toggle: shown before the UPI payment, on this same screen.
+                vm.upiPayee()?.let { payee ->
+                    Row(Modifier.fillMaxWidth().padding(top = 8.dp), verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                        Text("UPI ID", fontSize = 12.sp, color = Color.Gray)
+                        if (payee.fallback == null) {
+                            Text(payee.primary, fontSize = 12.sp)
+                        } else {
+                            FilterChip(!s.upiUseFallback, { vm.setUpiUseFallback(false) },
+                                label = { Text(payee.primary, fontSize = 12.sp) })
+                            FilterChip(s.upiUseFallback, { vm.setUpiUseFallback(true) },
+                                label = { Text(payee.fallback, fontSize = 12.sp) })
+                        }
+                    }
+                }
                 Row(Modifier.fillMaxWidth().padding(top = 8.dp), horizontalArrangement = Arrangement.spacedBy(6.dp)) {
                     PayButton("CARD", canPay, Modifier.weight(1f)) { vm.payWithTerminal(PayMode.CARD) }
                     PayButton("UPI", canPay, Modifier.weight(1f)) { vm.payWithTerminal(PayMode.UPI) }
