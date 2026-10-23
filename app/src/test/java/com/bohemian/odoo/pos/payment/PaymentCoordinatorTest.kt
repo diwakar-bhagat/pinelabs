@@ -197,7 +197,7 @@ class PaymentCoordinatorTest {
         return (c.pay("o1", amt, PayMode.CARD) as PaymentOutcome.Paid).attempt.billingRef
     }
 
-    @Test fun `void sends a new ref, the sale amount, bank code and original txn id`() = runTest {
+    @Test fun `void sends a new ref, the sale amount and bank code, and no invoice number`() = runTest {
         val c = coordinator()
         val saleRef = paidCardSale(c)
         gw.voidResults += GatewayResult.Approved(TxnDetails(responseCode = "00", amountPaise = 52800))
@@ -209,7 +209,7 @@ class PaymentCoordinatorTest {
         assertTrue(req.billingRef != saleRef)
         assertEquals(amt, req.amount)
         assertEquals(PINE_VOID_BANK_CODE, req.bankCode)
-        assertEquals("TXN77", req.originalTransactionId)
+        assertEquals(null, req.invoiceNumber) // SDK 2.0: source of the sale's InvoiceNo on AppToApp not documented
         val v = voids.rows.values.single()
         assertEquals(VoidState.VOIDED, v.state) // open until the Odoo refund is recorded
         assertTrue(v.state.isOpen)

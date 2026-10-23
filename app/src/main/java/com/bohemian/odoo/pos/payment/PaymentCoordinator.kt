@@ -126,7 +126,8 @@ class PaymentCoordinator(
             val sale = journal.get(saleRef) ?: return@withLock VoidOutcome.Refused("Payment $saleRef not found")
             if (!sale.state.isPaid) return@withLock VoidOutcome.Refused("Only a paid sale can be voided")
             if (sale.mode != PayMode.CARD) return@withLock VoidOutcome.Refused("Only card sales can be voided on the terminal")
-            val originalTxnId = sale.details?.transactionId
+            // Only a sale the terminal itself confirmed (it returned a transaction id) is voided from the till.
+            sale.details?.transactionId
                 ?: return@withLock VoidOutcome.Refused("No terminal transaction id for $saleRef — void it from the terminal menu")
             voids.forSale(saleRef).firstOrNull { it.state != VoidState.FAILED }?.let {
                 return@withLock VoidOutcome.Refused("Sale $saleRef already has a void (${it.billingRef}, ${it.state})")
@@ -140,7 +141,7 @@ class PaymentCoordinator(
             voids.insert(v) // HARD RULE 4: persist before acting
             PosLog.i("VOID_START", "ref" to v.billingRef, "sale" to saleRef, "amount" to v.amount)
 
-            val result = gateway().void(VoidRequest(v.billingRef, v.amount, PINE_VOID_BANK_CODE, originalTxnId)) { eventId ->
+            val result = gateway().void(VoidRequest(v.billingRef, v.amount, PINE_VOID_BANK_CODE, invoiceNumber = null)) { eventId ->
                 backgroundScope.launch { voids.setEventId(v.billingRef, eventId, clock()) }
             }
             PosLog.i("VOID_RESPONSE", "ref" to v.billingRef, "result" to result::class.simpleName)

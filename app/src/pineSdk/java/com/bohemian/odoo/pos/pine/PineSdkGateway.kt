@@ -95,7 +95,7 @@ class PineSdkGateway : PaymentGateway {
                 billingRef = request.billingRef,
                 amount = request.amount,
                 bankCode = request.bankCode,
-                originalTransactionId = request.originalTransactionId,
+                invoiceNumber = request.invoiceNumber,
                 isSwipe = false,
             ),
             onStarted = onStarted,
@@ -165,6 +165,8 @@ class PineSdkGateway : PaymentGateway {
                     override fun onResult(result: TransactionResult) {
                         // HARD RULE 6: declines arrive here with status FAILED.
                         val details = result.toDetails()
+                        // UAT aid: which extra fields this terminal returns (keys only — values may hold PII).
+                        result.metadata?.keys?.takeIf { it.isNotEmpty() }?.let { PosLog.i("PINE_RESULT_META_KEYS", "keys" to it.sorted()) }
                         finish(
                             if (result.status == TransactionStatus.SUCCESS) GatewayResult.Approved(details)
                             else GatewayResult.Declined(result.responseCode, result.responseMessage, details)
@@ -232,14 +234,16 @@ class PineSdkGateway : PaymentGateway {
         amount: Paise,
         customerMobile: String? = null,
         bankCode: String? = null,
-        originalTransactionId: String? = null,
+        invoiceNumber: String? = null,
         isSwipe: Boolean? = null,
     ) = TransactionOptions(
-        currency = CurrencyCode.INR,
+        // SDK 2.0.0 [migration/1.0-to-2.0]: ISO-4217 string, not the CurrencyCode enum.
+        currency = "INR",
         billingReferenceId = billingRef,
-        // UDL v0.19: `i64? amount` → Long. (Older docs said u64 → use amount.value.toULong() if 1.0.0 wants ULong.)
+        // `i64? amount` → Long (checked against classes.jar 2026-10-23).
         amount = amount.value,
-        originalTransactionId = originalTransactionId,
+        // SDK 2.0.0 removed original_transaction_id; invoice_number maps to upstream InvoiceNo.
+        invoiceNumber = invoiceNumber,
         bankCode = bankCode,
         originalBatchNumber = null,
         originalRoc = null,

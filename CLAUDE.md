@@ -44,7 +44,7 @@ uses **Odoo 19 (Odoo Online, `zenzebra1.odoo.com`) as the system of record**.
 | Company | Bohemian Curations Pvt Ltd (brand: ZenZebra) |
 | Device | PAX E700 ("Aries6"), PayDroid **Android 7.1.2 (API 25)**, firmware Scorpio V10.1.32 |
 | Printer | Pine SDK `print`, line width **24 / 32 / 48 chars** (configurable) |
-| Pine SDK | `com.pinelabs.billing:pine-billing-sdk-android` **1.0.0** GA (first stable, SemVer-frozen) |
+| Pine SDK | `com.pinelabs.billing:pine-billing-sdk-android` **2.0.0** (latest stable, 2026-10-24; 1.0.0 kept in `app/libs` for rollback) |
 | Pine App ID (UAT) | `771aabd360b64cd59d11806bd88d87b4` |
 | Pine App ID (PROD) | _not issued yet_ — Pine registers UAT and PROD separately |
 | Odoo | 19.0 Enterprise, Odoo Online (no custom Python modules possible; Odoo.sh is ruled out) |
@@ -262,8 +262,9 @@ the Z-report come from `get_closing_control_data`; `ZReportFormatter` prints the
 close (print failure → "Print again", never blocks).
 **4b (built):** `PaymentCoordinator.void(saleRef)` — paid **card** sales only, sharing the
 payment mutex. Persists a `void_attempt` row (Room v2, migration 1→2) before the SDK call;
-sends a new `billing_reference_id`, the sale amount, `bank_code = PINE_VOID_BANK_CODE`
-("01") and `original_transaction_id` = the sale's `TransactionResult.transaction_id`.
+sends a new `billing_reference_id`, the sale amount and `bank_code = PINE_VOID_BANK_CODE`
+("01"); `invoice_number` null (SDK 2.0 removed `original_transaction_id`; the AppToApp source of
+the sale's InvoiceNo is undocumented — confirm at UAT case 8).
 I6 amount check; ambiguous → `NEEDS_REVIEW`, never replayed; declined (e.g. settled) →
 `FAILED`, sale stands, retry allowed; one live void per sale. Reconciler sends voids
 interrupted by a crash to review. A `VOIDED` void stays open (red bar, blocks close via I9)
@@ -479,9 +480,9 @@ company password manager + encrypted drive.
 
 - [ ] PROD Pine Application ID (Pine issues after UAT sign-off)
 - [ ] Confirm `bank_code = "01"` for ZenZebra's acquirer (UAT case 8)
-- [ ] Confirm Void's `original_transaction_id` = sale `transaction_id` (assumed). Pine docs (MCP, 2026-10-24): the 1.0.0 AppToApp Void template omits it; 2.0.0 removes it and uses `invoice_number` instead (UAT case 8)
+- [ ] Void on SDK 2.0 sends `invoice_number = null`. Confirm at UAT case 8 whether MasterApp needs the sale's InvoiceNo, and where it comes from. `PINE_RESULT_META_KEYS` in logcat lists the extra result fields the terminal returns
 - [ ] **Blocker:** UAT E700 has Plutus Plus (`com.pinelabs.plutusplus`) but no `com.pinelabs.masterapp`. Pine must provision the AppToApp payments application / Master service (see `docs/PINE_LABS_VERIFIED.md` §6)
-- [ ] Upgrade Pine SDK 1.0.0 → 2.0.0 (latest stable; `migration/1.0-to-2.0`)
+- [x] Upgrade Pine SDK 1.0.0 → 2.0.0 (2026-10-24, from the Pine POS MCP; `currency` string, `invoice_number`)
 - [ ] Capture a web POS refund `sync_from_ui` payload on the UAT config and diff it against `RefundService.buildPayload` (`tools/payload_diff.py`) — 4c was built from Odoo 19 source, not a capture
 - [x] Confirm SDK 1.0.0 `init` arity and `amount` type against `classes.jar` in AAR (2026-10-23)
 - [ ] Add E700 `pos.config` id to WhatsApp / ZZ Cash automation filters in Odoo
