@@ -8,6 +8,7 @@ import com.bohemian.odoo.pos.core.PosLog
 import com.bohemian.odoo.pos.core.Redact
 import com.bohemian.odoo.pos.di.AppContainer
 import com.bohemian.odoo.pos.odoo.CartLine
+import com.bohemian.odoo.pos.payment.UpiPayee
 import com.bohemian.odoo.pos.odoo.CartTotals
 import com.bohemian.odoo.pos.odoo.Customer
 import com.bohemian.odoo.pos.odoo.ZzCashBalance
@@ -50,6 +51,8 @@ data class SetupState(
     val cashMethodId: Int = 0,
     val printerWidth: Int = 32,
     val useFake: Boolean = false,
+    val upiPrimary: String = "",
+    val upiFallback: String = "",
     val busy: Boolean = false,
     val error: String? = null,
 )
@@ -96,6 +99,8 @@ data class SellState(
     val loading: Boolean = false,
     val error: String? = null,
     val pay: PayUi = PayUi.Idle,
+    /** Cashier's choice on the cart: use the backup UPI ID instead of the primary. */
+    val upiUseFallback: Boolean = false,
 ) {
     val filtered: List<Product>
         get() = if (query.isBlank()) products.take(60)
@@ -114,6 +119,8 @@ class PosViewModel(private val c: AppContainer) : ViewModel() {
             apiKeyEntered = !c.settings.odooApiKey.isNullOrBlank(),
             printerWidth = c.settings.printerWidth,
             useFake = c.settings.useFakeGateway,
+            upiPrimary = c.settings.upiPrimaryVpa,
+            upiFallback = c.settings.upiFallbackVpa,
         )
     )
     val setup: StateFlow<SetupState> = _setup.asStateFlow()
@@ -155,6 +162,8 @@ class PosViewModel(private val c: AppContainer) : ViewModel() {
     fun setCashMethod(id: Int) = _setup.update { it.copy(cashMethodId = id) }
     fun setPrinterWidth(w: Int) = _setup.update { it.copy(printerWidth = w) }
     fun setUseFake(v: Boolean) = _setup.update { it.copy(useFake = v) }
+    fun setUpiPrimary(v: String) = _setup.update { it.copy(upiPrimary = v.trim()) }
+    fun setUpiFallback(v: String) = _setup.update { it.copy(upiFallback = v.trim()) }
 
     fun finishSetup() {
         val s = _setup.value
@@ -165,6 +174,12 @@ class PosViewModel(private val c: AppContainer) : ViewModel() {
         c.settings.terminalPaymentMethodId = s.terminalMethodId
         c.settings.cashPaymentMethodId = s.cashMethodId
         c.settings.printerWidth = s.printerWidth
+        if (s.upiPrimary.isNotBlank() && !UpiPayee.isValidVpa(s.upiPrimary))
+            return _setup.update { it.copy(error = "Primary UPI ID is not valid (name@bank)") }
+        if (s.upiFallback.isNotBlank() && !UpiPayee.isValidVpa(s.upiFallback))
+            return _setup.update { it.copy(error = "Backup UPI ID is not valid (name@bank)") }
+        c.settings.upiPrimaryVpa = s.upiPrimary
+        c.settings.upiFallbackVpa = s.upiFallback
         c.settings.useFakeGateway = BuildConfig.DEBUG && s.useFake
         _configured.value = true
         loadCatalog()
@@ -210,6 +225,17 @@ class PosViewModel(private val c: AppContainer) : ViewModel() {
     }
 
     fun setQuery(q: String) = _sell.update { it.copy(query = q) }
+
+    /** Toggle on the cart, before any UPI payment. Only the choice of ID changes, not the total. */
+    fun setUpiUseFallback(v: Boolean) = _sell.update { it.copy(upiUseFallback = v) }
+
+    /** The UPI IDs for the cart toggle, or null when no valid primary ID is set. */
+    fun upiPayee(): UpiPayee? {
+        val primary = c.settings.upiPrimaryVpa
+        if (!UpiPayee.isValidVpa(primary)) return null
+        val fallback = c.settings.upiFallbackVpa.takeIf { UpiPayee.isValidVpa(it) }
+        return UpiPayee(primary, fallback, useFallback = _sell.value.upiUseFallback)
+    }
 
     /** Keyboard-wedge scanners type the barcode then Enter. */
     fun submitQuery() {

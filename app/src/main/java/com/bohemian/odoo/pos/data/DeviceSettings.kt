@@ -46,6 +46,19 @@ class DeviceSettings(context: Context) {
         get() = prefs.getBoolean("use_fake_gateway", false)
         set(v) = prefs.edit().putBoolean("use_fake_gateway", v).apply()
 
+    /**
+     * Business UPI collection IDs, entered on the Setup screen. Primary is used normally,
+     * backup when the primary's bank is down. Business identifiers, not secrets: kept on the
+     * device only, never in the repo.
+     */
+    var upiPrimaryVpa: String
+        get() = prefs.getString("upi_primary_vpa", "") ?: ""
+        set(v) = prefs.edit().putString("upi_primary_vpa", v.trim()).apply()
+
+    var upiFallbackVpa: String
+        get() = prefs.getString("upi_fallback_vpa", "") ?: ""
+        set(v) = prefs.edit().putString("upi_fallback_vpa", v.trim()).apply()
+
     val isConfigured: Boolean
         get() = !odooApiKey.isNullOrBlank() && posConfigId > 0 && terminalPaymentMethodId > 0
 }
