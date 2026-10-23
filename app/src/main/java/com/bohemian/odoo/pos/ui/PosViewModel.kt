@@ -10,6 +10,7 @@ import com.bohemian.odoo.pos.di.AppContainer
 import com.bohemian.odoo.pos.odoo.CartLine
 import com.bohemian.odoo.pos.odoo.CartTotals
 import com.bohemian.odoo.pos.odoo.Customer
+import com.bohemian.odoo.pos.odoo.ZzCashBalance
 import com.bohemian.odoo.pos.odoo.FiscalPosition
 import com.bohemian.odoo.pos.odoo.OdooException
 import com.bohemian.odoo.pos.odoo.PaidSale
@@ -78,6 +79,8 @@ data class SellState(
     val customer: Customer? = null,
     /** Matches returned by partial phone search (last N digits). */
     val customerMatches: List<Customer> = emptyList(),
+    /** ZZ Cash balance of [customer], read live from Odoo. Null while loading or if none. */
+    val zzCash: ZzCashBalance? = null,
     /**
      * The fiscal position the cart was priced with. It must be the one sent to Odoo,
      * otherwise our totals and Odoo's disagree on an inter-state B2B sale.
@@ -244,11 +247,26 @@ class PosViewModel(private val c: AppContainer) : ViewModel() {
             _sell.update { it.copy(fiscalPosition = fiscalPositionsById[fposId]) }
             reprice()
         }
+        refreshZzCash(customer)
     }
 
-    /** Clear the attached customer and search results. */
+    /**
+     * Read the customer's ZZ Cash balance. Never blocks the sale: on failure the cashier
+     * just sees no balance. The result is only applied if the same customer is still attached.
+     */
+    private fun refreshZzCash(customer: Customer) = viewModelScope.launch {
+        val balance = try {
+            c.zzCash.balance(customer.id)
+        } catch (e: Exception) {
+            PosLog.w("ZZ_CASH_LOOKUP_FAILED", "partner" to customer.id, "err" to e.message)
+            null
+        }
+        _sell.update { s -> if (s.customer?.id == customer.id) s.copy(zzCash = balance) else s }
+    }
+
+    /** Clear the attached customer, search results and ZZ Cash balance. */
     fun clearCustomer() = _sell.update {
-        it.copy(customer = null, customerMatches = emptyList(), phone = "", customerName = "")
+        it.copy(customer = null, customerMatches = emptyList(), phone = "", customerName = "", zzCash = null)
     }
 
     private var phoneSearchJob: kotlinx.coroutines.Job? = null
@@ -410,8 +428,9 @@ class PosViewModel(private val c: AppContainer) : ViewModel() {
     fun attachCustomer() = viewModelScope.launch {
         val found = resolveCustomer()
         val fposId = c.fiscalPositions.resolve(_sell.value.config ?: return@launch, found)
-        _sell.update { it.copy(customer = found, fiscalPosition = fiscalPositionsById[fposId]) }
+        _sell.update { it.copy(customer = found, fiscalPosition = fiscalPositionsById[fposId], zzCash = null) }
         reprice()
+        found?.let { refreshZzCash(it) }
     }
 
     private suspend fun resolveCustomer(): Customer? {
@@ -428,7 +447,7 @@ class PosViewModel(private val c: AppContainer) : ViewModel() {
     fun newSale() = _sell.update {
         it.copy(
             orderUuid = UUID.randomUUID().toString(), lines = emptyList(), totals = null,
-            phone = "", customerName = "", customer = null, customerMatches = emptyList(),
+            phone = "", customerName = "", customer = null, customerMatches = emptyList(), zzCash = null,
             fiscalPosition = fiscalPositionsById[it.config?.defaultFiscalPositionId],
             pay = PayUi.Idle, error = null,
         )
