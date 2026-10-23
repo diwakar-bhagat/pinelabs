@@ -94,3 +94,31 @@ SDK fields mean on the wire.
 3. Whether `GetStatus` is meaningful for a card sale, or UPI/BQR only.
 4. Whether `charge_slip_print_data` duplicates anything MasterApp prints on its own.
 5. Written confirmation on the WebView/PAXSTORE position.
+
+## 6. Pine POS MCP answers (2026-10-24, `https://mcp.pos.pinelabs.com/mcp`, server 1.3.0)
+
+The official Pine Billing SDK documentation server. No login needed. Tools: `getDocumentationList`,
+`getDocumentation`, `resolveSdkVersion`, `get_pinelabs_sdk_download_link`.
+
+**Which transport for our app** (`concepts/transports`, `concepts/integration-landscape`):
+- Billing app on the same Android terminal as the payments app → **AppToApp**.
+- Billing app on a separate device → **PadController** (wired/USB/serial/Bluetooth are PadController UI modes).
+- Remote or backend billing → **Cloud**.
+So ours stays **AppToApp**. Prerequisite (`recipes/apptoapp-android`): "the compatible **Pinelabs payments
+application** installed on the same device". AppToApp goes through a Pine-managed **Master service**
+(the SDK binds `com.pinelabs.masterapp` / `.SERVER`; see `classes.jar`). The corpus names no package for the payments
+application and says to confirm anything undocumented with Pinelabs integration support.
+
+**UAT E700 SN 1340055807 (2026-10-24, adb):** payments app is `com.pinelabs.plutusplus` (versionCode 250212),
+plus `com.pinelabs.ecradapterservice`, `com.pinelabs.peripheralappservice`, `com.pinelabs.tmsstore`.
+**`com.pinelabs.masterapp` is not installed** → the SDK fails with `MasterApp is not installed`. Pine must
+provision the compatible payments application / Master service for AppToApp on this terminal.
+
+**SDK 2.0.0 is the latest stable** (only production successor of 1.0.0; `releases/2.0.0`, `migration/1.0-to-2.0`):
+- AppToApp reuses one MasterApp Messenger connection and reconnects automatically after binder death.
+- `get_terminal_info` is supported on AppToApp in 2.0.0 (returns `NotSupported` on 1.0.0).
+- **Breaking:** `TransactionOptions.original_transaction_id` is removed; `invoice_number` maps to upstream `InvoiceNo`.
+  The 2.0.0 Void template sends `invoice_number` ("invoice number of the sale being voided", flow-dependent) plus
+  `bank_code` "01". The 1.0.0 Void template sends neither `original_transaction_id` nor `invoice_number`.
+  Our 1.0.0 void currently also sends `original_transaction_id` = sale `transaction_id`, which is an assumption.
+- `currency` becomes an ISO-4217 string (`"INR"`) instead of the `CurrencyCode` enum.

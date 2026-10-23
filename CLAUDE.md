@@ -339,8 +339,8 @@ Private (`_x`) methods are not callable.
 
 - **AppToApp** (`TransportType.APP_TO_APP`), MasterApp `com.pinelabs.masterapp`.
 - Manifest: `<queries><package android:name="com.pinelabs.masterapp"/></queries>`.
-- SDK is a local Maven bundle (not on Maven Central). Download via Pine MCP tool
-  `get_pinelabs_sdk_download_link(sdk_name="android")` (links expire ~1 h). Unzip into
+- SDK is a local Maven bundle (not on Maven Central). Download via the Pine POS MCP (`https://mcp.pos.pinelabs.com/mcp`) tool
+  `get_pinelabs_sdk_download_link(sdk_version, binding="android")` (links expire ~1 h). Unzip into
   `app/libs/pine-billing-sdk-android-maven/`.
 
 ### Key verified facts
@@ -479,7 +479,9 @@ company password manager + encrypted drive.
 
 - [ ] PROD Pine Application ID (Pine issues after UAT sign-off)
 - [ ] Confirm `bank_code = "01"` for ZenZebra's acquirer (UAT case 8)
-- [ ] Confirm Void's `original_transaction_id` = sale `transaction_id` (assumed; docs only say it is required) (UAT case 8)
+- [ ] Confirm Void's `original_transaction_id` = sale `transaction_id` (assumed). Pine docs (MCP, 2026-10-24): the 1.0.0 AppToApp Void template omits it; 2.0.0 removes it and uses `invoice_number` instead (UAT case 8)
+- [ ] **Blocker:** UAT E700 has Plutus Plus (`com.pinelabs.plutusplus`) but no `com.pinelabs.masterapp`. Pine must provision the AppToApp payments application / Master service (see `docs/PINE_LABS_VERIFIED.md` §6)
+- [ ] Upgrade Pine SDK 1.0.0 → 2.0.0 (latest stable; `migration/1.0-to-2.0`)
 - [ ] Capture a web POS refund `sync_from_ui` payload on the UAT config and diff it against `RefundService.buildPayload` (`tools/payload_diff.py`) — 4c was built from Odoo 19 source, not a capture
 - [x] Confirm SDK 1.0.0 `init` arity and `amount` type against `classes.jar` in AAR (2026-10-23)
 - [ ] Add E700 `pos.config` id to WhatsApp / ZZ Cash automation filters in Odoo
