@@ -96,13 +96,14 @@ class TicketQrTest {
         ((b[at].toInt() and 0xFF) shl 24) or ((b[at + 1].toInt() and 0xFF) shl 16) or
             ((b[at + 2].toInt() and 0xFF) shl 8) or (b[at + 3].toInt() and 0xFF)
 
-    @Test fun `receipt with a QR prints an image line, without one prints none`() {
+    @Test fun `receipt with an e-bill link prints one native QR line, without one prints none`() {
         val data = receipt(qr = null)
-        assertFalse(ReceiptFormatter(32).format(data).any { it.imageBase64 != null })
+        assertFalse(ReceiptFormatter(32).format(data).any { it.qrText != null || it.imageBase64 != null })
 
-        val withQr = receipt(qr = TicketQr.pngBase64(url))
+        val withQr = receipt(qr = url)
         val lines = ReceiptFormatter(32).format(withQr)
-        assertEquals(1, lines.count { it.imageBase64 != null })
+        assertEquals(listOf(url), lines.mapNotNull { it.qrText })
+        assertTrue(lines.none { it.imageBase64 != null })
         assertTrue(lines.any { it.text.contains("Scan for your e-bill") })
     }
 
@@ -121,6 +122,6 @@ class TicketQrTest {
         cardLast4 = null,
         customerName = "Diwakar",
         footer = listOf("Thank you for shopping!"),
-        qrImageBase64 = qr,
+        eBillUrl = qr,
     )
 }

@@ -87,8 +87,13 @@ data class PrintLine(
     val text: String,
     val center: Boolean = false,
     val bold: Boolean = false,
-    /** Base64 PNG to print instead of text (e.g. the e-bill QR). */
+    /** Base64 PNG to print instead of text. */
     val imageBase64: String? = null,
+    /**
+     * Text the printer renders as a QR code (e.g. the e-bill link). Pine prints QR codes natively
+     * from text: PrintDataType 4 in Pine's own reference app (`plutusapp_new`, print demo).
+     */
+    val qrText: String? = null,
 )
 
 sealed interface PrintResult {

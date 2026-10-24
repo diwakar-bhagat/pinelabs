@@ -78,7 +78,7 @@ data class SetupState(
     val methods: List<PaymentMethod> = emptyList(),
     val terminalMethodId: Int = 0,
     val cashMethodId: Int = 0,
-    val printerWidth: Int = 32,
+    val printerWidth: Int = 24,
     val useFake: Boolean = false,
     val upiPrimary: String = "",
     val upiFallback: String = "",
@@ -729,9 +729,9 @@ class PosViewModel(private val c: AppContainer) : ViewModel() {
         PosLog.i("PAY_UI_OUTCOME", "outcome" to outcome::class.simpleName)
     }
 
-    /** The e-bill QR for this sale, or null if Odoo has no token for it yet. Never blocks printing. */
+    /** The e-bill link for this sale, or null if Odoo has no token for it yet. Never blocks printing. */
     private suspend fun eBillQr(uuid: String): String? = try {
-        c.orderSync.accessTokenFor(uuid)?.let { TicketQr.pngBase64(TicketQr.ticketUrl(BuildConfig.ODOO_BASE_URL, it)) }
+        c.orderSync.accessTokenFor(uuid)?.let { TicketQr.ticketUrl(BuildConfig.ODOO_BASE_URL, it) }
     } catch (e: Exception) {
         PosLog.w("EBILL_QR_SKIPPED", "order" to uuid, "err" to e.message)
         null
@@ -755,7 +755,7 @@ class PosViewModel(private val c: AppContainer) : ViewModel() {
             customerName = sale.customer?.name,
             footer = listOf("Thank you for shopping!", "Try it. Love it. ZenZebra."),
             reprint = reprint,
-            qrImageBase64 = qr,
+            eBillUrl = qr,
         )
         return when (val r = c.gateway.print(fmt.format(data), attempt?.billingRef ?: sale.orderUuid.take(12), c.settings.printerWidth)) {
             PrintResult.Printed -> true

@@ -39,7 +39,7 @@ class DeviceSettings(context: Context) {
 
     /** Pine: printer line width is 24, 32 or 48 characters. */
     var printerWidth: Int
-        get() = prefs.getInt("printer_width", 32)
+        get() = prefs.getInt("printer_width", 24) // Pine samples print E700 bills at 24 chars
         set(v) { require(v in setOf(24, 32, 48)); prefs.edit().putInt("printer_width", v).apply() }
 
     /** Debug builds only — ignored in release (see AppContainer). */

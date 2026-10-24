@@ -110,14 +110,18 @@ class PineSdkGateway : PaymentGateway {
         // and are verified on the E700 (UAT case 9).
         val req = PrintRequest(
             data = lines.map { l ->
-                val isImage = l.imageBase64 != null
+                val isImage = l.imageBase64 != null && l.qrText == null
                 PrintItem(
-                    text = if (isImage) null else l.text,
+                    text = l.qrText ?: if (isImage) null else l.text,
                     imagePath = null,
                     imageData = l.imageBase64,
                     isCenterAligned = l.center,
                     printerWidth = if (isImage) null else widthChars,
-                    printDataType = if (isImage) null else PRINT_TYPE_TEXT,
+                    printDataType = when {
+                        l.qrText != null -> PRINT_TYPE_QR
+                        isImage -> null
+                        else -> PRINT_TYPE_TEXT
+                    },
                     lineSpacing = null,
                     textStyleType = null, // vendor-specific bold code unknown — pre-formatted text instead
                     fontSize = null,
@@ -225,6 +229,8 @@ class PineSdkGateway : PaymentGateway {
     private companion object {
         /** Pine MasterApp print sample: PrintDataType 0 = text. */
         const val PRINT_TYPE_TEXT = 0
+        /** Pine reference app `plutusapp_new` print demo: PrintDataType 4 = QR code of DataToPrint. */
+        const val PRINT_TYPE_QR = 4
     }
 
     private fun PayMode.toSdk(): PaymentMode = when (this) {

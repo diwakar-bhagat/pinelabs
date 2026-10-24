@@ -133,3 +133,22 @@ provision the compatible payments application / Master service for AppToApp on t
 - The "Cloud Based Transaction" option on the live terminal suggests these Plutus Plus terminals take bills from Pine
   Cloud (SDK `Cloud` transport). Ask Pine whether this terminal family supports AppToApp (MasterApp) at all, or
   whether Cloud is the intended route.
+
+## 7. Pine's reference app `prpratheesh/plutusapp_new` vs our app (checked 2026-10-24, commit d043126)
+
+| | Pine reference app | Our app |
+|---|---|---|
+| UI stack | **Flutter** (Dart UI + a Kotlin `MethodChannel` bridge), so hybrid | **Native Android**, Kotlin + Jetpack Compose |
+| How it reaches Pine | Legacy direct protocol: binds `com.pinelabs.masterapp` / `.SERVER`, then `startActivityForResult(Intent("com.pinelabs.masterapp.HYBRID_REQUEST"), REQUEST_DATA = {Header{ApplicationId, UserId, MethodId 1001/1002, VersionNo}, Detail{BillingRefNo, PaymentAmount (paise), TransactionType 4001…}})` | **Pine Billing SDK 2.0.0** AppToApp, which binds the same `com.pinelabs.masterapp.SERVER` and builds that envelope internally |
+| Needs MasterApp | Yes, the same package | Yes, the same package |
+| Status per Pine docs | Legacy integration. The Pine MCP guardrail `guardrails/sdk-only-integration` says not to recreate `MethodId`/`Header`/`Detail` envelopes | The current, documented way |
+
+**Verdict:** our approach is the correct and newer one. The reference app would fail on our UAT
+E700 the same way ("MasterApp is not installed"), because both need MasterApp.
+
+**Adopted from it** (print data values only, sent through SDK `PrintItem` fields, not the legacy envelope):
+- `PrintDataType 0` = text, `PrinterWidth 24` (also in Pine's email sample). The app default width is now 24.
+- `PrintDataType 4` = **QR code printed from text** (`DataToPrint` = URL). The e-bill QR is now sent as
+  `text = <e-bill URL>, print_data_type = 4` instead of a base64 PNG. This avoids the undocumented image path.
+  `3` appears for a barcode. Confirm both on the E700 (UAT case 9).
+
