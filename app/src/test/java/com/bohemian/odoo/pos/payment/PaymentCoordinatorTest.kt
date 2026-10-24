@@ -36,7 +36,7 @@ private class ScriptedGateway : PaymentGateway {
         voidRequests += request; onStarted("void-evt-${voidRequests.size}")
         return voidResults.removeFirstOrNull() ?: GatewayResult.Rejected("NotSupported", null)
     }
-    override suspend fun print(lines: List<PrintLine>, printRef: String): PrintResult = PrintResult.Printed
+    override suspend fun print(lines: List<PrintLine>, printRef: String, widthChars: Int): PrintResult = PrintResult.Printed
 }
 
 class InMemoryJournal : PaymentJournal {

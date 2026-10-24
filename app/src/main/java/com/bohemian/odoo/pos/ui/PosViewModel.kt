@@ -354,7 +354,7 @@ class PosViewModel(private val c: AppContainer) : ViewModel() {
             methods = summary.nonCash.map { ZReportMethod(it.name, it.count, it.amount) },
             notes = ui.notes.trim().ifBlank { null },
         )
-        val printed = when (val r = c.gateway.print(ZReportFormatter(c.settings.printerWidth).format(data), "Z${cfg?.currentSessionId ?: 0}")) {
+        val printed = when (val r = c.gateway.print(ZReportFormatter(c.settings.printerWidth).format(data), "Z${cfg?.currentSessionId ?: 0}", c.settings.printerWidth)) {
             PrintResult.Printed -> true
             is PrintResult.Failed -> { PosLog.w("ZREPORT_PRINT_FAILED", "reason" to r.reason); false }
         }
@@ -757,7 +757,7 @@ class PosViewModel(private val c: AppContainer) : ViewModel() {
             reprint = reprint,
             qrImageBase64 = qr,
         )
-        return when (val r = c.gateway.print(fmt.format(data), attempt?.billingRef ?: sale.orderUuid.take(12))) {
+        return when (val r = c.gateway.print(fmt.format(data), attempt?.billingRef ?: sale.orderUuid.take(12), c.settings.printerWidth)) {
             PrintResult.Printed -> true
             is PrintResult.Failed -> { PosLog.w("PRINT_FAILED", "reason" to r.reason); false }
         }

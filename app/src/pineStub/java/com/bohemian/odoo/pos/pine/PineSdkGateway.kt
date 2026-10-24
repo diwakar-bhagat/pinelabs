@@ -19,5 +19,5 @@ class PineSdkGateway : PaymentGateway {
     override suspend fun sale(request: SaleRequest, onStarted: (String) -> Unit) = reject
     override suspend fun getStatus(billingRef: String, amount: Paise, mode: PayMode, onStarted: (String) -> Unit) = reject
     override suspend fun void(request: VoidRequest, onStarted: (String) -> Unit) = reject
-    override suspend fun print(lines: List<PrintLine>, printRef: String): PrintResult = PrintResult.Failed("Pine SDK not bundled")
+    override suspend fun print(lines: List<PrintLine>, printRef: String, widthChars: Int): PrintResult = PrintResult.Failed("Pine SDK not bundled")
 }

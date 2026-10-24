@@ -111,5 +111,6 @@ interface PaymentGateway {
     suspend fun sale(request: SaleRequest, onStarted: (eventId: String) -> Unit): GatewayResult
     suspend fun getStatus(billingRef: String, amount: Paise, mode: PayMode, onStarted: (String) -> Unit = {}): GatewayResult
     suspend fun void(request: VoidRequest, onStarted: (String) -> Unit = {}): GatewayResult
-    suspend fun print(lines: List<PrintLine>, printRef: String): PrintResult
+    /** [widthChars] = the 24/32/48-char layout the lines were formatted for (Pine `PrinterWidth`). */
+    suspend fun print(lines: List<PrintLine>, printRef: String, widthChars: Int): PrintResult
 }

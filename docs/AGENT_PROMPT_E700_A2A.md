@@ -116,6 +116,13 @@ adb logcat -d -s BohemianPOS pine_billing PineBillingSdk AndroidRuntime > e700-a
 findstr /i "PAYMENT_ VOID_ PINE_ ORDER_SYNC KIOSK CRASH" e700-a2a-log.txt
 ```
 
+**Payload evidence = log lines only.** The app logs exactly what it sends and receives:
+`PINE_REQUEST` (type, modes, ref, amountPaise, currency, bankCode, invoiceNo), `PINE_RESULT`
+(status, code, msg, ref, amountPaise, txnId, rrn, auth, last4, …), `PINE_FAILURE` / `PINE_REJECTED`
+(SDK error kind + detail) and `PINE_PRINT_FAILED`. When asked for "request/response payloads",
+**copy these lines verbatim. Never reconstruct, reformat into JSON, or fill in values that are not
+in the log.** If a line is missing, say it is missing.
+
 Look especially for: `PAYMENT_START`, `PAYMENT_RESPONSE`, `PAYMENT_SUCCESS` / `PAYMENT_NEEDS_REVIEW`,
 `ORDER_SYNCED` or `ORDER_SYNC_FAILED`, and **`PINE_RESULT_META_KEYS`** (the extra field names the
 terminal returns; needed to settle the Void invoice-number question).
