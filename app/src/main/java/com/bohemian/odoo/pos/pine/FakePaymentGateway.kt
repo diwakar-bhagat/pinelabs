@@ -56,7 +56,7 @@ class FakePaymentGateway(private val latencyMs: Long = 1200) : PaymentGateway {
         return GatewayResult.Approved(TxnDetails(responseCode = "00", responseMessage = "VOIDED", amountPaise = request.amount.value, simulated = true))
     }
 
-    override suspend fun print(lines: List<PrintLine>, printRef: String): PrintResult {
+    override suspend fun print(lines: List<PrintLine>, printRef: String, widthChars: Int): PrintResult {
         delay(300)
         lines.forEach { android.util.Log.d("FakePrinter", it.text) }
         return PrintResult.Printed

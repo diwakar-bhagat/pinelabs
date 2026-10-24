@@ -60,10 +60,15 @@ PAX terminals block unknown APKs in "production" mode. Ask Pine Labs for one of:
   adb logcat -s BohemianPOS PineBillingSdk
   ```
 - **(b) PAXSTORE test/UAT channel**: you upload the APK to their test store and push it
-  to your UAT terminal serial **1630005644**.
+  to your UAT terminal serial **1340055807**.
 
-Ask them: *"Please enable developer mode (ADB sideload) on UAT terminal SN 1630005644,
+Ask them: *"Please enable developer mode (ADB sideload) on UAT terminal SN 1340055807,
 or tell us the PAXSTORE UAT channel process."*
+
+**Payments app on this terminal (checked 2026-10-24):** Pine **Plutus Plus**
+(`com.pinelabs.plutusplus`) is installed, but `com.pinelabs.masterapp` (the App-to-App
+Master service the SDK binds to) is not. Pine must provision it before card/UPI payments
+work from the till (`docs/PINE_LABS_VERIFIED.md` §6).
 
 Without either, you can still develop the whole UI on any Android 7+ tablet/emulator
 with **Settings → Payment gateway: Fake** (debug builds only). Real payments need the E700.

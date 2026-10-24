@@ -24,11 +24,14 @@ data class VoidRequest(
      */
     val bankCode: String?,
     /**
-     * Required by UDL validation for Void/TipAdjust/Adjust/SaleComplete
-     * [models/TransactionRequest]. The AppToApp template in [flows/void] omits it,
-     * so send it and let the terminal ignore it rather than risk InvalidInput.
+     * SDK 2.0.0: chained types (Void, TipAdjust, Adjust, SaleComplete) use
+     * `TransactionOptions.invoice_number`, mapped to upstream InvoiceNo [models/TransactionType];
+     * `original_transaction_id` was removed [migration/1.0-to-2.0]. For AppToApp Void it is
+     * "flow-dependent" [flows/void], and no AppToApp sale result documents where the sale's
+     * invoice number comes from, so the till sends null (as the 1.0.0 AppToApp template did)
+     * until UAT case 8 shows otherwise.
      */
-    val originalTransactionId: String?,
+    val invoiceNumber: String?,
 )
 
 /** What the terminal told us about a transaction. All optional: terminals vary. */
@@ -84,8 +87,13 @@ data class PrintLine(
     val text: String,
     val center: Boolean = false,
     val bold: Boolean = false,
-    /** Base64 PNG to print instead of text (e.g. the e-bill QR). */
+    /** Base64 PNG to print instead of text. */
     val imageBase64: String? = null,
+    /**
+     * Text the printer renders as a QR code (e.g. the e-bill link). Pine prints QR codes natively
+     * from text: PrintDataType 4 in Pine's own reference app (`plutusapp_new`, print demo).
+     */
+    val qrText: String? = null,
 )
 
 sealed interface PrintResult {
@@ -108,5 +116,6 @@ interface PaymentGateway {
     suspend fun sale(request: SaleRequest, onStarted: (eventId: String) -> Unit): GatewayResult
     suspend fun getStatus(billingRef: String, amount: Paise, mode: PayMode, onStarted: (String) -> Unit = {}): GatewayResult
     suspend fun void(request: VoidRequest, onStarted: (String) -> Unit = {}): GatewayResult
-    suspend fun print(lines: List<PrintLine>, printRef: String): PrintResult
+    /** [widthChars] = the 24/32/48-char layout the lines were formatted for (Pine `PrinterWidth`). */
+    suspend fun print(lines: List<PrintLine>, printRef: String, widthChars: Int): PrintResult
 }

@@ -95,22 +95,33 @@ class PineSdkGateway : PaymentGateway {
                 billingRef = request.billingRef,
                 amount = request.amount,
                 bankCode = request.bankCode,
-                originalTransactionId = request.originalTransactionId,
+                invoiceNumber = request.invoiceNumber,
                 isSwipe = false,
             ),
             onStarted = onStarted,
         )
 
-    override suspend fun print(lines: List<PrintLine>, printRef: String): PrintResult = withContext(Dispatchers.IO) { sdkSlot.withLock {
+    override suspend fun print(lines: List<PrintLine>, printRef: String, widthChars: Int): PrintResult = withContext(Dispatchers.IO) { sdkSlot.withLock {
+        // Values follow Pine's own MasterApp print sample (email, 2026-10-24): every text item is
+        // PrintDataType 0 with PrinterWidth = characters per line; only left/centre alignment
+        // exists, right alignment is done with spaces (ReceiptFormatter.twoCol already does).
+        // Images: Pine says PrintDataType 2 with a hex-byte image. The SDK's PrintItem takes
+        // base64 image_data and documents no type code for it, so images keep printDataType null
+        // and are verified on the E700 (UAT case 9).
         val req = PrintRequest(
             data = lines.map { l ->
+                val isImage = l.imageBase64 != null && l.qrText == null
                 PrintItem(
-                    text = if (l.imageBase64 != null) null else l.text,
+                    text = l.qrText ?: if (isImage) null else l.text,
                     imagePath = null,
                     imageData = l.imageBase64,
                     isCenterAligned = l.center,
-                    printerWidth = null,
-                    printDataType = null,
+                    printerWidth = if (isImage) null else widthChars,
+                    printDataType = when {
+                        l.qrText != null -> PRINT_TYPE_QR
+                        isImage -> null
+                        else -> PRINT_TYPE_TEXT
+                    },
                     lineSpacing = null,
                     textStyleType = null, // vendor-specific bold code unknown — pre-formatted text instead
                     fontSize = null,
@@ -128,7 +139,10 @@ class PineSdkGateway : PaymentGateway {
                 sdk().print(req, object : PrintListener {
                     override fun onStarted(eventId: String) {}
                     override fun onCompleted(eventId: String) = finish(PrintResult.Printed)
-                    override fun onFailure(error: SdkException) = finish(PrintResult.Failed(error.kind() + ": " + error.message))
+                    override fun onFailure(error: SdkException) {
+                        PosLog.w("PINE_PRINT_FAILED", "ref" to printRef, "err" to (error.kind() + ": " + error.message))
+                        finish(PrintResult.Failed(error.kind() + ": " + error.message))
+                    }
                 })
             } catch (e: SdkException) {
                 finish(PrintResult.Failed(e.kind() + ": " + e.message))
@@ -150,6 +164,10 @@ class PineSdkGateway : PaymentGateway {
             transactionOptions = options,
             transportOptions = null, // AppToApp needs no transport extras
         )
+        // Exactly what we hand the SDK (all other TransactionOptions fields are null). No PII here.
+        PosLog.i("PINE_REQUEST", "type" to type, "modes" to modes, "ref" to options.billingReferenceId,
+            "amountPaise" to options.amount, "currency" to options.currency,
+            "bankCode" to options.bankCode, "invoiceNo" to options.invoiceNumber)
         suspendCancellableCoroutine { cont ->
             val started = AtomicBoolean(false)
             val done = AtomicBoolean(false)
@@ -165,6 +183,15 @@ class PineSdkGateway : PaymentGateway {
                     override fun onResult(result: TransactionResult) {
                         // HARD RULE 6: declines arrive here with status FAILED.
                         val details = result.toDetails()
+                        // What the terminal answered. Card number only as last 4 (HARD RULE 11).
+                        PosLog.i("PINE_RESULT", "event" to result.eventId, "status" to result.status,
+                            "code" to result.responseCode, "msg" to result.responseMessage,
+                            "ref" to result.billingReferenceId, "amountPaise" to result.amount,
+                            "txnId" to result.transactionId, "rrn" to result.rrn, "auth" to result.authCode,
+                            "last4" to details.last4, "cardType" to result.cardType, "acquirer" to result.acquirer,
+                            "tid" to result.terminalId, "batch" to result.batchNo, "simulated" to result.simulated)
+                        // UAT aid: which extra fields this terminal returns (keys only — values may hold PII).
+                        result.metadata?.keys?.takeIf { it.isNotEmpty() }?.let { PosLog.i("PINE_RESULT_META_KEYS", "keys" to it.sorted()) }
                         finish(
                             if (result.status == TransactionStatus.SUCCESS) GatewayResult.Approved(details)
                             else GatewayResult.Declined(result.responseCode, result.responseMessage, details)
@@ -172,11 +199,13 @@ class PineSdkGateway : PaymentGateway {
                     }
 
                     override fun onFailure(error: SdkException) {
+                        PosLog.w("PINE_FAILURE", "kind" to error.kind(), "detail" to error.message)
                         finish(mapAsyncFailure(error))
                     }
                 })
             } catch (e: SdkException) {
                 // Synchronous throw: nothing reached the terminal.
+                PosLog.w("PINE_REJECTED", "kind" to e.kind(), "detail" to e.message)
                 finish(GatewayResult.Rejected(e.kind(), e.message))
             } catch (e: IllegalStateException) {
                 finish(GatewayResult.Rejected("IllegalState", e.message))
@@ -196,6 +225,13 @@ class PineSdkGateway : PaymentGateway {
     }
 
     private fun SdkException.kind(): String = this::class.simpleName ?: "SdkException"
+
+    private companion object {
+        /** Pine MasterApp print sample: PrintDataType 0 = text. */
+        const val PRINT_TYPE_TEXT = 0
+        /** Pine reference app `plutusapp_new` print demo: PrintDataType 4 = QR code of DataToPrint. */
+        const val PRINT_TYPE_QR = 4
+    }
 
     private fun PayMode.toSdk(): PaymentMode = when (this) {
         PayMode.CARD -> PaymentMode.CARD
@@ -232,14 +268,16 @@ class PineSdkGateway : PaymentGateway {
         amount: Paise,
         customerMobile: String? = null,
         bankCode: String? = null,
-        originalTransactionId: String? = null,
+        invoiceNumber: String? = null,
         isSwipe: Boolean? = null,
     ) = TransactionOptions(
-        currency = CurrencyCode.INR,
+        // SDK 2.0.0 [migration/1.0-to-2.0]: ISO-4217 string, not the CurrencyCode enum.
+        currency = "INR",
         billingReferenceId = billingRef,
-        // UDL v0.19: `i64? amount` → Long. (Older docs said u64 → use amount.value.toULong() if 1.0.0 wants ULong.)
+        // `i64? amount` → Long (checked against classes.jar 2026-10-23).
         amount = amount.value,
-        originalTransactionId = originalTransactionId,
+        // SDK 2.0.0 removed original_transaction_id; invoice_number maps to upstream InvoiceNo.
+        invoiceNumber = invoiceNumber,
         bankCode = bankCode,
         originalBatchNumber = null,
         originalRoc = null,

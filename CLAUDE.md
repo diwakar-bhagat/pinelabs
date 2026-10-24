@@ -43,8 +43,9 @@ uses **Odoo 19 (Odoo Online, `zenzebra1.odoo.com`) as the system of record**.
 | Package (applicationId) | `com.bohemian.odoo.pos` — **never change** (registered with Pine Labs) |
 | Company | Bohemian Curations Pvt Ltd (brand: ZenZebra) |
 | Device | PAX E700 ("Aries6"), PayDroid **Android 7.1.2 (API 25)**, firmware Scorpio V10.1.32 |
+| UAT terminal | PAX E700 **SN 1340055807**; payments app installed: Pine **Plutus Plus** (`com.pinelabs.plutusplus`); App-to-App MasterApp **not yet provisioned** |
 | Printer | Pine SDK `print`, line width **24 / 32 / 48 chars** (configurable) |
-| Pine SDK | `com.pinelabs.billing:pine-billing-sdk-android` **1.0.0** GA (first stable, SemVer-frozen) |
+| Pine SDK | `com.pinelabs.billing:pine-billing-sdk-android` **2.0.0** (latest stable, 2026-10-24; 1.0.0 kept in `app/libs` for rollback) |
 | Pine App ID (UAT) | `771aabd360b64cd59d11806bd88d87b4` |
 | Pine App ID (PROD) | _not issued yet_ — Pine registers UAT and PROD separately |
 | Odoo | 19.0 Enterprise, Odoo Online (no custom Python modules possible; Odoo.sh is ruled out) |
@@ -86,8 +87,8 @@ ui (Compose)  ──►  viewmodels  ──►  domain services  ──►  adap
 
 | Package | Responsibility | May depend on |
 |---|---|---|
-| `core` | `Paise` money type, `BillingRef`, clock, `Redact`, logging | nothing |
-| `odoo` | JSON-2 client, DTOs, catalog/pricing/order/session/customer services, `SaleFinalizer`, ZZ Cash balance + redemption | core |
+| `core` | `Paise` money type, `BillingRef`, clock, `Redact`, logging, `CrashLog` | nothing |
+| `odoo` | JSON-2 client, DTOs, catalog/pricing/order/session/customer/refund services, `CatalogCache`, `SaleFinalizer`, ZZ Cash balance + redemption | core |
 | `gst` | `GstTreatment`, `InvoiceDecision` — fiscal positions & GSTIN | core, odoo |
 | `pine` | `PaymentGateway` interface + `PineSdkGateway` + `FakePaymentGateway` | core |
 | `payment` | `PaymentCoordinator`, `Reconciler`, `PaymentAttempt` states, `PaymentSplit` rules, `UpiPayee` | core, pine, data |
@@ -116,12 +117,12 @@ val pineSdkPresent = pineSdkDir.resolve("com/pinelabs/billing").exists()
 
 This lets the project build and test everywhere without distributing the proprietary SDK.
 
-### Codebase stats (2026-10-23, after Phase 4b void)
+### Codebase stats (2026-10-24, after Phase 5)
 
-- **54 Kotlin files**, **5,775 lines** total (36 in `main`, 16 tests, real + stub gateway)
-- **16 unit test files, 124 `@Test` methods** (all pass on the dev Mac) covering: `Paise`,
+- **61 Kotlin files**, **6,529 lines** total (40 in `main`, 19 tests, real + stub gateway)
+- **19 unit test files, 143 `@Test` methods** (all pass on the dev Mac) covering: `Paise`, `CrashLog`, `CatalogCache`,
   `BillingRef`, `PaymentCoordinator`, `PaymentSplit`, `UpiPayee`, `ReceiptFormatter`, `TicketQr`,
-  `ZReportFormatter`, `OrderPayload`, `CustomerService`, `SessionService`, `GstFoundation`,
+  `ZReportFormatter`, `OrderPayload`, `CustomerService`, `SessionService`, `RefundService`, `GstFoundation`,
   `ZzCashService`, `ZzCashRedemption`, `ZzCashRewardCatalog`, `ZzCashPayload`
 
 ---
@@ -185,13 +186,12 @@ This lets the project build and test everywhere without distributing the proprie
 | **1** | Setup screen, catalogue from Odoo, cart, Odoo-priced totals | ✅ **in code** |
 | **2** | Payments: Card / UPI / BQR / Cash, journal, GetStatus, reconciliation, Odoo sync + outbox, receipt | ✅ **in code — needs on-device UAT** |
 | **3** | Customer lookup by phone, ZZ Cash balance + redeem | ✅ **in code — needs on-device UAT** (3a balance + 3b redeem; see `docs/ZZ_CASH.md`) |
-| **4** | Session open/close from the till, Z-report print, Void | 🔶 **4a + 4b in code** — session close (I9) + Z-report; card Void on the terminal. **4c Odoo refund order not built** (supervisor records it in Odoo) |
-| **5** | Hardening: offline cache, kiosk mode, crash reporting, infosec checklist | ⬜ before PROD |
+| **4** | Session open/close from the till, Z-report print, Void | ✅ **in code — needs on-device UAT** — session close (I9) + Z-report; card Void on the terminal + automatic Odoo refund order. Refund of *settled* sales (Pine `REFUND`) not built |
+| **5** | Hardening: offline cache, kiosk mode, crash reporting, infosec checklist | ✅ **in code — needs on-device UAT** (offline *selling* deliberately not built, see Phase 5) |
 
-**Where we are (2026-10-23):** code is through Phase 4b (session close + Z-report, card
-Void). Next in code: 4c Odoo refund order (needs a captured web POS refund payload first).
-Nothing has been run on the E700 yet, so the real gate is **UAT on device** (§10) —
-Phases 2–4 are unproven until the UAT script passes.
+**Where we are (2026-10-24):** all planned phases (0–5) are in code. Nothing has been run
+on the E700 yet, so the real gate is **UAT on device** (§10): build the signed UAT APK,
+send it to Pine with `docs/INFOSEC.md`, push via PAXSTORE, run the UAT script.
 
 **Built beyond the original plan:** split payment and Odoo 19 POS UI parity
 (`docs/UI_PARITY.md`), UPI payee (primary + fallback) with UPI IDs on Setup, Odoo e-bill QR
@@ -252,7 +252,7 @@ Diffed field-by-field against a captured web POS sale (`tools/payload-ref`). Mix
 carts are refused. `validate_coupon_programs` is not called. Not yet run on the E700, nor
 an outbox retry of a redeemed sale. Details and open items: `docs/ZZ_CASH.md`.
 
-**Phase 4 — Session & Void** 🔶 4a + 4b built, 4c next
+**Phase 4 — Session & Void** ✅ (needs on-device UAT)
 **4a (built):** `SessionService.open()` (`pos.session.create` + `set_opening_control`).
 `SessionService.close()` follows the Odoo 19 web POS closing popup (`closing_popup.js`):
 flush the outbox → I9 check (no unresolved attempt, empty outbox, no open void; blocks
@@ -263,20 +263,41 @@ the Z-report come from `get_closing_control_data`; `ZReportFormatter` prints the
 close (print failure → "Print again", never blocks).
 **4b (built):** `PaymentCoordinator.void(saleRef)` — paid **card** sales only, sharing the
 payment mutex. Persists a `void_attempt` row (Room v2, migration 1→2) before the SDK call;
-sends a new `billing_reference_id`, the sale amount, `bank_code = PINE_VOID_BANK_CODE`
-("01") and `original_transaction_id` = the sale's `TransactionResult.transaction_id`.
+sends a new `billing_reference_id`, the sale amount and `bank_code = PINE_VOID_BANK_CODE`
+("01"); `invoice_number` null (SDK 2.0 removed `original_transaction_id`; the AppToApp source of
+the sale's InvoiceNo is undocumented — confirm at UAT case 8).
 I6 amount check; ambiguous → `NEEDS_REVIEW`, never replayed; declined (e.g. settled) →
 `FAILED`, sale stands, retry allowed; one live void per sale. Reconciler sends voids
 interrupted by a crash to review. A `VOIDED` void stays open (red bar, blocks close via I9)
-until a supervisor taps "Refund recorded in Odoo". UI: top-bar "Void" lists today's card sales.
-**4c (next):** create the Odoo refund order from the till (`sync_from_ui` refund lines +
-negative payment) so the supervisor step goes away — needs a captured web POS refund
-payload first (§0: don't guess keys). Refund for settled transactions uses the same flow
-plus Pine `REFUND`.
+until its Odoo refund exists. UI: top-bar "Void" lists today's card sales.
+**4c (built):** right after a void, `RefundService` builds a full refund order and sends it
+through `sync_from_ui` + the outbox, the way the Odoo 19 web POS ticket screen does
+(`ticket_screen.js`): per line `qty` negated and `refunded_orderline_id` = original line id;
+order `is_refund`, same partner / fiscal position / `to_invoice`; one negative payment on
+the E700 method. Lines are read from Odoo's own `pos.order.line` records, not the cart (I2).
+The refund uuid is derived from the void ref, so retries are deduplicated by Odoo. Refused
+(supervisor does it in Odoo, "Supervisor: refunded in Odoo"): split bills (Odoo total ≠
+voided card amount), ZZ Cash redemptions, partly refunded bills, non-whole qty, sale not yet
+in Odoo, no open session. Why not `pos.order.refund()` + `pos.make.payment`: that wizard is
+POS-manager only (`ir.model.access.csv`) and the E700 user is POS User (§12).
+**Not built:** refund of a settled card sale (Pine `REFUND` + the same Odoo refund order).
 
-**Phase 5 — Hardening** ⬜
-Offline catalogue cache in Room (Cash-only offline). Lock-task kiosk mode, auto-start on
-boot. Crash reporting. Infosec pack for Pine review.
+**Phase 5 — Hardening** ✅ (needs on-device UAT)
+**Offline catalogue:** `CatalogCache` (JSON in private files, atomic write) saves config +
+products after each successful load; on `OdooException.Network` the till shows the cached
+catalogue with a yellow "No connection to Odoo" bar and Retry. **Offline selling is not
+built, on purpose:** every line must be priced by Odoo (I2, HARD RULE 2) and the server
+rejects paid ≠ total, so a cash sale priced offline would need local tax math. Revisit only
+with a verified way to reproduce `compute_all` (`round_per_line`) exactly.
+**Kiosk mode** (Setup switch, off by default): `BootReceiver` starts the till after boot;
+`Kiosk.apply` calls `startLockTask()` on resume only when `isLockTaskPermitted` — never the
+screen-pinning prompt. PAXSTORE must whitelist this app **and** `com.pinelabs.masterapp`
+for lock task, or payments break (`docs/INFOSEC.md` §6). Screen stays on (`FLAG_KEEP_SCREEN_ON`).
+**Crash reporting:** `CrashLog` — local only (no third-party SDK, no new endpoint), redacted
+before writing (10+ digit runs → last 4, bearer / api_key values removed), newest 10 kept,
+shown on Setup with Clear. Payment recovery after a crash stays with the Reconciler.
+**Infosec pack:** `docs/INFOSEC.md` — permissions, the single network endpoint, exported
+components, data at rest, logging policy, kiosk requirement, money-safety summary.
 
 ---
 
@@ -320,8 +341,8 @@ Private (`_x`) methods are not callable.
 
 - **AppToApp** (`TransportType.APP_TO_APP`), MasterApp `com.pinelabs.masterapp`.
 - Manifest: `<queries><package android:name="com.pinelabs.masterapp"/></queries>`.
-- SDK is a local Maven bundle (not on Maven Central). Download via Pine MCP tool
-  `get_pinelabs_sdk_download_link(sdk_name="android")` (links expire ~1 h). Unzip into
+- SDK is a local Maven bundle (not on Maven Central). Download via the Pine POS MCP (`https://mcp.pos.pinelabs.com/mcp`) tool
+  `get_pinelabs_sdk_download_link(sdk_version, binding="android")` (links expire ~1 h). Unzip into
   `app/libs/pine-billing-sdk-android-maven/`.
 
 ### Key verified facts
@@ -353,7 +374,9 @@ Private (`_x`) methods are not callable.
 
 ### Toolchain
 
-- JDK 17+ (JDK 21 temurin confirmed on dev Mac)
+- JDK 17+ (JDK 21 temurin confirmed on dev Mac). Not pinned in the repo's `gradle.properties`:
+  Android Studio uses its bundled JDK; on the Mac CLI run
+  `export JAVA_HOME=/Library/Java/JavaVirtualMachines/temurin-21.jdk/Contents/Home` first.
 - Android Gradle Plugin 8.x, Kotlin 2.x
 - `compileSdk 35`, **`minSdk 25`** (matches E700 Android 7.1.2)
 - Gradle wrapper 8.11.1
@@ -398,7 +421,7 @@ The dev Mac at `~/Downloads/pine-billing-sdk-android-1.0.0-prod/bohemian-odoo-po
 ```
 Build signed APK  →  Email to Pine Labs  →  Pine infosec review  →  PAXSTORE
                                                                       │
-                                              Push to UAT E700 (SN 1630005644)
+                                              Push to UAT E700 (SN 1340055807)
                                                                       │
                                               Run UAT test script (10 cases)
                                                                       │
@@ -423,10 +446,12 @@ company password manager + encrypted drive.
 | 5 | UPI sale, pay, kill app before result | Reconciler → GetStatus → SUCCESS, order synced |
 | 6 | Bharat QR sale | SUCCESS |
 | 7 | Wi-Fi off after payment success | Outbox, red badge, syncs when Wi-Fi returns |
-| 8 | Void a card sale (same day) | Void accepted with `bank_code` "01" and `original_transaction_id` = sale txn id; red bar until refund recorded in Odoo |
+| 8 | Void a card sale (same day) | Void accepted with `bank_code` "01" and `original_transaction_id` = sale txn id; Odoo shows a "… REFUND" order linked to the sale, stock returned, no red bar |
 | 9 | Printer out of paper | Payment still SUCCESS; "reprint" offered |
 | 10 | Two taps on Pay | Second tap ignored (single in-flight) |
 | 11 | Close session with an unconfirmed payment, then resolve it and close | First close blocked (I9, nothing sent to Odoo); second closes, Z-report matches Odoo's session report |
+| 12 | Kiosk on, reboot the E700, then take a card payment | Till starts by itself and is pinned; MasterApp payment screen opens normally; payment SUCCESS |
+| 13 | Wi-Fi off, restart the app | Cached catalogue shown with the yellow offline bar; pricing/payment refused with a friendly error; Retry recovers when Wi-Fi is back |
 
 ---
 
@@ -458,8 +483,10 @@ company password manager + encrypted drive.
 
 - [ ] PROD Pine Application ID (Pine issues after UAT sign-off)
 - [ ] Confirm `bank_code = "01"` for ZenZebra's acquirer (UAT case 8)
-- [ ] Confirm Void's `original_transaction_id` = sale `transaction_id` (assumed; docs only say it is required) (UAT case 8)
-- [ ] Capture a web POS refund `sync_from_ui` payload on the UAT config (unblocks 4c Odoo refund order)
+- [ ] Void on SDK 2.0 sends `invoice_number = null`. Confirm at UAT case 8 whether MasterApp needs the sale's InvoiceNo, and where it comes from. `PINE_RESULT_META_KEYS` in logcat lists the extra result fields the terminal returns
+- [ ] **Blocker:** UAT E700 has Plutus Plus (`com.pinelabs.plutusplus`) but no `com.pinelabs.masterapp`. Pine must provision the AppToApp payments application / Master service (see `docs/PINE_LABS_VERIFIED.md` §6)
+- [x] Upgrade Pine SDK 1.0.0 → 2.0.0 (2026-10-24, from the Pine POS MCP; `currency` string, `invoice_number`)
+- [ ] Capture a web POS refund `sync_from_ui` payload on the UAT config and diff it against `RefundService.buildPayload` (`tools/payload_diff.py`) — 4c was built from Odoo 19 source, not a capture
 - [x] Confirm SDK 1.0.0 `init` arity and `amount` type against `classes.jar` in AAR (2026-10-23)
 - [ ] Add E700 `pos.config` id to WhatsApp / ZZ Cash automation filters in Odoo
 - [ ] E700 printer width in dots and chars per line (measure on device)
@@ -468,6 +495,8 @@ company password manager + encrypted drive.
 - [ ] Written confirmation from Pine Labs on WebView/PAXSTORE position
 - [x] Run unit tests on Mac (`./gradlew testUatDebugUnitTest`) — 47 pass with real SDK (2026-10-23)
 - [ ] Rotate exposed release keystore password
+- [ ] PAXSTORE: lock-task whitelist for `com.bohemian.odoo.pos` **and** `com.pinelabs.masterapp` (kiosk mode, UAT case 12)
+- [ ] Setup screen (kiosk switch, API key) has no supervisor PIN — any cashier can open it
 - [ ] Odoo API key in use belongs to Ankur (internal user, res.users 28) — create a POS-User-only user for the E700 and issue its own key
 
 ---
@@ -489,3 +518,6 @@ in the repo root (`ODOO_URL`, `ODOO_DB`, `ODOO_USER`, `ODOO_API_KEY`). Writes ne
 | `DEPLOY_E700.md` | Mac setup, signing key, development vs release deployment pipeline |
 | `ZZ_CASH.md` | ZZ Cash balance (3a) and redemption (3b): payload, open items, UAT case |
 | `UI_PARITY.md` | Screen-by-screen parity with Odoo 19 POS, split payment rules |
+| `INFOSEC.md` | Infosec pack for Pine: permissions, endpoints, data at rest, logging, kiosk requirement |
+| `PINE_CASE_2026-10-24.md` | Integration case for Pine: routes (AppToApp / Cloud / PadController), what works vs blocked, questions |
+| `AGENT_PROMPT_E700_A2A.md` | Prompt for an on-device AI agent (adb) to run and report the App-to-App flow safely |

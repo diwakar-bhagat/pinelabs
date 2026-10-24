@@ -34,6 +34,7 @@ import com.bohemian.odoo.pos.receipt.ReceiptFormatter
 import com.bohemian.odoo.pos.receipt.ReceiptItem
 import com.bohemian.odoo.pos.odoo.ClosingSummary
 import com.bohemian.odoo.pos.odoo.CloseResult
+import com.bohemian.odoo.pos.odoo.RefundResult
 import com.bohemian.odoo.pos.receipt.ZReportCash
 import com.bohemian.odoo.pos.receipt.ZReportData
 import com.bohemian.odoo.pos.receipt.ZReportFormatter
@@ -77,10 +78,14 @@ data class SetupState(
     val methods: List<PaymentMethod> = emptyList(),
     val terminalMethodId: Int = 0,
     val cashMethodId: Int = 0,
-    val printerWidth: Int = 32,
+    val printerWidth: Int = 24,
     val useFake: Boolean = false,
     val upiPrimary: String = "",
     val upiFallback: String = "",
+    val kioskMode: Boolean = false,
+    /** Local crash reports (newest first): count and the first lines of the latest. */
+    val crashCount: Int = 0,
+    val latestCrash: String? = null,
     val busy: Boolean = false,
     val error: String? = null,
 )
@@ -129,6 +134,8 @@ data class SellState(
     val pay: PayUi = PayUi.Idle,
     /** Cashier's choice on the cart: use the backup UPI ID instead of the primary. */
     val upiUseFallback: Boolean = false,
+    /** Set when Odoo was unreachable and the catalogue comes from the device cache (Phase 5). */
+    val offlineCatalogSavedAt: Long? = null,
 ) {
     val filtered: List<Product>
         get() = if (query.isBlank()) products.take(60)
@@ -149,8 +156,25 @@ class PosViewModel(private val c: AppContainer) : ViewModel() {
             useFake = c.settings.useFakeGateway,
             upiPrimary = c.settings.upiPrimaryVpa,
             upiFallback = c.settings.upiFallbackVpa,
-        )
+            kioskMode = c.settings.kioskMode,
+        ).withCrashes()
     )
+
+    private fun SetupState.withCrashes(): SetupState {
+        val reports = c.crashLog.reports()
+        return copy(crashCount = reports.size, latestCrash = reports.firstOrNull()?.readLines()?.take(12)?.joinToString("\n"))
+    }
+
+    /** Takes effect at once; MainActivity applies lock task on resume, Setup applies it on toggle. */
+    fun setKioskMode(v: Boolean) {
+        c.settings.kioskMode = v
+        _setup.update { it.copy(kioskMode = v) }
+    }
+
+    fun clearCrashReports() {
+        c.crashLog.clear()
+        _setup.update { it.withCrashes() }
+    }
     val setup: StateFlow<SetupState> = _setup.asStateFlow()
 
     private val _sell = MutableStateFlow(SellState())
@@ -233,9 +257,19 @@ class PosViewModel(private val c: AppContainer) : ViewModel() {
             c.fiscalPositions.primeTaxFiscalPositions(products.flatMap { it.taxIds })
             _sell.update {
                 it.copy(
-                    config = cfg, products = products, loading = false,
+                    config = cfg, products = products, loading = false, offlineCatalogSavedAt = null,
                     fiscalPosition = fiscalPositionsById[cfg.defaultFiscalPositionId],
                 )
+            }
+            runCatching { c.catalogCache.save(cfg, products) }.onFailure { PosLog.w("CATALOG_CACHE_SAVE_FAILED", "err" to it.message) }
+        } catch (e: OdooException.Network) {
+            // Phase 5: show the last catalogue so the till is usable for browsing; selling
+            // still needs Odoo pricing (I2), which fails with a friendly error until it is back.
+            val cached = c.catalogCache.load()
+            _sell.update {
+                if (cached == null) it.copy(loading = false, error = friendly(e))
+                else it.copy(config = cached.config, products = cached.products, loading = false,
+                    offlineCatalogSavedAt = cached.savedAt, error = null)
             }
         } catch (e: Exception) {
             _sell.update { it.copy(loading = false, error = friendly(e)) }
@@ -320,7 +354,7 @@ class PosViewModel(private val c: AppContainer) : ViewModel() {
             methods = summary.nonCash.map { ZReportMethod(it.name, it.count, it.amount) },
             notes = ui.notes.trim().ifBlank { null },
         )
-        val printed = when (val r = c.gateway.print(ZReportFormatter(c.settings.printerWidth).format(data), "Z${cfg?.currentSessionId ?: 0}")) {
+        val printed = when (val r = c.gateway.print(ZReportFormatter(c.settings.printerWidth).format(data), "Z${cfg?.currentSessionId ?: 0}", c.settings.printerWidth)) {
             PrintResult.Printed -> true
             is PrintResult.Failed -> { PosLog.w("ZREPORT_PRINT_FAILED", "reason" to r.reason); false }
         }
@@ -357,8 +391,7 @@ class PosViewModel(private val c: AppContainer) : ViewModel() {
         val sale = _voiding.value?.confirm ?: return@launch
         _voiding.update { it?.copy(busy = true, message = null) }
         val msg = when (val o = c.payments.void(sale.billingRef)) {
-            is VoidOutcome.Voided ->
-                "✓ Voided ${o.attempt.amount.format()} on the terminal.\nNow refund bill ${sale.billingRef} in Odoo, then tap 'Refund recorded in Odoo'."
+            is VoidOutcome.Voided -> "✓ Voided ${o.attempt.amount.format()} on the terminal.\n" + recordRefund(o.attempt)
             is VoidOutcome.NotVoided -> "✕ Not voided: ${o.reason}\nIf the batch is settled, refund instead."
             is VoidOutcome.NotSent -> "Void not sent: ${o.reason}"
             is VoidOutcome.Unresolved ->
@@ -375,7 +408,33 @@ class PosViewModel(private val c: AppContainer) : ViewModel() {
     }
 
     fun confirmOdooRefund(ref: String) = viewModelScope.launch {
-        runCatching { c.payments.confirmOdooRefund(ref) }.onFailure { _sell.update { s -> s.copy(error = it.message) } }
+        runCatching { c.payments.confirmOdooRefund(ref, "manual: supervisor recorded the refund in Odoo") }
+            .onFailure { _sell.update { s -> s.copy(error = it.message) } }
+    }
+
+    /** Red-bar retry for a voided sale whose Odoo refund was not created yet. */
+    fun retryOdooRefund(ref: String) = viewModelScope.launch {
+        val v = c.voidJournal.get(ref) ?: return@launch
+        _sell.update { it.copy(error = recordRefund(v)) }
+    }
+
+    /**
+     * Phase 4c: the Odoo refund order for a voided sale. Once it is in Odoo or durably in the
+     * outbox, the void is closed. Anything else leaves the void open for a retry or a supervisor.
+     */
+    private suspend fun recordRefund(v: com.bohemian.odoo.pos.payment.VoidAttempt): String = try {
+        val last4 = c.journal.get(v.saleRef)?.details?.last4
+        when (val r = c.refunds.refundVoidedSale(v, _sell.value.config?.currentSessionId, last4)) {
+            is RefundResult.Recorded -> {
+                c.payments.confirmOdooRefund(v.billingRef,
+                    "refund order ${r.refundUuid} " + if (r.syncedNow) "synced to Odoo" else "queued in outbox")
+                if (r.syncedNow) "Refund recorded in Odoo." else "Refund queued — it reaches Odoo when the connection is back."
+            }
+            is RefundResult.NotEligible -> "Odoo refund not created: ${r.reason}"
+        }
+    } catch (e: Exception) {
+        PosLog.w("REFUND_BUILD_FAILED", "void" to v.billingRef, "err" to e.message)
+        "Odoo refund not created (${friendly(e)}). Retry from the red bar."
     }
 
     fun setQuery(q: String) = _sell.update { it.copy(query = q) }
@@ -670,9 +729,9 @@ class PosViewModel(private val c: AppContainer) : ViewModel() {
         PosLog.i("PAY_UI_OUTCOME", "outcome" to outcome::class.simpleName)
     }
 
-    /** The e-bill QR for this sale, or null if Odoo has no token for it yet. Never blocks printing. */
+    /** The e-bill link for this sale, or null if Odoo has no token for it yet. Never blocks printing. */
     private suspend fun eBillQr(uuid: String): String? = try {
-        c.orderSync.accessTokenFor(uuid)?.let { TicketQr.pngBase64(TicketQr.ticketUrl(BuildConfig.ODOO_BASE_URL, it)) }
+        c.orderSync.accessTokenFor(uuid)?.let { TicketQr.ticketUrl(BuildConfig.ODOO_BASE_URL, it) }
     } catch (e: Exception) {
         PosLog.w("EBILL_QR_SKIPPED", "order" to uuid, "err" to e.message)
         null
@@ -696,9 +755,9 @@ class PosViewModel(private val c: AppContainer) : ViewModel() {
             customerName = sale.customer?.name,
             footer = listOf("Thank you for shopping!", "Try it. Love it. ZenZebra."),
             reprint = reprint,
-            qrImageBase64 = qr,
+            eBillUrl = qr,
         )
-        return when (val r = c.gateway.print(fmt.format(data), attempt?.billingRef ?: sale.orderUuid.take(12))) {
+        return when (val r = c.gateway.print(fmt.format(data), attempt?.billingRef ?: sale.orderUuid.take(12), c.settings.printerWidth)) {
             PrintResult.Printed -> true
             is PrintResult.Failed -> { PosLog.w("PRINT_FAILED", "reason" to r.reason); false }
         }

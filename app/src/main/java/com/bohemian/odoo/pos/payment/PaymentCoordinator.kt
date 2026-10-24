@@ -126,7 +126,8 @@ class PaymentCoordinator(
             val sale = journal.get(saleRef) ?: return@withLock VoidOutcome.Refused("Payment $saleRef not found")
             if (!sale.state.isPaid) return@withLock VoidOutcome.Refused("Only a paid sale can be voided")
             if (sale.mode != PayMode.CARD) return@withLock VoidOutcome.Refused("Only card sales can be voided on the terminal")
-            val originalTxnId = sale.details?.transactionId
+            // Only a sale the terminal itself confirmed (it returned a transaction id) is voided from the till.
+            sale.details?.transactionId
                 ?: return@withLock VoidOutcome.Refused("No terminal transaction id for $saleRef — void it from the terminal menu")
             voids.forSale(saleRef).firstOrNull { it.state != VoidState.FAILED }?.let {
                 return@withLock VoidOutcome.Refused("Sale $saleRef already has a void (${it.billingRef}, ${it.state})")
@@ -140,7 +141,7 @@ class PaymentCoordinator(
             voids.insert(v) // HARD RULE 4: persist before acting
             PosLog.i("VOID_START", "ref" to v.billingRef, "sale" to saleRef, "amount" to v.amount)
 
-            val result = gateway().void(VoidRequest(v.billingRef, v.amount, PINE_VOID_BANK_CODE, originalTxnId)) { eventId ->
+            val result = gateway().void(VoidRequest(v.billingRef, v.amount, PINE_VOID_BANK_CODE, invoiceNumber = null)) { eventId ->
                 backgroundScope.launch { voids.setEventId(v.billingRef, eventId, clock()) }
             }
             PosLog.i("VOID_RESPONSE", "ref" to v.billingRef, "result" to result::class.simpleName)
@@ -159,11 +160,14 @@ class PaymentCoordinator(
         if (voided) VoidOutcome.Voided(fresh) else VoidOutcome.NotVoided(fresh, "Confirmed not voided")
     }
 
-    /** Supervisor confirms the refund for a voided sale is recorded in Odoo. Closes the void. */
-    suspend fun confirmOdooRefund(billingRef: String) = mutex.withLock {
+    /**
+     * The refund for a voided sale is in Odoo: sent / queued by the till (4c), or recorded by
+     * a supervisor in the back office. Closes the void.
+     */
+    suspend fun confirmOdooRefund(billingRef: String, note: String = "refund recorded in Odoo") = mutex.withLock {
         val v = voids.get(billingRef) ?: error("no void $billingRef")
         check(v.state == VoidState.VOIDED) { "void not voided: ${v.state}" }
-        voids.transition(billingRef, VoidState.ODOO_REFUNDED, clock(), note = "refund recorded in Odoo")
+        voids.transition(billingRef, VoidState.ODOO_REFUNDED, clock(), note = note)
         PosLog.i("VOID_ODOO_REFUNDED", "ref" to billingRef)
     }
 
@@ -199,7 +203,7 @@ class PaymentCoordinator(
         }
         is GatewayResult.Rejected -> {
             voids.transition(v.billingRef, VoidState.FAILED, clock(), note = "${r.kind}: ${r.detail}")
-            VoidOutcome.NotSent(voids.get(v.billingRef)!!, friendly(r.kind))
+            VoidOutcome.NotSent(voids.get(v.billingRef)!!, friendly(r.kind, r.detail))
         }
         is GatewayResult.Ambiguous -> {
             voids.transition(v.billingRef, VoidState.NEEDS_REVIEW, clock(), note = "${r.kind}: ${r.detail}")
@@ -232,7 +236,7 @@ class PaymentCoordinator(
         }
         is GatewayResult.Rejected -> {
             journal.transition(a.billingRef, AttemptState.REJECTED, clock(), note = "${r.kind}: ${r.detail}")
-            PaymentOutcome.NotSent(journal.get(a.billingRef)!!, friendly(r.kind))
+            PaymentOutcome.NotSent(journal.get(a.billingRef)!!, friendly(r.kind, r.detail))
         }
         is GatewayResult.Declined ->
             if (a.mode.needsStatusCheckOnFailure) {
@@ -298,6 +302,14 @@ class PaymentCoordinator(
         a.state.isFinal -> PaymentOutcome.NotPaid(a, reason)
         else -> PaymentOutcome.Unresolved(a)
     }
+
+    /**
+     * Cashier text plus the SDK's own reason on a second line, so a photo of the screen is
+     * enough to diagnose (e.g. "bindService returned false" vs "MasterApp is not installed").
+     * SDK reasons carry no card or customer data.
+     */
+    internal fun friendly(kind: String, detail: String?): String =
+        friendly(kind) + (detail?.takeIf { it.isNotBlank() }?.let { "\n[$kind: ${it.take(200)}]" } ?: "\n[$kind]")
 
     private fun friendly(kind: String) = when (kind) {
         "OperationInProgress" -> "Terminal is busy with another operation. Wait and retry."

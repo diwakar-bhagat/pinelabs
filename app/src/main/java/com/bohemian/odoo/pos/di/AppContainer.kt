@@ -13,6 +13,7 @@ import com.bohemian.odoo.pos.odoo.CustomerService
 import com.bohemian.odoo.pos.odoo.OdooJson2Client
 import com.bohemian.odoo.pos.odoo.OrderSyncService
 import com.bohemian.odoo.pos.odoo.PendingWork
+import com.bohemian.odoo.pos.odoo.RefundService
 import com.bohemian.odoo.pos.odoo.PricingService
 import com.bohemian.odoo.pos.odoo.SaleFinalizer
 import com.bohemian.odoo.pos.odoo.SessionService
@@ -33,10 +34,13 @@ class AppContainer(context: Context) {
     val appScope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
 
     val settings = DeviceSettings(context)
+    /** Reads the reports PosApp's installed handler writes (same private dir). */
+    val crashLog = com.bohemian.odoo.pos.core.CrashLog(java.io.File(context.filesDir, "crash"))
     val db = AppDatabase.create(context)
 
     val odoo = OdooJson2Client(BuildConfig.ODOO_BASE_URL, BuildConfig.ODOO_DB, apiKey = { settings.odooApiKey })
     val catalog = CatalogService(odoo)
+    val catalogCache = com.bohemian.odoo.pos.odoo.CatalogCache(java.io.File(context.filesDir, "catalog/catalog.json"))
     val fiscalPositions = com.bohemian.odoo.pos.odoo.FiscalPositionService(odoo)
     val pricing = PricingService(odoo, fiscalPositions)
     val sessions = SessionService(odoo, pendingWork = {
@@ -64,6 +68,7 @@ class AppContainer(context: Context) {
             }
         }
     )
+    val refunds = RefundService(odoo, orderSync, terminalPaymentMethodId = { settings.terminalPaymentMethodId })
     val finalizer = SaleFinalizer(db.snapshots(), orderSync, terminalPaymentMethodId = { settings.terminalPaymentMethodId })
 
     private val realGateway: PaymentGateway by lazy { PineSdkGateway() }

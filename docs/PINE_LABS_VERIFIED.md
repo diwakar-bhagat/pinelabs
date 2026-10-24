@@ -94,3 +94,61 @@ SDK fields mean on the wire.
 3. Whether `GetStatus` is meaningful for a card sale, or UPI/BQR only.
 4. Whether `charge_slip_print_data` duplicates anything MasterApp prints on its own.
 5. Written confirmation on the WebView/PAXSTORE position.
+
+## 6. Pine POS MCP answers (2026-10-24, `https://mcp.pos.pinelabs.com/mcp`, server 1.3.0)
+
+The official Pine Billing SDK documentation server. No login needed. Tools: `getDocumentationList`,
+`getDocumentation`, `resolveSdkVersion`, `get_pinelabs_sdk_download_link`.
+
+**Which transport for our app** (`concepts/transports`, `concepts/integration-landscape`):
+- Billing app on the same Android terminal as the payments app → **AppToApp**.
+- Billing app on a separate device → **PadController** (wired/USB/serial/Bluetooth are PadController UI modes).
+- Remote or backend billing → **Cloud**.
+So ours stays **AppToApp**. Prerequisite (`recipes/apptoapp-android`): "the compatible **Pinelabs payments
+application** installed on the same device". AppToApp goes through a Pine-managed **Master service**
+(the SDK binds `com.pinelabs.masterapp` / `.SERVER`; see `classes.jar`). The corpus names no package for the payments
+application and says to confirm anything undocumented with Pinelabs integration support.
+
+**UAT E700 SN 1340055807 (2026-10-24, adb):** payments app is `com.pinelabs.plutusplus` (versionCode 250212),
+plus `com.pinelabs.ecradapterservice`, `com.pinelabs.peripheralappservice`, `com.pinelabs.tmsstore`.
+**`com.pinelabs.masterapp` is not installed** → the SDK fails with `MasterApp is not installed`. Pine must
+provision the compatible payments application / Master service for AppToApp on this terminal.
+
+**SDK 2.0.0 is the latest stable** (only production successor of 1.0.0; `releases/2.0.0`, `migration/1.0-to-2.0`):
+- AppToApp reuses one MasterApp Messenger connection and reconnects automatically after binder death.
+- `get_terminal_info` is supported on AppToApp in 2.0.0 (returns `NotSupported` on 1.0.0).
+- **Breaking:** `TransactionOptions.original_transaction_id` is removed; `invoice_number` maps to upstream `InvoiceNo`.
+  The 2.0.0 Void template sends `invoice_number` ("invoice number of the sale being voided", flow-dependent) plus
+  `bank_code` "01". The 1.0.0 Void template sends neither `original_transaction_id` nor `invoice_number`.
+  Our 1.0.0 void currently also sends `original_transaction_id` = sale `transaction_id`, which is an assumption.
+- `currency` becomes an ISO-4217 string (`"INR"`) instead of the `CurrencyCode` enum.
+
+**Payments app screens (photos, 2026-10-24):**
+- **Live store E700:** the Pine Payments app lists every payment option. These include Card, Dynamic QR (UPI),
+  Static QR, Bank/Brand EMI, Pay By Points, Pine 360 and **"Cloud Based Transaction"**.
+- **UAT E700 SN 1340055807:** the Payments app shows only **Settle Batch**, with no payment methods. Its menu has
+  **Activate**, Set/Test Connection and Device Details, and the header says "logged in: 1234". It carries the DEBUG
+  badge. Reading: the UAT payments app is **not activated / not configured** with payment methods. Activation needs
+  Pine (no public SDK doc covers it), so don't try **Activate** with guessed values.
+- The "Cloud Based Transaction" option on the live terminal suggests these Plutus Plus terminals take bills from Pine
+  Cloud (SDK `Cloud` transport). Ask Pine whether this terminal family supports AppToApp (MasterApp) at all, or
+  whether Cloud is the intended route.
+
+## 7. Pine's reference app `prpratheesh/plutusapp_new` vs our app (checked 2026-10-24, commit d043126)
+
+| | Pine reference app | Our app |
+|---|---|---|
+| UI stack | **Flutter** (Dart UI + a Kotlin `MethodChannel` bridge), so hybrid | **Native Android**, Kotlin + Jetpack Compose |
+| How it reaches Pine | Legacy direct protocol: binds `com.pinelabs.masterapp` / `.SERVER`, then `startActivityForResult(Intent("com.pinelabs.masterapp.HYBRID_REQUEST"), REQUEST_DATA = {Header{ApplicationId, UserId, MethodId 1001/1002, VersionNo}, Detail{BillingRefNo, PaymentAmount (paise), TransactionType 4001…}})` | **Pine Billing SDK 2.0.0** AppToApp, which binds the same `com.pinelabs.masterapp.SERVER` and builds that envelope internally |
+| Needs MasterApp | Yes, the same package | Yes, the same package |
+| Status per Pine docs | Legacy integration. The Pine MCP guardrail `guardrails/sdk-only-integration` says not to recreate `MethodId`/`Header`/`Detail` envelopes | The current, documented way |
+
+**Verdict:** our approach is the correct and newer one. The reference app would fail on our UAT
+E700 the same way ("MasterApp is not installed"), because both need MasterApp.
+
+**Adopted from it** (print data values only, sent through SDK `PrintItem` fields, not the legacy envelope):
+- `PrintDataType 0` = text, `PrinterWidth 24` (also in Pine's email sample). The app default width is now 24.
+- `PrintDataType 4` = **QR code printed from text** (`DataToPrint` = URL). The e-bill QR is now sent as
+  `text = <e-bill URL>, print_data_type = 4` instead of a base64 PNG. This avoids the undocumented image path.
+  `3` appears for a barcode. Confirm both on the E700 (UAT case 9).
+
