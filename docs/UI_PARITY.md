@@ -46,6 +46,11 @@ As in the web POS, the points this cart earns count with the card balance (34.6 
 
 ## 3. Payment screen (`payment_screen/`)
 
+Status (0.3.0): built for split bills as `ui/PaymentScreen.kt` (SPLIT on the pay row). The tiles are
+Cash, Card and UPI (Card and UPI are both the E700 method in Odoo). Each Card / UPI line has its own
+CHARGE, and cash is taken at Validate. There is no Customer / Invoice button there yet: the cart's
+customer is used.
+
 Layout, top to bottom (from the screenshot):
 
 1. **Method tiles** (2 columns): Razorpay, Cash, Cards, Razorpay Online, UPI, Pine labs,

@@ -370,6 +370,60 @@ Reviewed against the web POS (config 1 "ZenZebra") and the live DB.
 - **Keypad is resizable**: drag the grip (snaps 0 / 36 / 48 dp per key), tap to fold; kept in
   `DeviceSettings.keypadKeyDp`. The cart scrolls to the selected line.
 
+### Decisions 2026-10-27 (field test, 0.3.0)
+
+The terminal turned out to run an older build: the BQR tile and the balance-only reward rule were in
+0.1.0, `main` and `release-rc1`, and three builds shared versionCode 2. So the build is now **0.3.0 (3)**,
+and the version shows on the top bar and on Setup.
+- **No more "ZenZebra has stopped" after a restart.**
+  - **The crash:** the Reconciler held the payment mutex through a whole UPI status loop (3 × 5 s plus
+    GetStatus with no app timeout). "Supervisor: NOT paid" queued behind it, then hit
+    `check(!isFinal)` in an uncaught `viewModelScope.launch`.
+  - **Mutex only per call:** the status loop now takes the mutex per GetStatus only. A supervisor
+    decision wins at once and stops the loop. `resolveManually` / `checkAgain` are idempotent and
+    never throw.
+  - **No crash on a bug:** every ViewModel coroutine runs through `launchSafe` (a
+    `CoroutineExceptionHandler`), giving a local crash report plus a message, never a process kill.
+    The app scope has the same handler.
+  - **Bar and Back:** the bar shows "Checking with the terminal…" and accepts one tap per ref. Back is
+    swallowed during a payment.
+- **PENDING is not declined.** SDK 2.0.0 `TransactionStatus` is SUCCESS / FAILED / PENDING. PENDING
+  is `Ambiguous` (checked again, then review), never DECLINED, so a QR that is still payable is never
+  charged twice.
+- **Time limits.** GetStatus is limited to 45 s, then counted as unknown; print to 30 s. The sale keeps
+  the SDK's own timeout. Odoo calls are cancellable (`enqueue` + cancel) with a 40 s `callTimeout`,
+  and a non-JSON reply becomes `OdooException.Server("BadResponse")`.
+- **Latency:**
+  - pricing waits 150 ms after the last tap, cancels the old pass and drops stale results by a
+    generation counter (no stale reward or totals), and prices lines in parallel (4 at a time); its
+    cache is cleared per catalogue load;
+  - catalogue reads after `config` run together (live: 1.42 s → 0.42 s for 7 reads), the saved
+    catalogue shows first (browse only, no selling until refreshed), and mapping, sorting and the cache
+    write run off Main;
+  - "Paid" shows as soon as Odoo has the order and the bill prints behind it, with "Print again" if it
+    fails;
+  - bill reads run in parallel, with tax names cached and the phone taken from the customer;
+  - the outbox never sends one order twice at once;
+  - search waits for a pause in typing;
+  - photos are fetched 40 per read, and the photo cache is capped at 24 MB;
+  - settings are read into memory once.
+  - Product pages are still fetched one after another, which keeps the completeness check
+    deterministic.
+- **Rewards** load the earning rules with the customer, so this bill's points count before payment.
+  The ⋮ Reward is lit when a reward fits, and a missing rule set says so with a Retry.
+- **Split payment (Odoo's payment screen).** SPLIT is the 4th tile and opens `ui/PaymentScreen.kt`
+  (`PaymentSplit` rules).
+  - **Charging:** each Card / UPI line is its own attempt, capped at what is still due
+    (`pay(…, orderTotal)`). An unresolved part blocks the next.
+  - **Validate:** sends terminal parts plus cash for the rest; the change is handed back, not booked.
+  - **Part-paid bills:** the cart is locked (new bill, edits, customer, reward) and a red bar offers
+    FINISH. Session close counts them (I9).
+  - **Odoo side:** a part-paid order is never sent to Odoo. `recoverPaid` on start finalizes a fully
+    paid sale whose order never reached the outbox.
+- **Setup PIN** `core/SetupPin.kt`: 1234 until changed in Setup. Only a salted SHA-256 is stored in the
+  encrypted settings. 5 wrong tries lock it for 60 s, and the lock survives a restart. A till without
+  an Odoo key / POS opens Setup without the PIN.
+
 ---
 
 ## 6. Odoo integration (verified against live DB, 2026-09-21)
@@ -532,6 +586,12 @@ company password manager + encrypted drive.
 | 15 | Customer with < ₹50 ZZ Cash buys enough to earn ≥ 50 | "Use reward" offered; ₹50 off applied; paid; Odoo shows the reward lines and the card ends at balance + earned − 50 |
 | 16 | New customer: type a new mobile, Find, enter a name, Save | "Saved: Name · ••••1234"; customer attached; partner exists once in Odoo; WhatsApp bill on payment |
 | 17 | Long cart: drag the keypad grip down, then tap it | Keypad shrinks, then folds; every cart line reachable; size kept after restart |
+| 18 | UPI sale, kill the app on the Pine screen, restart; tap "Supervisor: NOT paid" (twice) | Bar shows "Checking with the terminal…"; the tap works at once; no "has stopped"; cart can be charged again |
+| 19 | UPI, then Back on the Pine screen without paying | No hang; outcome or the bar within about a minute; the till keeps working |
+| 20 | SPLIT ₹500: UPI ₹300, then Cash ₹200 (tendered ₹500) | UPI charged for ₹300 only; Validate; change ₹300 shown; Odoo order has 2 payment lines = ₹500; bill shows both |
+| 21 | SPLIT: UPI ₹200, then Card for the rest; close the screen after UPI | Red bar "partly paid"; cart and New bill locked; FINISH reopens it; Card charges only the rest |
+| 22 | SETUP with 1234, change the PIN, wrong PIN 5 × | Setup opens; new PIN works, 1234 no longer; locked 60 s after 5 wrong tries |
+| 23 | Top bar badge | Shows "PROD · 0.3.0", so the installed build is never a guess |
 
 ---
 
@@ -577,7 +637,10 @@ company password manager + encrypted drive.
 - [ ] Rotate exposed release keystore password
 - [ ] Build and `apksigner`-verify the signed PROD APK at versionCode 2 / 0.1.1 (`docs/REVIEW.md` §6)
 - [ ] PAXSTORE: lock-task whitelist for `com.bohemian.odoo.pos` **and** `com.pinelabs.masterapp` (kiosk mode, UAT case 12)
-- [ ] Setup screen (kiosk switch, API key) has no supervisor PIN — any cashier can open it
+- [x] Setup screen behind a supervisor PIN (1234 by default, changeable; 0.3.0)
+- [ ] On device: which callback MasterApp sends when Back is pressed on its payment screen (logcat `PINE_RESULT` / `PINE_FAILURE`)
+- [ ] The SDK's own timeout for a sale is undocumented; the till does not cut a live payment short
+- [ ] Abandoning a split bill after a UPI part: UPI cannot be voided from the till; a supervisor refunds it in Odoo
 - [ ] A voided E700 sale keeps its earned ZZ Cash (Odoo's refund books negative points) — fix with the settled-sale refund
 - [ ] Live check of `confirm_coupon_programs` from the till: one approved cash sale, then `loyalty.history` read back
 - [ ] Odoo API key in use belongs to Ankur (internal user, res.users 28) — create a POS-User-only user for the E700 and issue its own key
