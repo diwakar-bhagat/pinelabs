@@ -43,7 +43,7 @@ masked PAN, from which it keeps the last 4 digits.
 
 | Data | Where | Protection |
 |---|---|---|
-| Odoo API key, POS config, payment method ids, UPI IDs, printer width, kiosk flag | `EncryptedSharedPreferences` | AES-256-GCM values, AES-256-SIV keys, Android Keystore master key |
+| Odoo API key, POS config, payment method ids, printer width, kiosk flag | `EncryptedSharedPreferences` | AES-256-GCM values, AES-256-SIV keys, Android Keystore master key |
 | Payment journal: billing ref, amount, mode, state, terminal transaction id, RRN, auth code, last 4, card brand | Room DB `bohemian-pos.db` | App-private; **no full PAN, no CVV, no track data ever stored** |
 | Void journal (same fields for reversals) | Room DB | App-private |
 | Order outbox: `sync_from_ui` payloads waiting for Odoo (lines, totals, partner id, payment lines as above) | Room DB | App-private; deleted once Odoo confirms |
@@ -51,7 +51,8 @@ masked PAN, from which it keeps the last 4 digits.
 | Catalogue cache (products, prices, barcodes, POS config) | `files/catalog/catalog.json` | App-private; not sensitive |
 | Crash reports (stack traces) | `files/crash/` | App-private; redacted before writing (§5); newest 10 kept |
 
-`android:allowBackup="false"` and `fullBackupContent="false"`: nothing goes to a device or cloud backup.
+`android:allowBackup="false"`, `fullBackupContent="false"` and `dataExtractionRules` (Android 12+, everything excluded): nothing goes to a device or cloud backup or device transfer.
+Debug builds use the debug key, never the release key.
 Debug builds only (never release): `sync_from_ui` payloads are also written to app-specific
 external storage for diffing.
 

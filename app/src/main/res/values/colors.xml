@@ -1,0 +1,5 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!-- ZenZebra cream (zenzebra.in) for the window background; the full palette is ui/Theme.kt -->
+    <color name="zz_cream">#FFF5F2EC</color>
+</resources>

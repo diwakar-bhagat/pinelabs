@@ -15,6 +15,7 @@ import androidx.compose.foundation.lazy.grid.GridCells
 import androidx.compose.foundation.lazy.grid.LazyVerticalGrid
 import androidx.compose.foundation.lazy.grid.items
 import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.KeyboardActions
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.material3.*
@@ -38,7 +39,6 @@ import com.bohemian.odoo.pos.PosApp
 import com.bohemian.odoo.pos.core.Paise
 import com.bohemian.odoo.pos.odoo.ZzCashRules
 import com.bohemian.odoo.pos.payment.PaymentOutcome
-import com.bohemian.odoo.pos.payment.UpiPayee
 import com.bohemian.odoo.pos.payment.VoidState
 import com.bohemian.odoo.pos.data.VoidAttemptEntity
 import com.bohemian.odoo.pos.pine.PayMode
@@ -64,7 +64,7 @@ class MainActivity : ComponentActivity() {
         super.onCreate(savedInstanceState)
         window.addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
         setContent {
-            MaterialTheme(colorScheme = lightColorScheme(primary = Color(0xFF111111), secondary = Color(0xFFFFC107))) {
+            ZenZebraTheme {
                 Surface(Modifier.fillMaxSize()) { PosRoot(vm) }
             }
         }
@@ -127,11 +127,6 @@ fun SetupScreen(vm: PosViewModel) {
                 Switch(s.useFake, { vm.setUseFake(it) }); Spacer(Modifier.width(8.dp))
                 Text("Use FAKE payment gateway (debug only — no real money)")
             }
-            Text("6. Business UPI IDs (shown on the UPI QR)")
-            OutlinedTextField(s.upiPrimary, vm::setUpiPrimary, Modifier.fillMaxWidth(), singleLine = true,
-                label = { Text("Primary UPI ID (name@bank)") })
-            OutlinedTextField(s.upiFallback, vm::setUpiFallback, Modifier.fillMaxWidth(), singleLine = true,
-                label = { Text("Backup UPI ID, used if the primary bank is down (optional)") })
             Button({ vm.finishSetup() }, enabled = !s.busy) { Text("Start selling") }
         }
 
@@ -168,22 +163,25 @@ fun SellScreen(vm: PosViewModel) {
 
     Column(Modifier.fillMaxSize()) {
         // Top bar
-        Row(Modifier.fillMaxWidth().background(Color(0xFF111111)).padding(horizontal = 16.dp, vertical = 10.dp),
+        Row(Modifier.fillMaxWidth().background(Zz.Black).padding(horizontal = 16.dp, vertical = 10.dp),
             verticalAlignment = Alignment.CenterVertically) {
-            Text("ZenZebra · ${s.config?.name ?: "…"}", color = Color.White, fontWeight = FontWeight.Bold, fontSize = 18.sp)
+            Text("ZENZEBRA", color = Zz.Red, style = ZzHeading, fontSize = 20.sp)
+            Text("  ·  ${(s.config?.name ?: "…").uppercase()}", color = Zz.Cream, style = ZzHeading, fontSize = 16.sp)
             Spacer(Modifier.width(12.dp))
-            Badge(containerColor = Color(0xFFFFC107)) { Text(vm.envLabel, color = Color.Black) }
+            // PROD is the normal state; anything else (UAT, NO PINE SDK) is flagged in gold.
+            val prod = vm.envLabel == "PROD"
+            Badge(containerColor = if (prod) Zz.Ink else Zz.Gold) { Text(vm.envLabel, color = if (prod) Zz.MutedOnBlack else Zz.Black) }
             Spacer(Modifier.weight(1f))
-            if (outbox > 0) Badge(containerColor = Color.Red) { Text("$outbox not synced to Odoo", color = Color.White) }
-            if (unresolved.isNotEmpty()) { Spacer(Modifier.width(8.dp)); Badge(containerColor = Color(0xFFFF6F00)) { Text("${unresolved.size} payment(s) to check", color = Color.White) } }
+            if (outbox > 0) Badge(containerColor = Zz.Red) { Text("$outbox not synced to Odoo", color = Zz.Cream) }
+            if (unresolved.isNotEmpty()) { Spacer(Modifier.width(8.dp)); Badge(containerColor = Zz.Gold) { Text("${unresolved.size} payment(s) to check", color = Zz.Black) } }
             Spacer(Modifier.width(12.dp))
-            TextButton({ vm.startVoid() }) { Text("Void", color = Color.White) }
-            if (s.config?.sessionOpen == true) TextButton({ vm.startClose() }) { Text("Close session", color = Color.White) }
-            TextButton({ vm.reopenSetup() }) { Text("Setup", color = Color.White) }
+            TextButton({ vm.startVoid() }) { Text("VOID", color = Zz.Cream, style = ZzHeading) }
+            if (s.config?.sessionOpen == true) TextButton({ vm.startClose() }) { Text("CLOSE SESSION", color = Zz.Cream, style = ZzHeading) }
+            TextButton({ vm.reopenSetup() }) { Text("SETUP", color = Zz.MutedOnBlack, style = ZzHeading) }
         }
         s.error?.let { Text(it, color = MaterialTheme.colorScheme.error, modifier = Modifier.padding(8.dp)) }
         s.offlineCatalogSavedAt?.let { at ->
-            Row(Modifier.fillMaxWidth().background(Color(0xFFFFF59D)).padding(8.dp), verticalAlignment = Alignment.CenterVertically) {
+            Row(Modifier.fillMaxWidth().background(Zz.GoldSoft).padding(8.dp), verticalAlignment = Alignment.CenterVertically) {
                 Text("No connection to Odoo — showing the catalogue saved " +
                     SimpleDateFormat("dd-MMM HH:mm", Locale("en", "IN")).format(Date(at)) +
                     ". Prices and payment need Odoo. ", Modifier.weight(1f))
@@ -224,8 +222,8 @@ fun SellScreen(vm: PosViewModel) {
                 }
             }
             // Cart
-            Column(Modifier.weight(0.38f).fillMaxHeight().background(Color(0xFFF5F5F5)).padding(12.dp)) {
-                Text("Cart", fontWeight = FontWeight.Bold, fontSize = 18.sp)
+            Column(Modifier.weight(0.38f).fillMaxHeight().background(Zz.CreamDeep).padding(12.dp)) {
+                Text("CART", style = ZzHeading, fontSize = 18.sp)
                 LazyColumn(Modifier.weight(1f)) {
                     items(s.lines, key = { it.uuid }) { l ->
                         Row(Modifier.fillMaxWidth().padding(vertical = 4.dp), verticalAlignment = Alignment.CenterVertically) {
@@ -241,22 +239,27 @@ fun SellScreen(vm: PosViewModel) {
                 val t = s.totals
                 TotalRow("Excl. tax", t?.totalExcl)
                 TotalRow("GST", t?.tax)
-                TotalRow("TOTAL", t?.totalIncl, big = true)
+                // Total on rich black: the one number the cashier and customer must read.
+                Row(Modifier.fillMaxWidth().padding(top = 6.dp).background(Zz.Black).padding(horizontal = 12.dp, vertical = 10.dp),
+                    verticalAlignment = Alignment.CenterVertically) {
+                    Text("TOTAL", Modifier.weight(1f), color = Zz.Cream, style = ZzHeading, fontSize = 20.sp)
+                    Text(t?.totalIncl?.format() ?: "—", color = Zz.Cream, style = ZzHeading, fontSize = 26.sp)
+                }
                 if (s.pricing) Text("Getting prices from Odoo…", fontSize = 12.sp)
 
                 // ---- Customer section ----
                 val cust = s.customer
                 if (cust != null) {
-                    Row(Modifier.fillMaxWidth().background(Color(0xFFE8F5E9)).padding(horizontal = 12.dp, vertical = 6.dp),
+                    Row(Modifier.fillMaxWidth().background(Zz.GoldSoft).padding(horizontal = 12.dp, vertical = 6.dp),
                         verticalAlignment = Alignment.CenterVertically) {
                         Text("✓ ${cust.name}", Modifier.weight(1f), fontSize = 14.sp,
-                            fontWeight = FontWeight.Bold, color = Color(0xFF2E7D32))
-                        cust.phone?.let { Text(it, fontSize = 12.sp, color = Color.Gray) }
+                            fontWeight = FontWeight.Bold, color = Zz.Black)
+                        cust.phone?.let { Text(it, fontSize = 12.sp, color = Zz.Muted) }
                         // Only show a balance that belongs to the customer on screen.
                         s.zzCash?.takeIf { it.partnerId == cust.id }?.let { z ->
                             Spacer(Modifier.width(8.dp))
                             Text("ZZ Cash ${z.redeemable.format()}", fontSize = 12.sp,
-                                fontWeight = FontWeight.Bold, color = Color(0xFF2E7D32))
+                                fontWeight = FontWeight.Bold, color = Zz.Black)
                         }
                         Spacer(Modifier.width(8.dp))
                         TextButton({ vm.clearCustomer() }) { Text("Clear", fontSize = 12.sp) }
@@ -265,7 +268,7 @@ fun SellScreen(vm: PosViewModel) {
                     s.zzRedemption?.let { r ->
                         Row(Modifier.fillMaxWidth().padding(horizontal = 12.dp), verticalAlignment = Alignment.CenterVertically) {
                             Text("ZZ Cash −${r.reward.amount.format()} applied", Modifier.weight(1f),
-                                fontSize = 13.sp, color = Color(0xFF2E7D32))
+                                fontSize = 13.sp, color = Zz.Black)
                             TextButton({ vm.removeZzCash() }) { Text("Remove", fontSize = 12.sp) }
                         }
                     }
@@ -290,7 +293,7 @@ fun SellScreen(vm: PosViewModel) {
                         keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Phone))
                     if (s.customerMatches.isNotEmpty()) {
                         Card(Modifier.fillMaxWidth().heightIn(max = 120.dp),
-                            colors = CardDefaults.cardColors(containerColor = Color.White)) {
+                            colors = CardDefaults.cardColors(containerColor = Zz.Cream)) {
                             LazyColumn {
                                 items(s.customerMatches, key = { it.id }) { match ->
                                     Row(Modifier.fillMaxWidth().clickable { vm.pickCustomer(match) }
@@ -298,7 +301,7 @@ fun SellScreen(vm: PosViewModel) {
                                         verticalAlignment = Alignment.CenterVertically) {
                                         Column(Modifier.weight(1f)) {
                                             Text(match.name, fontSize = 14.sp, maxLines = 1, overflow = TextOverflow.Ellipsis)
-                                            Text(match.phone ?: "", fontSize = 12.sp, color = Color.Gray)
+                                            Text(match.phone ?: "", fontSize = 12.sp, color = Zz.Muted)
                                         }
                                     }
                                 }
@@ -310,26 +313,11 @@ fun SellScreen(vm: PosViewModel) {
                 }
 
                 val canPay = t != null && !s.pricing && s.pay == PayUi.Idle && s.config?.sessionOpen == true
-                // UPI ID toggle: shown before the UPI payment, on this same screen.
-                vm.upiPayee()?.let { payee ->
-                    Row(Modifier.fillMaxWidth().padding(top = 8.dp), verticalAlignment = Alignment.CenterVertically,
-                        horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                        Text("UPI ID", fontSize = 12.sp, color = Color.Gray)
-                        if (payee.fallback == null) {
-                            Text(payee.primary, fontSize = 12.sp)
-                        } else {
-                            FilterChip(!s.upiUseFallback, { vm.setUpiUseFallback(false) },
-                                label = { Text(payee.primary, fontSize = 12.sp) })
-                            FilterChip(s.upiUseFallback, { vm.setUpiUseFallback(true) },
-                                label = { Text(payee.fallback, fontSize = 12.sp) })
-                        }
-                    }
-                }
                 Row(Modifier.fillMaxWidth().padding(top = 8.dp), horizontalArrangement = Arrangement.spacedBy(6.dp)) {
                     PayButton("CARD", canPay, Modifier.weight(1f)) { vm.payWithTerminal(PayMode.CARD) }
                     PayButton("UPI", canPay, Modifier.weight(1f)) { vm.payWithTerminal(PayMode.UPI) }
                     PayButton("BQR", canPay, Modifier.weight(1f)) { vm.payWithTerminal(PayMode.BHARAT_QR) }
-                    PayButton("CASH", canPay, Modifier.weight(1f)) { vm.payCash(null) }
+                    PayButton("CASH", canPay, Modifier.weight(1f), dark = true) { vm.payCash(null) }
                 }
             }
         }
@@ -344,7 +332,7 @@ fun SellScreen(vm: PosViewModel) {
 /** A void that still needs a person: review on the terminal, or the Odoo refund. */
 @Composable
 private fun VoidBar(v: VoidAttemptEntity, vm: PosViewModel) {
-    Row(Modifier.fillMaxWidth().background(Color(0xFFFFCDD2)).padding(8.dp), verticalAlignment = Alignment.CenterVertically) {
+    Row(Modifier.fillMaxWidth().background(Zz.RedSoft).padding(8.dp), verticalAlignment = Alignment.CenterVertically) {
         val amount = Paise(v.amountPaise).format()
         when (v.state) {
             VoidState.NEEDS_REVIEW.name -> {
@@ -452,12 +440,21 @@ private fun TotalRow(label: String, value: Paise?, big: Boolean = false) {
 }
 
 @Composable
-private fun PayButton(label: String, enabled: Boolean, modifier: Modifier, onClick: () -> Unit) =
-    Button(onClick, modifier.height(56.dp), enabled = enabled) { Text(label, fontWeight = FontWeight.Bold) }
+private fun PayButton(label: String, enabled: Boolean, modifier: Modifier, dark: Boolean = false, onClick: () -> Unit) =
+    Button(
+        onClick, modifier.height(60.dp), enabled = enabled,
+        shape = RoundedCornerShape(6.dp),
+        colors = ButtonDefaults.buttonColors(
+            containerColor = if (dark) Zz.Black else Zz.Red,
+            contentColor = Zz.Cream,
+            disabledContainerColor = Zz.Line,
+            disabledContentColor = Zz.Muted,
+        ),
+    ) { Text(label, style = ZzHeading, fontSize = 16.sp) }
 
 @Composable
 private fun UnresolvedBar(ref: String, mode: String, vm: PosViewModel) {
-    Row(Modifier.fillMaxWidth().background(Color(0xFFFFE0B2)).padding(8.dp), verticalAlignment = Alignment.CenterVertically) {
+    Row(Modifier.fillMaxWidth().background(Zz.GoldSoft).padding(8.dp), verticalAlignment = Alignment.CenterVertically) {
         Text("Payment $ref ($mode) not confirmed. ", Modifier.weight(1f))
         if (mode != PayMode.CARD.name) OutlinedButton({ vm.checkAgain(ref) }) { Text("Check status") }
         Spacer(Modifier.width(6.dp))
