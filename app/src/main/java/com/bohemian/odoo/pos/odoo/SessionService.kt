@@ -9,8 +9,14 @@ import kotlinx.serialization.json.intOrNull
 import kotlinx.serialization.json.jsonPrimitive
 
 /** Work on this device that must finish before the session may close (Invariant I9). */
-data class PendingWork(val unresolvedAttempts: Int, val unsyncedOrders: Int, val openVoids: Int = 0) {
-    val isClear: Boolean get() = unresolvedAttempts == 0 && unsyncedOrders == 0 && openVoids == 0
+data class PendingWork(
+    val unresolvedAttempts: Int,
+    val unsyncedOrders: Int,
+    val openVoids: Int = 0,
+    /** Synced sales whose ZZ Cash points Odoo has not booked yet (confirm_coupon_programs). */
+    val pendingLoyalty: Int = 0,
+) {
+    val isClear: Boolean get() = unresolvedAttempts == 0 && unsyncedOrders == 0 && openVoids == 0 && pendingLoyalty == 0
 }
 
 /** One line of pos.session.get_closing_control_data. */

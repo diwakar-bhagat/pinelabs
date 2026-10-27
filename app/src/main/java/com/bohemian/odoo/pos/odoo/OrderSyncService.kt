@@ -3,6 +3,8 @@ package com.bohemian.odoo.pos.odoo
 import com.bohemian.odoo.pos.core.Paise
 import com.bohemian.odoo.pos.gst.InvoiceDecision
 import com.bohemian.odoo.pos.core.PosLog
+import com.bohemian.odoo.pos.data.LoyaltyConfirmDao
+import com.bohemian.odoo.pos.data.LoyaltyConfirmEntity
 import com.bohemian.odoo.pos.data.OutboxDao
 import com.bohemian.odoo.pos.data.OutboxEntity
 import com.bohemian.odoo.pos.pine.PayMode
@@ -40,6 +42,10 @@ data class PaidSale(
     val fiscalPositionId: Int? = null,
     /** ZZ Cash reward on this sale, sent as a negative reward line. Its amount is inside [totals]. */
     val redemption: ZzCashRedemption? = null,
+    /** ZZ Cash this sale earns (LoyaltyPoints.earned at payment start); booked after sync. */
+    val loyaltyEarned: Paise = Paise.ZERO,
+    /** The customer's ZZ Cash card, or null when they have none yet (Odoo creates it). */
+    val loyaltyCardId: Int? = null,
 ) {
     val amountPaid: Paise get() = payments.fold(Paise.ZERO) { a, p -> a + p.amount }
 }
@@ -52,17 +58,64 @@ data class PaidSale(
 class OrderSyncService(
     private val odoo: OdooJson2Client,
     private val outbox: OutboxDao,
+    private val loyalty: LoyaltyConfirmDao? = null,
     private val clock: () -> Long = System::currentTimeMillis,
     private val onPayloadGenerated: ((uuid: String, payload: JsonObject) -> Unit)? = null,
 ) {
     /** Persist first, then try once. Returns true if Odoo confirmed now. */
-    suspend fun submit(sale: PaidSale): Boolean = submitPayload(sale.orderUuid, buildPayload(sale), sale.totals.totalIncl.value)
+    suspend fun submit(sale: PaidSale): Boolean =
+        submitPayload(sale.orderUuid, buildPayload(sale), sale.totals.totalIncl.value, couponData(sale))
 
-    /** Any ready sync_from_ui payload (sale or refund): persist first, then try once. */
-    suspend fun submitPayload(uuid: String, payload: JsonObject, amountPaise: Long): Boolean {
+    /**
+     * Any ready sync_from_ui payload (sale or refund): persist first, then try once.
+     * [couponData] is the ZZ Cash change to book with `confirm_coupon_programs` once the order exists.
+     */
+    suspend fun submitPayload(uuid: String, payload: JsonObject, amountPaise: Long, couponData: JsonObject? = null): Boolean {
         onPayloadGenerated?.invoke(uuid, payload)
+        if (couponData != null) {
+            checkNotNull(loyalty) { "loyalty journal missing" }
+                .upsert(LoyaltyConfirmEntity(uuid, couponData.toString(), 0, null, clock(), 0))
+        }
         outbox.upsert(OutboxEntity(uuid, payload.toString(), amountPaise, 0, null, clock(), 0))
         return trySend(uuid, payload)
+    }
+
+    /**
+     * Odoo 19 never moves loyalty points inside `sync_from_ui`. The web POS books them right after
+     * with `pos.order.confirm_coupon_programs` (pos_store.js `postProcessLoyalty`): it adds the
+     * points earned, subtracts the reward's `points_cost` and writes `loyalty.history`. Without this
+     * call a redeemed reward is never deducted and nothing is earned.
+     *
+     * Safe to retry: Odoo drops coupon data for an order that already has a loyalty.history line
+     * (`_remove_duplicate_coupon_data`). The row stays until Odoo answers, and blocks session close (I9).
+     */
+    private suspend fun confirmLoyalty(row: LoyaltyConfirmEntity): Boolean = try {
+        val orderId = odoo.call("pos.order", "search_read", jsonOf(
+            "domain" to listOf(listOf("uuid", "=", row.orderUuid)),
+            "fields" to listOf("id"),
+            "limit" to 1,
+        )).objects().firstOrNull()?.int("id")
+        if (orderId == null) {
+            loyalty!!.markFailed(row.orderUuid, "order not in Odoo yet", clock() + backoff(row.attempts))
+            false
+        } else {
+            val data = odoo.json.parseToJsonElement(row.couponDataJson).jsonObject
+            odoo.call("pos.order", "confirm_coupon_programs", jsonOf("ids" to listOf(orderId), "coupon_data" to data))
+            loyalty!!.delete(row.orderUuid)
+            PosLog.i("LOYALTY_CONFIRMED", "uuid" to row.orderUuid, "order" to orderId)
+            true
+        }
+    } catch (e: OdooException) {
+        loyalty!!.markFailed(row.orderUuid, e.message ?: "error", clock() + backoff(row.attempts))
+        PosLog.w("LOYALTY_CONFIRM_FAILED", "uuid" to row.orderUuid, "attempt" to (row.attempts + 1), "err" to e.message)
+        false
+    }
+
+    /** Loyalty rows whose order is already in Odoo (its outbox row is gone). */
+    private suspend fun flushLoyalty(now: Long) {
+        val dao = loyalty ?: return
+        val waitingOrders = outbox.due(Long.MAX_VALUE).map { it.orderUuid }.toSet()
+        for (row in dao.due(now)) if (row.orderUuid !in waitingOrders) confirmLoyalty(row)
     }
 
     /**
@@ -85,6 +138,7 @@ class OrderSyncService(
             val payload = odoo.json.parseToJsonElement(e.payloadJson).jsonObject
             if (trySend(e.orderUuid, payload, e.attempts)) sent++
         }
+        flushLoyalty(clock())
         return sent
     }
 
@@ -95,17 +149,20 @@ class OrderSyncService(
             val payload = odoo.json.parseToJsonElement(e.payloadJson).jsonObject
             if (trySend(e.orderUuid, payload, e.attempts)) sent++
         }
+        flushLoyalty(Long.MAX_VALUE)
         return sent
     }
+
+    private fun backoff(attempts: Int) = minOf(15 * 60_000L, 30_000L shl minOf(attempts, 5)) // 30s → 16 min cap
 
     private suspend fun trySend(uuid: String, payload: JsonObject, attempts: Int = 0): Boolean = try {
         odoo.call("pos.order", "sync_from_ui", payload)
         outbox.delete(uuid)
         PosLog.i("ORDER_SYNCED", "uuid" to uuid)
+        loyalty?.get(uuid)?.let { confirmLoyalty(it) }
         true
     } catch (e: OdooException) {
-        val backoffMs = minOf(15 * 60_000L, 30_000L shl minOf(attempts, 5)) // 30s → 16 min cap
-        outbox.markFailed(uuid, e.message ?: e::class.simpleName ?: "error", clock() + backoffMs)
+        outbox.markFailed(uuid, e.message ?: e::class.simpleName ?: "error", clock() + backoff(attempts))
         PosLog.w("ORDER_SYNC_FAILED", "uuid" to uuid, "attempt" to (attempts + 1), "err" to e.message)
         false
     }
@@ -113,6 +170,16 @@ class OrderSyncService(
     companion object {
         private fun odooUtc(millis: Long): String =
             SimpleDateFormat("yyyy-MM-dd HH:mm:ss", Locale.ROOT).apply { timeZone = TimeZone.getTimeZone("UTC") }.format(Date(millis))
+
+        /** Pure: the ZZ Cash change of this sale, or null when there is none. */
+        fun couponData(s: PaidSale): JsonObject? = LoyaltyPoints.couponData(
+            programId = ZzCashService.PROGRAM_ID,
+            partnerId = s.customer?.id,
+            cardId = s.redemption?.cardId ?: s.loyaltyCardId,
+            earned = s.loyaltyEarned,
+            spent = s.redemption?.reward?.points ?: Paise.ZERO,
+            rewardCodes = listOfNotNull(s.redemption?.rewardCode),
+        )
 
         /** Pure: unit-tested in OrderPayloadTest. */
         fun buildPayload(s: PaidSale): JsonObject {
@@ -133,7 +200,7 @@ class OrderSyncService(
                     "price_subtotal" to l.totalExcl!!.toRupees(),
                     "price_subtotal_incl" to l.totalIncl!!.toRupees(),
                 ))
-            } + listOfNotNull(s.redemption?.let { rewardLine(it) })
+            } + (s.redemption?.let { rewardLines(it) } ?: emptyList())
             val order = mapOf(
                 "uuid" to s.orderUuid,
                 "session_id" to s.sessionId,
@@ -171,29 +238,32 @@ class OrderSyncService(
         }
 
         /**
-         * The ZZ Cash reward as Odoo's POS sends it: a qty-1 line at a negative price, flagged
-         * as a reward. Odoo checks the card's points against `points_cost` at sync.
-         * Shape taken from a captured web-POS redemption (tools/payload-ref, 2026-10-23).
+         * The ZZ Cash reward as Odoo's POS sends it: one qty-1 line at a negative price per tax group,
+         * flagged as a reward, all with the same `reward_identifier_code`; only the first carries the
+         * `points_cost` (pos_order.js `_getRewardLineValuesDiscount`). The points themselves move in
+         * `confirm_coupon_programs` after sync.
+         * Line shape taken from a captured web-POS redemption (tools/payload-ref, 2026-10-23).
          */
-        private fun rewardLine(r: ZzCashRedemption): List<Any> {
-            val incl = requireNotNull(r.totalIncl) { "ZZ Cash reward must be priced before sync" }
-            val excl = requireNotNull(r.totalExcl) { "ZZ Cash reward must be priced before sync" }
-            return listOf(0, 0, mapOf(
-                "uuid" to UUID.randomUUID().toString(),
-                "product_id" to r.reward.discountProductId,
-                "full_product_name" to r.reward.description,
-                "qty" to 1,
-                "price_unit" to Paise(-r.reward.amount.value).toRupees(),
-                "discount" to 0,
-                "tax_ids" to listOf(listOf(6, 0, r.taxIds)),
-                "price_subtotal" to excl.toRupees(),
-                "price_subtotal_incl" to incl.toRupees(),
-                "is_reward_line" to true,
-                "reward_id" to r.reward.rewardId,
-                "coupon_id" to r.cardId,
-                "reward_identifier_code" to r.rewardCode,
-                "points_cost" to r.reward.points.toRupees(),
-            ))
+        private fun rewardLines(r: ZzCashRedemption): List<List<Any>> {
+            require(r.isPriced) { "ZZ Cash reward must be priced before sync" }
+            return r.parts.mapIndexed { i, p ->
+                listOf(0, 0, mapOf(
+                    "uuid" to UUID.randomUUID().toString(),
+                    "product_id" to r.reward.discountProductId,
+                    "full_product_name" to r.reward.description,
+                    "qty" to 1,
+                    "price_unit" to Paise(-p.amount.value).toRupees(),
+                    "discount" to 0,
+                    "tax_ids" to listOf(listOf(6, 0, p.taxIds)),
+                    "price_subtotal" to p.totalExcl!!.toRupees(),
+                    "price_subtotal_incl" to p.totalIncl!!.toRupees(),
+                    "is_reward_line" to true,
+                    "reward_id" to r.reward.rewardId,
+                    "coupon_id" to r.cardId,
+                    "reward_identifier_code" to r.rewardCode,
+                    "points_cost" to (if (i == 0) r.reward.points else Paise.ZERO).toRupees(),
+                ))
+            }
         }
     }
 }

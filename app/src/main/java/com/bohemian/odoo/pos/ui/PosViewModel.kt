@@ -15,6 +15,8 @@ import com.bohemian.odoo.pos.odoo.ZzCashBalance
 import com.bohemian.odoo.pos.odoo.ZzCashReward
 import com.bohemian.odoo.pos.odoo.ZzCashRedemption
 import com.bohemian.odoo.pos.odoo.ZzCashRules
+import com.bohemian.odoo.pos.odoo.LoyaltyPoints
+import com.bohemian.odoo.pos.odoo.LoyaltyRule
 import com.bohemian.odoo.pos.odoo.FiscalPosition
 import com.bohemian.odoo.pos.odoo.OdooException
 import com.bohemian.odoo.pos.odoo.PaidSale
@@ -121,6 +123,8 @@ data class SellState(
     val zzRewards: List<ZzCashReward> = emptyList(),
     /** The ZZ Cash reward applied to this sale, priced by Odoo once the cart is priced. */
     val zzRedemption: ZzCashRedemption? = null,
+    /** ZZ Cash earning rules (loyalty.rule of program 4). Null until loaded. */
+    val zzRules: List<LoyaltyRule>? = null,
     /**
      * The fiscal position the cart was priced with. It must be the one sent to Odoo,
      * otherwise our totals and Odoo's disagree on an inter-state B2B sale.
@@ -132,6 +136,9 @@ data class SellState(
     /** Set when Odoo was unreachable and the catalogue comes from the device cache (Phase 5). */
     val offlineCatalogSavedAt: Long? = null,
 ) {
+    /** ZZ Cash this cart earns, as the web POS shows it ("34.6 +1.2 = 35.8"). */
+    val zzEarned: Paise get() = zzRules?.let { LoyaltyPoints.earned(it, lines) } ?: Paise.ZERO
+
     val filtered: List<Product>
         get() = if (query.isBlank()) products.take(60)
         else query.trim().lowercase().let { q ->
@@ -240,9 +247,11 @@ class PosViewModel(private val c: AppContainer) : ViewModel() {
             val fposIds = (cfg.fiscalPositionIds + listOfNotNull(cfg.defaultFiscalPositionId)).distinct()
             fiscalPositionsById = c.fiscalPositions.load(fposIds)
             c.fiscalPositions.primeTaxFiscalPositions(products.flatMap { it.taxIds })
+            val rules = runCatching { c.zzCash.rules() }.onFailure { PosLog.w("ZZ_RULES_LOAD_FAILED", "err" to it.message) }.getOrNull()
             _sell.update {
                 it.copy(
                     config = cfg, products = products, loading = false, offlineCatalogSavedAt = null,
+                    zzRules = rules,
                     fiscalPosition = fiscalPositionsById[cfg.defaultFiscalPositionId],
                 )
             }
@@ -312,6 +321,7 @@ class PosViewModel(private val c: AppContainer) : ViewModel() {
                         if (r.pending.unresolvedAttempts > 0) add("${r.pending.unresolvedAttempts} payment(s) still to check")
                         if (r.pending.unsyncedOrders > 0) add("${r.pending.unsyncedOrders} paid bill(s) not yet in Odoo")
                         if (r.pending.openVoids > 0) add("${r.pending.openVoids} void(s) to finish")
+                        if (r.pending.pendingLoyalty > 0) add("${r.pending.pendingLoyalty} bill(s) with ZZ Cash not yet booked in Odoo")
                     }.joinToString(" and ") + ". Resolve before closing.")
                 }
                 is CloseResult.Refused -> _closing.update {
@@ -505,9 +515,6 @@ class PosViewModel(private val c: AppContainer) : ViewModel() {
         if (s.lines.isEmpty() || s.lines.any { !it.isPriced }) {
             _sell.update { it.copy(error = "Wait for Odoo prices before applying ZZ Cash") }; return
         }
-        if (ZzCashRules.singleTaxSet(s.lines.map { it.product.taxIds }) == null) {
-            _sell.update { it.copy(error = "ZZ Cash works when every item has the same tax rate") }; return
-        }
         if (reward.points > balance.redeemable) {
             _sell.update { it.copy(error = "Not enough ZZ Cash for ${reward.description}") }; return
         }
@@ -592,22 +599,25 @@ class PosViewModel(private val c: AppContainer) : ViewModel() {
     }
 
     /**
-     * Price the reward line with Odoo's compute_all, using the cart's single tax rate.
-     * Null when the reward no longer applies (mixed taxes, or the bill fell to or below it).
+     * Split the reward over the cart's tax groups like Odoo ([ZzCashRules.split]) and price each
+     * negative line with Odoo's compute_all. Null when the reward no longer applies (bill at or below it).
      */
     private suspend fun priceRedemption(r: ZzCashRedemption, lines: List<CartLine>, position: FiscalPosition?): ZzCashRedemption? {
-        val taxIds = ZzCashRules.singleTaxSet(lines.map { it.product.taxIds }) ?: return null
         val cartTotal = c.pricing.totals(lines)?.totalIncl ?: return null
         if (r.reward.amount >= cartTotal) return null
-        val line = c.pricing.price(
-            CartLine(
-                uuid = "zz-${r.rewardCode}",
-                product = Product(r.reward.discountProductId, r.reward.description, Paise(-r.reward.amount.value), null, null, taxIds),
-                qty = 1,
-            ),
-            position,
-        )
-        return r.copy(totalIncl = line.totalIncl, totalExcl = line.totalExcl, taxIds = taxIds)
+        val parts = ZzCashRules.split(r.reward.amount, lines).takeIf { it.isNotEmpty() } ?: return null
+        val priced = parts.mapIndexed { i, part ->
+            val line = c.pricing.price(
+                CartLine(
+                    uuid = "zz-${r.rewardCode}-$i",
+                    product = Product(r.reward.discountProductId, r.reward.description, Paise(-part.amount.value), null, null, part.taxIds),
+                    qty = 1,
+                ),
+                position,
+            )
+            part.copy(totalIncl = line.totalIncl, totalExcl = line.totalExcl)
+        }
+        return r.copy(parts = priced)
     }
 
     /** Cart total plus the priced reward (a negative line). Null until every line is priced. */
@@ -673,7 +683,22 @@ class PosViewModel(private val c: AppContainer) : ViewModel() {
             removeZzCash()
             return null
         }
-        val snap = SaleSnapshot.of(s.orderUuid, cfg, s.lines, totals, customer, s.fiscalPosition?.id, s.zzRedemption)
+        // ZZ Cash: points are booked after sync (confirm_coupon_programs), so they must be known now.
+        var rules = s.zzRules
+        if (customer != null && rules == null) {
+            rules = runCatching { c.zzCash.rules() }.getOrNull()
+                ?: run { _sell.update { it.copy(error = "Could not load ZZ Cash rules from Odoo. Check the connection and try again.") }; return null }
+            _sell.update { it.copy(zzRules = rules) }
+        }
+        s.zzRedemption?.let { r ->
+            // Odoo's own pre-payment check (validate_coupon_programs): the card still covers the reward.
+            val check = runCatching { c.zzCash.validateRedemption(r.cardId, r.reward.points) }
+                .getOrElse { err -> _sell.update { it.copy(error = friendly(err as? Exception ?: Exception(err))) }; return null }
+            if (check != null) { _sell.update { it.copy(error = "ZZ Cash: $check") }; return null }
+        }
+        val earned = if (customer != null) LoyaltyPoints.earned(rules.orEmpty(), s.lines) else Paise.ZERO
+        val cardId = s.zzCash?.takeIf { it.partnerId == customer?.id }?.cardId
+        val snap = SaleSnapshot.of(s.orderUuid, cfg, s.lines, totals, customer, s.fiscalPosition?.id, s.zzRedemption, earned, cardId)
         c.finalizer.save(snap) // HARD RULE 4/7: the cart survives a crash mid-payment
         return snap
     }

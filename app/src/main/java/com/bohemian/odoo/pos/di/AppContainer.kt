@@ -48,6 +48,7 @@ class AppContainer(context: Context) {
             unresolvedAttempts = journal.unresolved().size,
             unsyncedOrders = db.outbox().count(),
             openVoids = voidJournal.open().size,
+            pendingLoyalty = db.loyalty().count(),
         )
     })
     val customers = CustomerService(odoo)
@@ -55,6 +56,7 @@ class AppContainer(context: Context) {
     val orderSync = OrderSyncService(
         odoo = odoo,
         outbox = db.outbox(),
+        loyalty = db.loyalty(),
         onPayloadGenerated = { uuid, payload ->
             if (BuildConfig.DEBUG) {
                 runCatching {
