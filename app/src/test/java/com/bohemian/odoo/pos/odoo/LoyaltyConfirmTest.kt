@@ -17,6 +17,7 @@ import okhttp3.mockwebserver.MockResponse
 import okhttp3.mockwebserver.MockWebServer
 import org.junit.After
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Before
 import org.junit.Test
@@ -65,10 +66,19 @@ class LoyaltyConfirmTest {
         lines = listOf(CartLine("l1", chai, 1, Paise.ofRupees(20), Paise(1905))),
         totals = CartTotals(Paise.ofRupees(20), Paise(1905)), customer = customer,
         payments = listOf(PaymentLineData(2, Paise.ofRupees(20), null, null, null)),
-        paidAtMillis = 0, loyaltyEarned = Paise(120), loyaltyCardId = 535,
+        paidAtMillis = 0, loyaltyEarned = Paise(120), loyaltyCardId = 535, loyaltyProgramId = 4,
     )
 
     private fun path() = server.takeRequest().path!!.substringAfterLast('/')
+
+    @Test fun `points are booked on the program the sale was made under`() {
+        val data = OrderSyncService.couponData(sale().copy(loyaltyProgramId = 12))!!
+        assertEquals(12, data["535"]!!.jsonObject["program_id"]!!.jsonPrimitive.int)
+    }
+
+    @Test fun `no program on the sale books no points`() {
+        assertNull(OrderSyncService.couponData(sale().copy(loyaltyProgramId = null)))
+    }
 
     @Test fun `points are confirmed on the synced order right after sync`() = runTest {
         server.enqueue(MockResponse().setBody("""{"pos.order": []}"""))

@@ -46,6 +46,8 @@ data class PaidSale(
     val loyaltyEarned: Paise = Paise.ZERO,
     /** The customer's ZZ Cash card, or null when they have none yet (Odoo creates it). */
     val loyaltyCardId: Int? = null,
+    /** loyalty.program the points belong to (ZzCashService.program at payment). Null = none to book. */
+    val loyaltyProgramId: Int? = null,
     /** pos.preset of the order (the config default, e.g. Pickup); null when presets are off. */
     val presetId: Int? = null,
 ) {
@@ -160,15 +162,18 @@ class OrderSyncService(
         private fun odooUtc(millis: Long): String =
             SimpleDateFormat("yyyy-MM-dd HH:mm:ss", Locale.ROOT).apply { timeZone = TimeZone.getTimeZone("UTC") }.format(Date(millis))
 
-        /** Pure: the ZZ Cash change of this sale, or null when there is none. */
-        fun couponData(s: PaidSale): JsonObject? = LoyaltyPoints.couponData(
-            programId = ZzCashService.PROGRAM_ID,
-            partnerId = s.customer?.id,
-            cardId = s.redemption?.cardId ?: s.loyaltyCardId,
-            earned = s.loyaltyEarned,
-            spent = s.redemption?.reward?.points ?: Paise.ZERO,
-            rewardCodes = listOfNotNull(s.redemption?.rewardCode),
-        )
+        /** Pure: the ZZ Cash change of this sale, or null when there is none (or no program to book it on). */
+        fun couponData(s: PaidSale): JsonObject? {
+            val programId = s.loyaltyProgramId ?: return null
+            return LoyaltyPoints.couponData(
+                programId = programId,
+                partnerId = s.customer?.id,
+                cardId = s.redemption?.cardId ?: s.loyaltyCardId,
+                earned = s.loyaltyEarned,
+                spent = s.redemption?.reward?.points ?: Paise.ZERO,
+                rewardCodes = listOfNotNull(s.redemption?.rewardCode),
+            )
+        }
 
         /** Pure: unit-tested in OrderPayloadTest. */
         fun buildPayload(s: PaidSale): JsonObject {

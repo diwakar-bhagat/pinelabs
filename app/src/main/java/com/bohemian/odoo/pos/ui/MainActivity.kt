@@ -208,7 +208,7 @@ fun SellScreen(vm: PosViewModel) {
         if (s.config != null && !s.config!!.sessionOpen && s.offlineCatalogSavedAt == null) {
             Row(Modifier.padding(8.dp), verticalAlignment = Alignment.CenterVertically) {
                 Text("No open session for ${s.config!!.name}. ")
-                Button({ vm.openSession() }) { Text("Open session") }
+                Button({ vm.openSession() }, enabled = !s.loading) { Text("Open session") }
             }
         }
         if (unresolved.isNotEmpty()) UnresolvedBar(unresolved.first().billingRef, unresolved.first().mode, vm)

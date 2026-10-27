@@ -13,11 +13,15 @@ class CatalogService(private val odoo: OdooJson2Client) {
             "fields" to CONFIG_FIELDS,
         )).objects().map { it.toConfig() }
 
-    suspend fun config(id: Int): PosConfig =
-        odoo.call("pos.config", "read", jsonOf(
-            "ids" to listOf(id),
+    /**
+     * The saved config, or null when it was deleted, archived or is outside this user's
+     * record rules. search_read, not read: read by id still returns an archived config.
+     */
+    suspend fun config(id: Int): PosConfig? =
+        odoo.call("pos.config", "search_read", jsonOf(
+            "domain" to listOf(listOf("id", "=", id)),
             "fields" to CONFIG_FIELDS,
-        )).objects().first().toConfig()
+        )).objects().firstOrNull()?.toConfig()
 
     suspend fun paymentMethods(ids: List<Int>): List<PaymentMethod> =
         odoo.call("pos.payment.method", "read", jsonOf(

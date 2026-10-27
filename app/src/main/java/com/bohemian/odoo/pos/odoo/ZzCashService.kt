@@ -29,14 +29,38 @@ data class ZzCashReward(
     val discountProductId: Int,
 )
 
+/** The loyalty.program this till earns and redeems ZZ Cash on, found in Odoo (never a fixed id). */
+data class ZzCashProgram(val id: Int, val name: String)
+
 class ZzCashService(private val odoo: OdooJson2Client) {
 
-    /** Null when the customer has no ZZ Cash card. Throws on network/server errors. */
-    suspend fun balance(partnerId: Int): ZzCashBalance? {
+    /**
+     * The one active POS loyalty program open to [config], as the web POS loads it
+     * (pos_loyalty: pos_ok, and pos_config_ids empty or containing the config). Null when
+     * there is none, or more than one: the till cannot tell which card the cashier means.
+     */
+    suspend fun program(config: PosConfig): ZzCashProgram? {
+        val rows = odoo.call("loyalty.program", "search_read", jsonOf(
+            "domain" to listOf(
+                listOf("pos_ok", "=", true),
+                listOf("program_type", "=", "loyalty"),
+                listOf("company_id", "in", listOfNotNull<Any>(config.companyId) + false),
+                "|",
+                listOf("pos_config_ids", "=", false),
+                listOf("pos_config_ids", "in", listOf(config.id)),
+            ),
+            "fields" to listOf("name"),
+            "limit" to 2,
+        )).objects()
+        return fromProgramRows(rows)
+    }
+
+    /** Null when the customer has no card in [programId]. Throws on network/server errors. */
+    suspend fun balance(partnerId: Int, programId: Int): ZzCashBalance? {
         val rows = odoo.call("loyalty.card", "search_read", jsonOf(
             "domain" to listOf(
                 listOf("partner_id", "=", partnerId),
-                listOf("program_id", "=", PROGRAM_ID),
+                listOf("program_id", "=", programId),
             ),
             "fields" to listOf("points", "code"),
             "limit" to 1,
@@ -48,10 +72,10 @@ class ZzCashService(private val odoo: OdooJson2Client) {
      * The "₹N off per order" rewards the till can apply, cheapest first. Only rewards
      * whose cost equals their value are accepted, so the rule "1 point = ₹1" holds.
      */
-    suspend fun rewards(): List<ZzCashReward> {
+    suspend fun rewards(programId: Int): List<ZzCashReward> {
         val rows = odoo.call("loyalty.reward", "search_read", jsonOf(
             "domain" to listOf(
-                listOf("program_id", "=", PROGRAM_ID),
+                listOf("program_id", "=", programId),
                 listOf("reward_type", "=", "discount"),
                 listOf("discount_mode", "=", "per_order"),
                 listOf("discount_applicability", "=", "order"),
@@ -63,9 +87,9 @@ class ZzCashService(private val odoo: OdooJson2Client) {
     }
 
     /** Earning rules of the program, for the "+N points" preview and the post-sync confirm. */
-    suspend fun rules(): List<LoyaltyRule> =
+    suspend fun rules(programId: Int): List<LoyaltyRule> =
         odoo.call("loyalty.rule", "search_read", jsonOf(
-            "domain" to listOf(listOf("program_id", "=", PROGRAM_ID)),
+            "domain" to listOf(listOf("program_id", "=", programId)),
             "fields" to LoyaltyPoints.RULE_FIELDS,
         )).objects().mapNotNull { LoyaltyPoints.ruleFromRow(it) }
 
@@ -88,8 +112,10 @@ class ZzCashService(private val odoo: OdooJson2Client) {
     }
 
     companion object {
-        /** loyalty.program id 4 = "ZZ Cash" (30 rules, 10 rewards, INR). */
-        const val PROGRAM_ID = 4
+        internal fun fromProgramRows(rows: List<JsonObject>): ZzCashProgram? {
+            val row = rows.singleOrNull() ?: return null
+            return ZzCashProgram(row.int("id") ?: return null, row.str("name") ?: "ZZ Cash")
+        }
 
         internal fun fromRows(partnerId: Int, rows: List<JsonObject>): ZzCashBalance? {
             val row = rows.firstOrNull() ?: return null

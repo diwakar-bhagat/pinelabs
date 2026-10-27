@@ -58,6 +58,8 @@ data class SaleSnapshot(
     /** ZZ Cash earned by this cart (LoyaltyPoints.earned), booked after sync. Absent in older snapshots. */
     val loyaltyEarnedPaise: Long = 0,
     val loyaltyCardId: Int? = null,
+    /** loyalty.program found for the config at payment. Absent in older snapshots: their points are not booked. */
+    val loyaltyProgramId: Int? = null,
     /** pos.config.default_preset_id at payment time (Pickup). */
     val presetId: Int? = null,
 ) {
@@ -96,6 +98,7 @@ data class SaleSnapshot(
             redemption: ZzCashRedemption? = null,
             loyaltyEarned: Paise = Paise.ZERO,
             loyaltyCardId: Int? = null,
+            loyaltyProgramId: Int? = null,
         ) = SaleSnapshot(
             orderUuid = orderUuid,
             sessionId = cfg.currentSessionId ?: error("no open session"),
@@ -125,6 +128,7 @@ data class SaleSnapshot(
             },
             loyaltyEarnedPaise = loyaltyEarned.value,
             loyaltyCardId = loyaltyCardId,
+            loyaltyProgramId = loyaltyProgramId,
             presetId = cfg.defaultPresetId,
         )
     }
@@ -164,6 +168,7 @@ class SaleFinalizer(
             redemption = snap.zzRedemption(),
             loyaltyEarned = Paise(snap.loyaltyEarnedPaise),
             loyaltyCardId = snap.loyaltyCardId,
+            loyaltyProgramId = snap.loyaltyProgramId,
             presetId = snap.presetId,
         )
         orderSync.submit(sale)          // outbox row written first inside submit()

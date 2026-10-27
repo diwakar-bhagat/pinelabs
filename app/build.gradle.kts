@@ -21,6 +21,14 @@ if (!pineSdkPresent) {
 val pineUatAppId = "771aabd360b64cd59d11806bd88d87b4"
 val pineProdAppId = "d0b34dd115e8487cb1e20b6706d90186"   // issued by Pine Labs 2026-10-27
 
+// ---- Odoo deployment (the app's only network endpoint, docs/INFOSEC.md §2) ---------
+// Set in gradle.properties; another deployment overrides with -PodooBaseUrl=… -PodooDb=…
+// instead of editing code. Never plain http: the bearer API key travels in every request.
+val odooBaseUrl = providers.gradleProperty("odooBaseUrl").get().trimEnd('/')
+val odooDb = providers.gradleProperty("odooDb").get()
+check(odooBaseUrl.startsWith("https://")) { "odooBaseUrl must be https:// (got $odooBaseUrl)" }
+check(odooDb.isNotBlank()) { "odooDb is empty" }
+
 // ---- Release signing ---------------------------------------------------------
 val keystoreProps = Properties().apply {
     val f = rootProject.file("keystore.properties")
@@ -36,11 +44,11 @@ android {
         applicationId = "com.bohemian.odoo.pos"
         minSdk = 25          // E700 = PayDroid Android 7.1.2 (API 25)
         targetSdk = 34
-        versionCode = 2
+        versionCode = 2     // +1 for every build sent to PAXSTORE (1 = first signed PROD APK, 2026-10-27)
         versionName = "0.1.1"
 
-        buildConfigField("String", "ODOO_BASE_URL", "\"https://zenzebra1.odoo.com\"")
-        buildConfigField("String", "ODOO_DB", "\"zenzebra1\"")
+        buildConfigField("String", "ODOO_BASE_URL", "\"$odooBaseUrl\"")
+        buildConfigField("String", "ODOO_DB", "\"$odooDb\"")
         buildConfigField("boolean", "PINE_SDK_PRESENT", pineSdkPresent.toString())
 
         ndk { abiFilters += listOf("arm64-v8a", "armeabi-v7a") } // SDK ships only these

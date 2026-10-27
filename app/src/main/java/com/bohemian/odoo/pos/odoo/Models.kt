@@ -32,7 +32,21 @@ data class PosConfig(
      */
     val limitCategories: Boolean = false,
     val availableCategIds: List<Int> = emptyList(),
-)
+) {
+    /**
+     * Why the payment methods saved on this terminal no longer fit this config, or null.
+     * Odoo rejects a sync_from_ui payment on a method the config does not have, so a sale
+     * charged on the terminal would sit in the outbox forever (HARD RULE 7). Checked on
+     * every catalogue load; 0 = not set.
+     */
+    fun paymentMethodProblem(terminalMethodId: Int, cashMethodId: Int): String? = when {
+        terminalMethodId !in paymentMethodIds ->
+            "The E700 payment method is no longer on $name in Odoo. Open Setup and choose it again."
+        cashMethodId != 0 && cashMethodId !in paymentMethodIds ->
+            "The cash method is no longer on $name in Odoo. Open Setup and choose it again."
+        else -> null
+    }
+}
 
 /** pos.category: the menu tabs (Chai & Coffee, Bites, WhatsApp Menu › WA HO …). */
 data class PosCategory(
