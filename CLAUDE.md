@@ -47,7 +47,7 @@ uses **Odoo 19 (Odoo Online, `zenzebra1.odoo.com`) as the system of record**.
 | Printer | Pine SDK `print`, line width **24 / 32 / 48 chars** (configurable) |
 | Pine SDK | `com.pinelabs.billing:pine-billing-sdk-android` **2.0.0** (latest stable, 2026-10-24; 1.0.0 kept in `app/libs` for rollback) |
 | Pine App ID (UAT) | `771aabd360b64cd59d11806bd88d87b4` |
-| Pine App ID (PROD) | _not issued yet_ — Pine registers UAT and PROD separately |
+| Pine App ID (PROD) | `d0b34dd115e8487cb1e20b6706d90186` (issued by Pine 2026-10-27) |
 | Odoo | 19.0 Enterprise, Odoo Online (no custom Python modules possible; Odoo.sh is ruled out) |
 | Odoo API | **JSON-2** (`POST /json/2/<model>/<method>`, `Authorization: bearer <api key>`) |
 
@@ -481,7 +481,7 @@ company password manager + encrypted drive.
 
 ## 13. Open items
 
-- [ ] PROD Pine Application ID (Pine issues after UAT sign-off)
+- [x] PROD Pine Application ID issued 2026-10-27 (`d0b34dd1…0186`); first signed prod APK built (v1+v2, cert SHA-256 `5062f7cf…cbda`)
 - [ ] Confirm `bank_code = "01"` for ZenZebra's acquirer (UAT case 8)
 - [ ] Void on SDK 2.0 sends `invoice_number = null`. Confirm at UAT case 8 whether MasterApp needs the sale's InvoiceNo, and where it comes from. `PINE_RESULT_META_KEYS` in logcat lists the extra result fields the terminal returns
 - [ ] **Blocker:** UAT E700 has Plutus Plus (`com.pinelabs.plutusplus`) but no `com.pinelabs.masterapp`. Pine must provision the AppToApp payments application / Master service (see `docs/PINE_LABS_VERIFIED.md` §6)

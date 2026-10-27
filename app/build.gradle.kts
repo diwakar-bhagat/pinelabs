@@ -19,7 +19,7 @@ if (!pineSdkPresent) {
 
 // ---- Pine Application IDs (registered separately per environment) -------------
 val pineUatAppId = "771aabd360b64cd59d11806bd88d87b4"
-val pineProdAppId = ""   // TODO(pine): issued after UAT sign-off
+val pineProdAppId = "d0b34dd115e8487cb1e20b6706d90186"   // issued by Pine Labs 2026-10-27
 
 // ---- UPI IDs pre-filled on the Setup screen ----------------------------------
 // From git-ignored upi.properties (see upi.properties.example), so the public repo never holds
@@ -82,6 +82,8 @@ android {
                 storePassword = keystoreProps.getProperty("storePassword")
                 keyAlias = keystoreProps.getProperty("keyAlias")
                 keyPassword = keystoreProps.getProperty("keyPassword")
+                // Pine onboarding requires both. v1 is still written for minSdk 25: apksigner's
+                // default verify skips v1 when minSdk >= 24, so check with --min-sdk-version 21.
                 enableV1Signing = true
                 enableV2Signing = true
             }
@@ -130,6 +132,16 @@ tasks.matching { it.name.startsWith("assembleProd") || it.name.startsWith("bundl
     doFirst {
         check(pineProdAppId.isNotBlank()) {
             "PROD Pine Application ID is empty. Set pineProdAppId in app/build.gradle.kts before building PROD."
+        }
+    }
+}
+
+// A PROD release must be signed with the one release key (Pine: same key for every update),
+// with both v1 and v2 signatures (Pine onboarding requirement, enabled in signingConfigs above).
+tasks.matching { it.name == "assembleProdRelease" || it.name == "bundleProdRelease" }.configureEach {
+    doFirst {
+        check(keystoreProps.isNotEmpty()) {
+            "keystore.properties is missing: a PROD release must be signed with the release key (docs/DEPLOY_E700.md §2)."
         }
     }
 }
