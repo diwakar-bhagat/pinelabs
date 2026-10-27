@@ -2,6 +2,7 @@ package com.bohemian.odoo.pos.payment
 
 import com.bohemian.odoo.pos.core.Paise
 import com.bohemian.odoo.pos.odoo.PaymentMethod
+import com.bohemian.odoo.pos.pine.PayMode
 
 /**
  * Split payment on one bill, following the Odoo POS payment screen
@@ -15,7 +16,8 @@ import com.bohemian.odoo.pos.odoo.PaymentMethod
  *
  * Immutable: every change returns a new [PaymentSplit], so the UI state can be a plain StateFlow.
  */
-data class SplitLine(val uuid: String, val method: PaymentMethod, val amount: Paise)
+/** One payment line. [mode] is how the E700 takes it (Card / UPI share one Odoo method); null = cash. */
+data class SplitLine(val uuid: String, val method: PaymentMethod, val amount: Paise, val mode: PayMode? = null)
 
 data class PaymentSplit(
     val total: Paise,
@@ -41,11 +43,11 @@ data class PaymentSplit(
      * Add a payment line and select it. [amount] defaults to the remaining due, as Odoo does.
      * Returns a [Result] error when the amount breaks the rules, so the UI can say why.
      */
-    fun add(uuid: String, method: PaymentMethod, amount: Paise? = null): Result<PaymentSplit> {
+    fun add(uuid: String, method: PaymentMethod, amount: Paise? = null, mode: PayMode? = null): Result<PaymentSplit> {
         if (lines.any { it.uuid == uuid }) return Result.failure(IllegalArgumentException("duplicate line"))
         val value = amount ?: remainingDue
         val checked = validate(method, value, currentLine = null) ?: return Result.failure(IllegalArgumentException(error(method, value)))
-        return Result.success(copy(lines = lines + SplitLine(uuid, method, checked), selectedUuid = uuid))
+        return Result.success(copy(lines = lines + SplitLine(uuid, method, checked, mode), selectedUuid = uuid))
     }
 
     /** Set the amount of an existing line. Same rules as [add]. */

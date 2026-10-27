@@ -15,8 +15,10 @@ data class PendingWork(
     val openVoids: Int = 0,
     /** Synced sales whose ZZ Cash points Odoo has not booked yet (confirm_coupon_programs). */
     val pendingLoyalty: Int = 0,
+    /** Split bills with a terminal part paid but not the whole total. */
+    val partlyPaid: Int = 0,
 ) {
-    val isClear: Boolean get() = unresolvedAttempts == 0 && unsyncedOrders == 0 && openVoids == 0 && pendingLoyalty == 0
+    val isClear: Boolean get() = unresolvedAttempts == 0 && unsyncedOrders == 0 && openVoids == 0 && pendingLoyalty == 0 && partlyPaid == 0
 }
 
 /** One line of pos.session.get_closing_control_data. */

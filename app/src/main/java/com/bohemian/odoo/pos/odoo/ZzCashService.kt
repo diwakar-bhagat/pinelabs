@@ -1,6 +1,7 @@
 package com.bohemian.odoo.pos.odoo
 
 import com.bohemian.odoo.pos.core.Paise
+import com.bohemian.odoo.pos.core.PosLog
 import kotlinx.serialization.json.JsonObject
 
 /**
@@ -63,8 +64,10 @@ class ZzCashService(private val odoo: OdooJson2Client) {
                 listOf("program_id", "=", programId),
             ),
             "fields" to listOf("points", "code"),
-            "limit" to 1,
+            "order" to "id", // the same card every time, should a customer ever have two
+            "limit" to 2,
         )).objects()
+        if (rows.size > 1) PosLog.w("ZZ_CASH_TWO_CARDS", "partner" to partnerId, "program" to programId)
         return fromRows(partnerId, rows)
     }
 

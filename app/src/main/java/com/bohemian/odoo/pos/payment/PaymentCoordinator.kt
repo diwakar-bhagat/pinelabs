@@ -11,6 +11,10 @@ import com.bohemian.odoo.pos.pine.VoidRequest
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.NonCancellable
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.StateFlow
+import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
@@ -45,16 +49,42 @@ class PaymentCoordinator(
     private val clock: () -> Long = System::currentTimeMillis,
     private val backgroundScope: CoroutineScope,
 ) {
-    private val mutex = Mutex() // HARD RULE 3: one payment in flight per device
+    /**
+     * HARD RULE 3: one terminal operation at a time. Held for each SDK call and journal step, but
+     * never across the waits of a status check, so a supervisor decision or another order is not
+     * stuck behind a 15 s+ GetStatus loop.
+     */
+    private val mutex = Mutex()
 
-    suspend fun pay(orderUuid: String, amount: Paise, mode: PayMode, customerMobile: String? = null): PaymentOutcome =
+    /**
+     * Attempts whose status loop is running, so a second "Check status" does not start another,
+     * and the unresolved bar can say "Checking with the terminal…".
+     */
+    private val _checking = MutableStateFlow<Set<String>>(emptySet())
+    val checking: StateFlow<Set<String>> = _checking.asStateFlow()
+
+    /**
+     * Charge [amount] for [orderUuid]. [orderTotal] is the bill; a split bill is paid in several
+     * attempts, each its own `billing_reference_id` (HARD RULE 8), until they cover it. A single
+     * payment has `orderTotal == amount`, so any paid attempt refuses a second charge as before.
+     */
+    suspend fun pay(
+        orderUuid: String,
+        amount: Paise,
+        mode: PayMode,
+        customerMobile: String? = null,
+        orderTotal: Paise = amount,
+    ): PaymentOutcome =
         withContext(NonCancellable) { // a payment is never abandoned half-way because a screen closed
-            mutex.withLock {
+            val first = mutex.withLock {
                 require(amount.isPositive) { "amount must be positive" }
 
                 journal.forOrder(orderUuid).let { previous ->
-                    previous.firstOrNull { it.state.isPaid }?.let { return@withLock PaymentOutcome.AlreadyPaid(it) }
-                    previous.firstOrNull { it.state.blocksNewCharge }?.let { return@withLock PaymentOutcome.Blocked(it) }
+                    val paid = previous.filter { it.state.isPaid }
+                    val paidSum = paid.fold(Paise.ZERO) { acc, p -> acc + p.amount }
+                    // Never more than the bill: a second charge only for what is still due.
+                    paid.lastOrNull()?.takeIf { paidSum + amount > orderTotal }?.let { return@withLock Step.Done(PaymentOutcome.AlreadyPaid(it)) }
+                    previous.firstOrNull { it.state.blocksNewCharge }?.let { return@withLock Step.Done(PaymentOutcome.Blocked(it)) }
                 }
 
                 val now = clock()
@@ -63,7 +93,7 @@ class PaymentCoordinator(
                     state = AttemptState.STARTING, createdAt = now, updatedAt = now,
                 )
                 journal.insert(attempt) // HARD RULE 4: persist before acting
-                PosLog.i("PAYMENT_START", "ref" to attempt.billingRef, "mode" to mode, "amount" to amount)
+                PosLog.i("PAYMENT_START", "ref" to attempt.billingRef, "mode" to mode, "amount" to amount, "orderTotal" to orderTotal)
 
                 val result = gateway().sale(SaleRequest(attempt.billingRef, amount, mode, customerMobile)) { eventId ->
                     // Callback runs on the SDK worker thread: hand off, return immediately.
@@ -72,46 +102,72 @@ class PaymentCoordinator(
                 PosLog.i("PAYMENT_RESPONSE", "ref" to attempt.billingRef, "result" to result::class.simpleName)
                 settle(attempt, result)
             }
+            finish(first)
         }
 
-    /** Re-run the status check for an UNKNOWN / IN_FLIGHT UPI-BQR attempt (button or Reconciler). */
-    suspend fun checkAgain(billingRef: String): PaymentOutcome = withContext(NonCancellable) {
-        mutex.withLock {
-            val a = journal.get(billingRef) ?: error("no attempt $billingRef")
-            if (a.state.isFinal) return@withLock outcomeOf(a, a.note ?: "")
-            if (!a.mode.needsStatusCheckOnFailure) {
-                journal.transition(a.billingRef, AttemptState.NEEDS_REVIEW, clock(), note = "Card outcome unknown — check terminal report")
-                return@withLock PaymentOutcome.Unresolved(journal.get(billingRef)!!)
+    /**
+     * Re-run the status check for an UNKNOWN / IN_FLIGHT UPI attempt (button or Reconciler).
+     * Null when no such attempt exists. Never throws on a state the attempt has already left.
+     */
+    suspend fun checkAgain(billingRef: String): PaymentOutcome? = withContext(NonCancellable) {
+        val first = mutex.withLock {
+            val a = journal.get(billingRef) ?: return@withLock null
+            when {
+                a.state.isFinal -> Step.Done(outcomeOf(a, a.note ?: ""))
+                !a.mode.needsStatusCheckOnFailure -> {
+                    journal.transition(a.billingRef, AttemptState.NEEDS_REVIEW, clock(), note = "Card outcome unknown — check terminal report")
+                    Step.Done(PaymentOutcome.Unresolved(journal.get(billingRef) ?: a))
+                }
+                else -> Step.CheckStatus(a)
             }
-            statusLoop(a)
-        }
+        } ?: return@withContext null
+        finish(first)
     }
 
-    /** Supervisor decision for NEEDS_REVIEW / UNKNOWN after checking the terminal / charge slip. */
-    suspend fun resolveManually(billingRef: String, paid: Boolean, note: String): PaymentOutcome = mutex.withLock {
-        val a = journal.get(billingRef) ?: error("no attempt $billingRef")
-        check(!a.state.isFinal) { "attempt already final: ${a.state}" }
+    /**
+     * Supervisor decision for NEEDS_REVIEW / UNKNOWN after checking the terminal / charge slip.
+     * Idempotent: an attempt that is already final (the status check got there first, or a
+     * double tap) keeps its state and its outcome is returned. Null when there is no such attempt.
+     */
+    suspend fun resolveManually(billingRef: String, paid: Boolean, note: String): PaymentOutcome? = mutex.withLock {
+        val a = journal.get(billingRef) ?: return@withLock null
+        if (a.state.isFinal) {
+            PosLog.w("PAYMENT_MANUAL_RESOLVE_IGNORED", "ref" to billingRef, "state" to a.state, "asked" to paid)
+            return@withLock outcomeOf(a, a.note ?: "")
+        }
         val state = if (paid) AttemptState.RESOLVED_PAID else AttemptState.RESOLVED_NOT_PAID
         journal.transition(billingRef, state, clock(), note = "manual: $note")
         PosLog.w("PAYMENT_MANUAL_RESOLVE", "ref" to billingRef, "paid" to paid)
-        outcomeOf(journal.get(billingRef)!!, note)
+        outcomeOf(journal.get(billingRef) ?: a, note)
     }
 
     /** Used by Reconciler at startup; caller must not hold the mutex. */
     internal suspend fun reconcile(a: PaymentAttempt): PaymentOutcome = withContext(NonCancellable) {
-        mutex.withLock {
-            val fresh = journal.get(a.billingRef) ?: return@withLock PaymentOutcome.Unresolved(a)
+        val first = mutex.withLock {
+            val fresh = journal.get(a.billingRef) ?: return@withLock Step.Done(PaymentOutcome.Unresolved(a))
             when {
-                fresh.state.isFinal -> outcomeOf(fresh, fresh.note ?: "")
-                fresh.state == AttemptState.NEEDS_REVIEW -> PaymentOutcome.Unresolved(fresh)
-                fresh.mode.needsStatusCheckOnFailure -> statusLoop(fresh)
+                fresh.state.isFinal -> Step.Done(outcomeOf(fresh, fresh.note ?: ""))
+                fresh.state == AttemptState.NEEDS_REVIEW -> Step.Done(PaymentOutcome.Unresolved(fresh))
+                fresh.mode.needsStatusCheckOnFailure -> Step.CheckStatus(fresh)
                 else -> {
                     journal.transition(fresh.billingRef, AttemptState.NEEDS_REVIEW, clock(),
                         note = "App restarted during card payment — verify on terminal")
-                    PaymentOutcome.Unresolved(journal.get(fresh.billingRef)!!)
+                    Step.Done(PaymentOutcome.Unresolved(journal.get(fresh.billingRef) ?: fresh))
                 }
             }
         }
+        finish(first)
+    }
+
+    /** What a locked step decided: an outcome, or a status check to run without holding the lock. */
+    private sealed interface Step {
+        data class Done(val outcome: PaymentOutcome) : Step
+        data class CheckStatus(val attempt: PaymentAttempt) : Step
+    }
+
+    private suspend fun finish(step: Step): PaymentOutcome = when (step) {
+        is Step.Done -> step.outcome
+        is Step.CheckStatus -> statusLoop(step.attempt)
     }
 
     // ------------------------------------------------------------------ void (Phase 4b)
@@ -214,7 +270,8 @@ class PaymentCoordinator(
 
     // ------------------------------------------------------------------ internals
 
-    private suspend fun settle(a: PaymentAttempt, r: GatewayResult): PaymentOutcome = when (r) {
+    /** Called with the mutex held. A UPI outcome that needs GetStatus is handed back as [Step.CheckStatus]. */
+    private suspend fun settle(a: PaymentAttempt, r: GatewayResult): Step = when (r) {
         is GatewayResult.Approved -> {
             // INVARIANT I6: An attempt is marked paid ONLY if observed amount equals expected requested amount
             val observedPaise = r.details.amountPaise
@@ -227,73 +284,107 @@ class PaymentCoordinator(
                     details = r.details,
                     note = "Amount mismatch! Requested: ${a.amount.value} paise, Terminal reported: $observedPaise paise",
                 )
-                PaymentOutcome.Unresolved(journal.get(a.billingRef)!!)
+                Step.Done(PaymentOutcome.Unresolved(current(a)))
             } else {
                 journal.transition(a.billingRef, AttemptState.SUCCESS, clock(), details = r.details)
                 PosLog.i("PAYMENT_SUCCESS", "ref" to a.billingRef)
-                PaymentOutcome.Paid(journal.get(a.billingRef)!!)
+                Step.Done(PaymentOutcome.Paid(current(a)))
             }
         }
         is GatewayResult.Rejected -> {
             journal.transition(a.billingRef, AttemptState.REJECTED, clock(), note = "${r.kind}: ${r.detail}")
-            PaymentOutcome.NotSent(journal.get(a.billingRef)!!, friendly(r.kind, r.detail))
+            Step.Done(PaymentOutcome.NotSent(current(a), friendly(r.kind, r.detail)))
         }
         is GatewayResult.Declined ->
             if (a.mode.needsStatusCheckOnFailure) {
                 // Pine: for UPI, a "failed"/session-expired response must be confirmed via GetStatus.
-                statusLoop(a)
+                Step.CheckStatus(a)
             } else {
                 journal.transition(a.billingRef, AttemptState.DECLINED, clock(), details = r.details, note = r.message)
                 PosLog.i("PAYMENT_FAILED", "ref" to a.billingRef, "code" to r.code)
-                PaymentOutcome.NotPaid(journal.get(a.billingRef)!!, r.message ?: "Declined")
+                Step.Done(PaymentOutcome.NotPaid(current(a), r.message ?: "Declined"))
             }
         is GatewayResult.Ambiguous ->
             if (a.mode.needsStatusCheckOnFailure) {
                 PosLog.w("PAYMENT_TIMEOUT", "ref" to a.billingRef, "kind" to r.kind)
-                statusLoop(a)
+                Step.CheckStatus(a)
             } else {
                 // HARD RULE 5 (card): never auto-retry an ambiguous card sale.
                 journal.transition(a.billingRef, AttemptState.NEEDS_REVIEW, clock(), note = "${r.kind}: ${r.detail}")
                 PosLog.w("PAYMENT_NEEDS_REVIEW", "ref" to a.billingRef, "kind" to r.kind)
-                PaymentOutcome.Unresolved(journal.get(a.billingRef)!!)
+                Step.Done(PaymentOutcome.Unresolved(current(a)))
             }
     }
 
-    /** Bounded GetStatus polling. Never loops forever; never replays the sale. */
+    /** The journal row as it is now; [fallback] if it has gone (it never is deleted, but never crash on it). */
+    private suspend fun current(fallback: PaymentAttempt): PaymentAttempt = journal.get(fallback.billingRef) ?: fallback
+
+    /**
+     * Bounded GetStatus polling. Never loops forever; never replays the sale. Runs WITHOUT the
+     * mutex: it is taken for each GetStatus and its journal step only. Before every check the
+     * attempt is read again, so a supervisor decision made in the meantime wins and ends the loop.
+     */
     private suspend fun statusLoop(a: PaymentAttempt): PaymentOutcome {
-        journal.transition(a.billingRef, AttemptState.STATUS_CHECK, clock())
-        repeat(policy.maxChecks) { i ->
-            delay(policy.intervalMs)
-            PosLog.i("GET_STATUS_REQUEST", "ref" to a.billingRef, "try" to (i + 1))
-            val r = gateway().getStatus(a.billingRef, a.amount, a.mode)
-            journal.transition(a.billingRef, AttemptState.STATUS_CHECK, clock(), incrementStatusChecks = true)
-            PosLog.i("GET_STATUS_RESPONSE", "ref" to a.billingRef, "result" to r::class.simpleName)
-            when (r) {
-                is GatewayResult.Approved -> {
-                    val observedPaise = r.details.amountPaise
-                    if (observedPaise != null && observedPaise != a.amount.value) {
-                        PosLog.e("PAYMENT_AMOUNT_MISMATCH_STATUS", null, "ref" to a.billingRef, "expected" to a.amount.value, "observed" to observedPaise)
-                        journal.transition(
-                            a.billingRef,
-                            AttemptState.NEEDS_REVIEW,
-                            clock(),
-                            details = r.details,
-                            note = "GetStatus amount mismatch! Requested: ${a.amount.value} paise, Terminal reported: $observedPaise paise",
-                        )
-                        return PaymentOutcome.Unresolved(journal.get(a.billingRef)!!)
-                    }
-                    journal.transition(a.billingRef, AttemptState.SUCCESS, clock(), details = r.details, note = "confirmed by GetStatus")
-                    return PaymentOutcome.Paid(journal.get(a.billingRef)!!)
-                }
-                is GatewayResult.Declined -> {
-                    journal.transition(a.billingRef, AttemptState.DECLINED, clock(), details = r.details, note = r.message)
-                    return PaymentOutcome.NotPaid(journal.get(a.billingRef)!!, r.message ?: "Not paid")
-                }
-                is GatewayResult.Ambiguous, is GatewayResult.Rejected -> Unit // try again
-            }
+        val mine = mutex.withLock {
+            if (a.billingRef in _checking.value) return@withLock false
+            _checking.update { it + a.billingRef }
+            journal.get(a.billingRef)?.takeIf { !it.state.isFinal }?.let { journal.transition(a.billingRef, AttemptState.STATUS_CHECK, clock()) }
+            true
         }
-        journal.transition(a.billingRef, AttemptState.UNKNOWN, clock(), note = "status not confirmed after ${policy.maxChecks} checks")
-        return PaymentOutcome.Unresolved(journal.get(a.billingRef)!!)
+        // Another status check for this attempt is already running: report it as unresolved for now.
+        if (!mine) return PaymentOutcome.Unresolved(current(a))
+        try {
+            repeat(policy.maxChecks) { i ->
+                delay(policy.intervalMs)
+                val outcome = mutex.withLock { checkOnce(a, i + 1) }
+                if (outcome != null) return outcome
+            }
+            return mutex.withLock {
+                val fresh = current(a)
+                if (fresh.state.isFinal || fresh.state == AttemptState.NEEDS_REVIEW) outcomeOf(fresh, fresh.note ?: "")
+                else {
+                    journal.transition(a.billingRef, AttemptState.UNKNOWN, clock(), note = "status not confirmed after ${policy.maxChecks} checks")
+                    PaymentOutcome.Unresolved(current(a))
+                }
+            }
+        } finally {
+            _checking.update { it - a.billingRef }
+        }
+    }
+
+    /** One GetStatus, with the mutex held. Null = not settled yet, check again. */
+    private suspend fun checkOnce(a: PaymentAttempt, attemptNo: Int): PaymentOutcome? {
+        val fresh = current(a)
+        // A supervisor (or another check) already decided: stop, never overwrite their decision.
+        if (fresh.state.isFinal || fresh.state == AttemptState.NEEDS_REVIEW) return outcomeOf(fresh, fresh.note ?: "")
+        PosLog.i("GET_STATUS_REQUEST", "ref" to a.billingRef, "try" to attemptNo)
+        val r = gateway().getStatus(a.billingRef, a.amount, a.mode)
+        journal.transition(a.billingRef, AttemptState.STATUS_CHECK, clock(), incrementStatusChecks = true)
+        PosLog.i("GET_STATUS_RESPONSE", "ref" to a.billingRef, "result" to r::class.simpleName)
+        return when (r) {
+            is GatewayResult.Approved -> {
+                val observedPaise = r.details.amountPaise
+                if (observedPaise != null && observedPaise != a.amount.value) {
+                    PosLog.e("PAYMENT_AMOUNT_MISMATCH_STATUS", null, "ref" to a.billingRef, "expected" to a.amount.value, "observed" to observedPaise)
+                    journal.transition(
+                        a.billingRef,
+                        AttemptState.NEEDS_REVIEW,
+                        clock(),
+                        details = r.details,
+                        note = "GetStatus amount mismatch! Requested: ${a.amount.value} paise, Terminal reported: $observedPaise paise",
+                    )
+                    PaymentOutcome.Unresolved(current(a))
+                } else {
+                    journal.transition(a.billingRef, AttemptState.SUCCESS, clock(), details = r.details, note = "confirmed by GetStatus")
+                    PaymentOutcome.Paid(current(a))
+                }
+            }
+            is GatewayResult.Declined -> {
+                journal.transition(a.billingRef, AttemptState.DECLINED, clock(), details = r.details, note = r.message)
+                PaymentOutcome.NotPaid(current(a), r.message ?: "Not paid")
+            }
+            is GatewayResult.Ambiguous, is GatewayResult.Rejected -> null // try again
+        }
     }
 
     private fun outcomeOf(a: PaymentAttempt, reason: String): PaymentOutcome = when {

@@ -210,7 +210,7 @@ fun OrderPanel(s: SellState, vm: PosViewModel, modifier: Modifier) {
             ActionButton(cust?.name ?: "Customer", R.drawable.mdi_account, Modifier.weight(1.4f), highlight = cust != null) { showCustomer = true }
             ActionButton("Note", R.drawable.mdi_note_text_outline, Modifier.weight(1f), enabled = s.selectedLine != null) { noteFor = s.selectedLine }
             s.config?.defaultPresetName?.let { ActionButton(it, R.drawable.mdi_shopping_outline, Modifier.weight(1f), enabled = false) {} }
-            ActionButton(null, R.drawable.mdi_dots_vertical, Modifier.width(52.dp)) { showActions = true }
+            ActionButton(null, R.drawable.mdi_dots_vertical, Modifier.width(52.dp), highlight = s.rewardFits) { showActions = true }
         }
         // The keypad gives way to the cart: drag the handle to resize it, tap to fold it.
         var keyDp by remember(s.keypadKeyDp) { mutableFloatStateOf(s.keypadKeyDp.toFloat()) }
@@ -277,14 +277,19 @@ private fun PointsRow(s: SellState, vm: PosViewModel, onRewards: () -> Unit) {
             }
             return@Row
         }
+        if (s.zzRules == null) {
+            // Without the earning rules this bill would count as earning 0 and no reward would fit.
+            Text("${bal.points.toPlainString()} · earning rules not loaded", fontSize = 13.sp, color = Zz.Red)
+            TextButton({ vm.retryZzCash() }, contentPadding = PaddingValues(horizontal = 8.dp)) { Text("Retry") }
+            return@Row
+        }
         val earned = s.zzEarned
         val spent = s.zzRedemption?.reward?.points ?: Paise.ZERO
         Text(bal.points.toPlainString(), fontSize = 14.sp)
         Text(" +${earned.toPlainString()}", color = Zz.Green, fontSize = 14.sp, fontWeight = FontWeight.Bold)
         if (spent.isPositive) Text(" −${spent.toPlainString()}", color = Zz.Red, fontSize = 14.sp, fontWeight = FontWeight.Bold)
         Text(" = ${(bal.points + earned - spent).toPlainString()}", fontSize = 14.sp, fontWeight = FontWeight.Bold)
-        val total = s.totals?.totalIncl
-        val fits = s.zzRedemption == null && total != null && ZzCashRules.eligible(bal, earned, s.zzRewards, total).isNotEmpty()
+        val fits = s.rewardFits
         if (fits || s.zzRedemption != null) {
             Spacer(Modifier.width(6.dp))
             OutlinedButton(onRewards, Modifier.height(32.dp), shape = RoundedCornerShape(6.dp),
@@ -380,16 +385,19 @@ private fun Keypad(s: SellState, vm: PosViewModel, keyHeight: androidx.compose.u
 }
 
 /**
- * Card, UPI and cash only. Bharat QR is not offered (2026-10-27); [PayMode.BHARAT_QR] stays so the
- * journal and the Reconciler can still settle an older BQR attempt.
+ * Card, UPI, cash, or SPLIT (several of them on one bill, Odoo's payment screen). Bharat QR is not
+ * offered (2026-10-27); [PayMode.BHARAT_QR] stays so the journal and the Reconciler can still settle
+ * an older BQR attempt. A partly paid split bill can only be finished on SPLIT.
  */
 @Composable
 private fun PayRow(s: SellState, vm: PosViewModel) {
     val canPay = s.totals != null && !s.pricing && s.pay == PayUi.Idle && s.config?.sessionOpen == true
+    val single = canPay && !s.partPaid.isPositive
     Row(Modifier.fillMaxWidth().padding(8.dp), horizontalArrangement = Arrangement.spacedBy(6.dp)) {
-        PayTile("CARD", R.drawable.mdi_credit_card_outline, canPay, Modifier.weight(1f)) { vm.payWithTerminal(PayMode.CARD) }
-        PayTile("UPI", R.drawable.mdi_qrcode, canPay, Modifier.weight(1f)) { vm.payWithTerminal(PayMode.UPI) }
-        PayTile("CASH", R.drawable.mdi_cash, canPay, Modifier.weight(1f), dark = true) { vm.payCash(null) }
+        PayTile("CARD", R.drawable.mdi_credit_card_outline, single, Modifier.weight(1f)) { vm.payWithTerminal(PayMode.CARD) }
+        PayTile("UPI", R.drawable.mdi_qrcode, single, Modifier.weight(1f)) { vm.payWithTerminal(PayMode.UPI) }
+        PayTile("CASH", R.drawable.mdi_cash, single, Modifier.weight(1f), dark = true) { vm.payCash(null) }
+        PayTile("SPLIT", R.drawable.mdi_call_split, canPay, Modifier.weight(1f), dark = true) { vm.openSplit() }
     }
 }
 
@@ -449,7 +457,8 @@ private fun ActionsDialog(s: SellState, onReward: () -> Unit, onDismiss: () -> U
         text = {
             Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
                 val canReward = s.customer != null && s.zzCash != null && s.totals != null
-                OutlinedButton(onReward, Modifier.fillMaxWidth().height(56.dp), enabled = canReward, shape = RoundedCornerShape(6.dp)) {
+                OutlinedButton(onReward, Modifier.fillMaxWidth().height(56.dp), enabled = canReward, shape = RoundedCornerShape(6.dp),
+                    colors = ButtonDefaults.outlinedButtonColors(containerColor = if (s.rewardFits) Zz.GoldSoft else Color.Transparent)) {
                     MdiIcon(R.drawable.mdi_star, null, Zz.Gold); Spacer(Modifier.width(8.dp)); Text("Reward", color = Zz.Black)
                 }
                 if (!canReward) Text("Attach a customer with a ZZ Cash card to use a reward.", fontSize = 13.sp, color = Zz.Muted)
@@ -479,7 +488,8 @@ private fun RewardsDialog(s: SellState, vm: PosViewModel, onDismiss: () -> Unit)
                 if (options.isEmpty() && s.zzRedemption == null) {
                     val can = bal?.let { ZzCashRules.available(it, s.zzEarned) }
                     Text("No reward fits this card and bill" + (can?.let { " (${it.toPlainString()} ZZ Cash to spend, cheapest reward " +
-                        (s.zzRewards.firstOrNull()?.points?.toPlainString() ?: "—") + ")" } ?: "") + ".", color = Zz.Muted)
+                        (s.zzRewards.firstOrNull()?.points?.toPlainString() ?: "—") + ")" } ?: "") + "." +
+                        if (s.zzRules == null) " This bill's points are not counted yet: earning rules not loaded." else "", color = Zz.Muted)
                 }
                 LazyColumn(Modifier.heightIn(max = 360.dp)) {
                     items(options, key = { it.rewardId }) { r ->

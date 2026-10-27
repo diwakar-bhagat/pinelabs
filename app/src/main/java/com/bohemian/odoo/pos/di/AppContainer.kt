@@ -22,6 +22,7 @@ import com.bohemian.odoo.pos.payment.Reconciler
 import com.bohemian.odoo.pos.pine.FakePaymentGateway
 import com.bohemian.odoo.pos.pine.PaymentGateway
 import com.bohemian.odoo.pos.pine.PineSdkGateway
+import kotlinx.coroutines.CoroutineExceptionHandler
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
@@ -31,7 +32,14 @@ import kotlinx.coroutines.launch
 
 /** Manual DI (CLAUDE.md §2). One instance per process, owned by PosApp. */
 class AppContainer(context: Context) {
-    val appScope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
+    /**
+     * Background work (Reconciler, outbox loop, SDK callbacks). A failure in one job is logged
+     * and written as a local crash report; it never takes the till down.
+     */
+    val appScope = CoroutineScope(SupervisorJob() + Dispatchers.Default + CoroutineExceptionHandler { _, e ->
+        PosLog.e("BACKGROUND_JOB_FAILED", e)
+        runCatching { crashLog.write("background", e) }
+    })
 
     val settings = DeviceSettings(context)
     /** Reads the reports PosApp's installed handler writes (same private dir). */
@@ -41,7 +49,7 @@ class AppContainer(context: Context) {
     val odoo = OdooJson2Client(BuildConfig.ODOO_BASE_URL, BuildConfig.ODOO_DB, apiKey = { settings.odooApiKey })
     val catalog = CatalogService(odoo)
     val catalogCache = com.bohemian.odoo.pos.odoo.CatalogCache(java.io.File(context.filesDir, "catalog/catalog.json"))
-    val productImages = com.bohemian.odoo.pos.ui.ProductImages(java.io.File(context.filesDir, "img")) { ids -> catalog.images(ids) }
+    val productImages = com.bohemian.odoo.pos.ui.ProductImages(java.io.File(context.filesDir, "img"), appScope) { ids -> catalog.images(ids) }
     val fiscalPositions = com.bohemian.odoo.pos.odoo.FiscalPositionService(odoo)
     val pricing = PricingService(odoo, fiscalPositions)
     val sessions = SessionService(odoo, pendingWork = {
@@ -50,6 +58,7 @@ class AppContainer(context: Context) {
             unsyncedOrders = db.outbox().count(),
             openVoids = voidJournal.open().size,
             pendingLoyalty = db.loyalty().count(),
+            partlyPaid = finalizer.partlyPaid().size,
         )
     })
     val customers = CustomerService(odoo)
@@ -73,7 +82,12 @@ class AppContainer(context: Context) {
         }
     )
     val refunds = RefundService(odoo, orderSync, terminalPaymentMethodId = { settings.terminalPaymentMethodId })
-    val finalizer = SaleFinalizer(db.snapshots(), orderSync, terminalPaymentMethodId = { settings.terminalPaymentMethodId })
+    val finalizer = SaleFinalizer(
+        db.snapshots(), orderSync,
+        terminalPaymentMethodId = { settings.terminalPaymentMethodId },
+        paidAttempts = { uuid -> journal.forOrder(uuid).filter { it.state.isPaid } },
+        cashPaymentMethodId = { settings.cashPaymentMethodId },
+    )
 
     private val realGateway: PaymentGateway by lazy { PineSdkGateway() }
     private val fakeGateway: PaymentGateway by lazy { FakePaymentGateway() }
@@ -98,7 +112,7 @@ class AppContainer(context: Context) {
         refs = ::refs,
         backgroundScope = appScope,
     )
-    val reconciler = Reconciler(journal, payments, onPaid = { finalizer.finalizeTerminal(it) })
+    val reconciler = Reconciler(journal, payments, onPaid = { finalizer.finalizeTerminal(it) }, recoverPaid = { finalizer.recoverPaid() })
 
     fun startBackgroundWork() {
         appScope.launch {

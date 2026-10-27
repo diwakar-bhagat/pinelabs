@@ -66,7 +66,8 @@ data class ReceiptData(
     val tax: Paise,
     val total: Paise,
     val payments: List<ReceiptPayment>,
-    val terminal: TerminalSlip? = null,
+    /** One per card / UPI part (a split bill can have several). */
+    val terminals: List<TerminalSlip> = emptyList(),
     val zzCash: ReceiptZzCash? = null,
     /** pos.order.pos_reference ("Bill ref: 260-1-000020"). */
     val billRef: String? = null,
@@ -129,7 +130,7 @@ class ReceiptFormatter(private val width: Int) {
         rule('=')
         kv("TOTAL", rs(r.total), bold = true)
         r.payments.forEach { kv("Paid via ${it.method}", rs(it.amount)) }
-        r.terminal?.let { t ->
+        r.terminals.forEach { t ->
             kv("Mode", t.mode)
             t.cardLast4?.let { kv("Card", "**** $it") }
             t.rrn?.let { kv("RRN", it) }

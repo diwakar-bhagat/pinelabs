@@ -13,6 +13,7 @@ import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.jsonObject
 import java.text.SimpleDateFormat
 import java.util.Date
+import java.util.concurrent.ConcurrentHashMap
 import java.util.Locale
 import java.util.TimeZone
 import java.util.UUID
@@ -115,11 +116,11 @@ class OrderSyncService(
         false
     }
 
-    /** Loyalty rows whose order is already in Odoo (its outbox row is gone). */
+    /** Loyalty rows whose order is already in Odoo (its outbox row is gone), and not being sent now. */
     private suspend fun flushLoyalty(now: Long) {
         val dao = loyalty ?: return
         val waitingOrders = outbox.due(Long.MAX_VALUE).map { it.orderUuid }.toSet()
-        for (row in dao.due(now)) if (row.orderUuid !in waitingOrders) confirmLoyalty(row)
+        for (row in dao.due(now)) if (row.orderUuid !in waitingOrders && row.orderUuid !in sending) confirmLoyalty(row)
     }
 
     /** Called by the background loop (every 30 s) and after each sale. */
@@ -146,16 +147,27 @@ class OrderSyncService(
 
     private fun backoff(attempts: Int) = minOf(15 * 60_000L, 30_000L shl minOf(attempts, 5)) // 30s → 16 min cap
 
-    private suspend fun trySend(uuid: String, payload: JsonObject, attempts: Int = 0): Boolean = try {
-        odoo.call("pos.order", "sync_from_ui", payload)
-        outbox.delete(uuid)
-        PosLog.i("ORDER_SYNCED", "uuid" to uuid)
-        loyalty?.get(uuid)?.let { confirmLoyalty(it) }
-        true
-    } catch (e: OdooException) {
-        outbox.markFailed(uuid, e.message ?: e::class.simpleName ?: "error", clock() + backoff(attempts))
-        PosLog.w("ORDER_SYNC_FAILED", "uuid" to uuid, "attempt" to (attempts + 1), "err" to e.message)
-        false
+    /**
+     * Orders being sent right now. The 30 s background loop and the live sale can reach the same
+     * order at once; only one of them sends it (and books its ZZ Cash), the other skips it.
+     */
+    private val sending: MutableSet<String> = ConcurrentHashMap.newKeySet()
+
+    private suspend fun trySend(uuid: String, payload: JsonObject, attempts: Int = 0): Boolean {
+        if (!sending.add(uuid)) return false
+        return try {
+            odoo.call("pos.order", "sync_from_ui", payload)
+            outbox.delete(uuid)
+            PosLog.i("ORDER_SYNCED", "uuid" to uuid)
+            loyalty?.get(uuid)?.let { confirmLoyalty(it) }
+            true
+        } catch (e: OdooException) {
+            outbox.markFailed(uuid, e.message ?: e::class.simpleName ?: "error", clock() + backoff(attempts))
+            PosLog.w("ORDER_SYNC_FAILED", "uuid" to uuid, "attempt" to (attempts + 1), "err" to e.message)
+            false
+        } finally {
+            sending.remove(uuid)
+        }
     }
 
     companion object {

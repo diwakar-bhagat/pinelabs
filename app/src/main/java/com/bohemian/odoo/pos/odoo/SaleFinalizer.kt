@@ -62,6 +62,11 @@ data class SaleSnapshot(
     val loyaltyProgramId: Int? = null,
     /** pos.config.default_preset_id at payment time (Pickup). */
     val presetId: Int? = null,
+    /**
+     * Paid in several parts from the split screen. Such an order is finalized only from that screen
+     * (cash is counted at Validate) or, after a crash, once its terminal parts alone cover the total.
+     */
+    val split: Boolean = false,
 ) {
     fun zzRedemption(): ZzCashRedemption? = redemption?.let {
         ZzCashRedemption(
@@ -99,6 +104,7 @@ data class SaleSnapshot(
             loyaltyEarned: Paise = Paise.ZERO,
             loyaltyCardId: Int? = null,
             loyaltyProgramId: Int? = null,
+            split: Boolean = false,
         ) = SaleSnapshot(
             orderUuid = orderUuid,
             sessionId = cfg.currentSessionId ?: error("no open session"),
@@ -130,8 +136,14 @@ data class SaleSnapshot(
             loyaltyCardId = loyaltyCardId,
             loyaltyProgramId = loyaltyProgramId,
             presetId = cfg.defaultPresetId,
+            split = split,
         )
     }
+}
+
+/** A split bill with terminal parts paid but not yet the whole total: it must be finished or voided. */
+data class PartlyPaid(val orderUuid: String, val paid: Paise, val total: Paise) {
+    val due: Paise get() = total - paid
 }
 
 /**
@@ -144,6 +156,9 @@ class SaleFinalizer(
     private val orderSync: OrderSyncService,
     private val terminalPaymentMethodId: () -> Int,
     private val clock: () -> Long = System::currentTimeMillis,
+    /** Paid terminal attempts of an order (the payment journal); a split bill has several. */
+    private val paidAttempts: suspend (orderUuid: String) -> List<PaymentAttempt> = { emptyList() },
+    private val cashPaymentMethodId: () -> Int = { 0 },
 ) {
     private val json = Json { ignoreUnknownKeys = true }
 
@@ -151,19 +166,74 @@ class SaleFinalizer(
 
     suspend fun load(orderUuid: String): SaleSnapshot? = snapshots.get(orderUuid)?.let { json.decodeFromString<SaleSnapshot>(it.json) }
 
-    /** Card/UPI/BQR success (live or reconciled). Returns the sale for printing, or null if no snapshot. */
+    /**
+     * Card/UPI success (live or reconciled). Returns the sale for printing, or null if no snapshot.
+     * A split bill is finalized here only when its terminal parts cover the whole total; while it is
+     * partly paid this returns null and the split screen (or the red bar) finishes it.
+     */
     suspend fun finalizeTerminal(a: PaymentAttempt): PaidSale? {
         val snap = load(a.orderUuid) ?: run {
             PosLog.e("FINALIZE_NO_SNAPSHOT", null, "order" to a.orderUuid, "ref" to a.billingRef)
             return null
         }
-        return finalize(snap, PaymentLineData(terminalPaymentMethodId(), a.amount, a.mode, a.billingRef, a.details))
+        if (snap.split) {
+            val parts = paidAttempts(a.orderUuid)
+            val paid = parts.fold(Paise.ZERO) { acc, p -> acc + p.amount }
+            if (paid != snap.totals().totalIncl) {
+                PosLog.i("SPLIT_PARTLY_PAID", "order" to a.orderUuid, "paid" to paid, "total" to snap.totals().totalIncl)
+                return null
+            }
+            return finalize(snap, parts.map { it.paymentLine() })
+        }
+        return finalize(snap, a.paymentLine())
     }
 
-    suspend fun finalize(snap: SaleSnapshot, payment: PaymentLineData): PaidSale {
+    /**
+     * Validate on the split screen: every paid terminal part, plus the cash that makes up the rest.
+     * Cash is only what is still due (the change is handed back, not booked), so the payments add
+     * up to Odoo's total exactly (the server refuses anything else).
+     */
+    suspend fun finalizeSplit(snap: SaleSnapshot): PaidSale {
+        val parts = paidAttempts(snap.orderUuid)
+        val terminal = parts.fold(Paise.ZERO) { acc, p -> acc + p.amount }
+        val cash = snap.totals().totalIncl - terminal
+        require(cash.value >= 0) { "terminal parts exceed the bill" }
+        val cashLine = if (cash.isPositive) listOf(PaymentLineData(cashPaymentMethodId(), cash, null, null, null)) else emptyList()
+        return finalize(snap, parts.map { it.paymentLine() } + cashLine)
+    }
+
+    /** Split bills with some terminal parts paid but not the total (red bar; they block session close, I9). */
+    suspend fun partlyPaid(): List<PartlyPaid> = snapshots.all().mapNotNull { e ->
+        val snap = runCatching { json.decodeFromString<SaleSnapshot>(e.json) }.getOrNull() ?: return@mapNotNull null
+        val paid = paidAttempts(snap.orderUuid).fold(Paise.ZERO) { acc, p -> acc + p.amount }
+        if (paid.isPositive && paid < snap.totals().totalIncl) PartlyPaid(snap.orderUuid, paid, snap.totals().totalIncl) else null
+    }
+
+    /**
+     * App start: a sale the terminal fully paid whose order never reached the outbox (the app died
+     * in between) is finalized now, so a payment taken is never lost (HARD RULE 7).
+     */
+    suspend fun recoverPaid(): Int {
+        var recovered = 0
+        for (e in snapshots.all()) {
+            val snap = runCatching { json.decodeFromString<SaleSnapshot>(e.json) }.getOrNull() ?: continue
+            val parts = paidAttempts(snap.orderUuid)
+            if (parts.isEmpty() || parts.fold(Paise.ZERO) { acc, p -> acc + p.amount } != snap.totals().totalIncl) continue
+            PosLog.w("RECOVER_PAID_ORDER", "order" to snap.orderUuid, "parts" to parts.size)
+            finalize(snap, parts.map { it.paymentLine() })
+            recovered++
+        }
+        return recovered
+    }
+
+    private fun PaymentAttempt.paymentLine() = PaymentLineData(terminalPaymentMethodId(), amount, mode, billingRef, details)
+
+    suspend fun finalize(snap: SaleSnapshot, payment: PaymentLineData): PaidSale = finalize(snap, listOf(payment))
+
+    suspend fun finalize(snap: SaleSnapshot, payments: List<PaymentLineData>): PaidSale {
         val sale = PaidSale(
             orderUuid = snap.orderUuid, sessionId = snap.sessionId, lines = snap.cartLines(),
-            totals = snap.totals(), customer = snap.customer(), payments = listOf(payment),
+            totals = snap.totals(), customer = snap.customer(), payments = payments,
             paidAtMillis = clock(), fiscalPositionId = snap.fiscalPositionId,
             redemption = snap.zzRedemption(),
             loyaltyEarned = Paise(snap.loyaltyEarnedPaise),

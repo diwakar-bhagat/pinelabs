@@ -17,6 +17,7 @@ import kotlinx.coroutines.suspendCancellableCoroutine
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
+import kotlinx.coroutines.withTimeoutOrNull
 import uniffi.pine_billing.*
 import java.util.concurrent.atomic.AtomicBoolean
 import kotlin.coroutines.resume
@@ -80,12 +81,17 @@ class PineSdkGateway : PaymentGateway {
         // registry and never touches the terminal.
         // allowed_payment_modes is optional there and merely narrows the query, so we
         // send null: narrowing to Upi would have been a guess for Bharat QR.
-        transact(
-            type = TransactionType.GET_STATUS,
-            modes = null,
-            options = options(billingRef = billingRef, amount = amount),
-            onStarted = onStarted,
-        )
+        // A status query that the MasterApp never answers must not hold the till: after
+        // GET_STATUS_TIMEOUT_MS it counts as "unknown", and the caller checks again or asks a supervisor.
+        withTimeoutOrNull(GET_STATUS_TIMEOUT_MS) {
+            transact(
+                type = TransactionType.GET_STATUS,
+                modes = null,
+                options = options(billingRef = billingRef, amount = amount),
+                onStarted = onStarted,
+            )
+        } ?: GatewayResult.Ambiguous("Timeout", "no status from the terminal in ${GET_STATUS_TIMEOUT_MS / 1000} s")
+            .also { PosLog.w("PINE_STATUS_TIMEOUT", "ref" to billingRef) }
 
     override suspend fun void(request: VoidRequest, onStarted: (String) -> Unit): GatewayResult =
         transact(
@@ -101,7 +107,13 @@ class PineSdkGateway : PaymentGateway {
             onStarted = onStarted,
         )
 
-    override suspend fun print(lines: List<PrintLine>, printRef: String, widthChars: Int): PrintResult = withContext(Dispatchers.IO) { sdkSlot.withLock {
+    override suspend fun print(lines: List<PrintLine>, printRef: String, widthChars: Int): PrintResult =
+        // A printer that never answers must not hold the SDK slot (and with it every payment).
+        withTimeoutOrNull(PRINT_TIMEOUT_MS) { printNow(lines, printRef, widthChars) }
+            ?: PrintResult.Failed("Printer did not answer in ${PRINT_TIMEOUT_MS / 1000} s")
+                .also { PosLog.w("PINE_PRINT_TIMEOUT", "ref" to printRef) }
+
+    private suspend fun printNow(lines: List<PrintLine>, printRef: String, widthChars: Int): PrintResult = withContext(Dispatchers.IO) { sdkSlot.withLock {
         // Values follow Pine's own MasterApp print sample (email, 2026-10-24): every text item is
         // PrintDataType 0 with PrinterWidth = characters per line; only left/centre alignment
         // exists, right alignment is done with spaces (ReceiptFormatter.twoCol already does).
@@ -193,8 +205,13 @@ class PineSdkGateway : PaymentGateway {
                         // UAT aid: which extra fields this terminal returns (keys only — values may hold PII).
                         result.metadata?.keys?.takeIf { it.isNotEmpty() }?.let { PosLog.i("PINE_RESULT_META_KEYS", "keys" to it.sorted()) }
                         finish(
-                            if (result.status == TransactionStatus.SUCCESS) GatewayResult.Approved(details)
-                            else GatewayResult.Declined(result.responseCode, result.responseMessage, details)
+                            when (result.status) {
+                                TransactionStatus.SUCCESS -> GatewayResult.Approved(details)
+                                TransactionStatus.FAILED -> GatewayResult.Declined(result.responseCode, result.responseMessage, details)
+                                // PENDING is not a decline: a UPI QR can still be paid. Treat it as
+                                // unknown, so it is checked again and never marked "not paid" (HARD RULE 5).
+                                TransactionStatus.PENDING -> GatewayResult.Ambiguous("Pending", result.responseMessage)
+                            }
                         )
                     }
 
@@ -231,6 +248,10 @@ class PineSdkGateway : PaymentGateway {
         const val PRINT_TYPE_TEXT = 0
         /** Pine reference app `plutusapp_new` print demo: PrintDataType 4 = QR code of DataToPrint. */
         const val PRINT_TYPE_QR = 4
+        /** A GetStatus the MasterApp has not answered by then counts as "unknown" (checked again). */
+        const val GET_STATUS_TIMEOUT_MS = 45_000L
+        /** A print not finished by then is reported failed; the sale stands and "Print again" is offered (I8). */
+        const val PRINT_TIMEOUT_MS = 30_000L
     }
 
     private fun PayMode.toSdk(): PaymentMode = when (this) {

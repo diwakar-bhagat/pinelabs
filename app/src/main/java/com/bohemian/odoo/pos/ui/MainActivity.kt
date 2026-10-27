@@ -4,6 +4,7 @@ import android.app.Activity
 import android.os.Bundle
 import android.view.WindowManager
 import androidx.activity.ComponentActivity
+import androidx.activity.compose.BackHandler
 import androidx.activity.compose.setContent
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
@@ -92,7 +93,7 @@ fun SetupScreen(vm: PosViewModel) {
         Row(verticalAlignment = Alignment.CenterVertically) {
             ZzLogo(48.dp)
             Spacer(Modifier.width(12.dp))
-            Text("ZenZebra · Setup (${vm.envLabel})", style = ZzHeading, fontSize = 22.sp)
+            Text("ZenZebra · Setup (${vm.envLabel} · ${vm.versionLabel})", style = ZzHeading, fontSize = 22.sp)
         }
         s.error?.let { Text(it, color = MaterialTheme.colorScheme.error) }
 
@@ -148,6 +149,7 @@ fun SetupScreen(vm: PosViewModel) {
                     if (Kiosk.permitted(activity)) "" else " (pinning needs PAXSTORE to allow this app and the Pine payment app)"
             )
         }
+        ChangePinRow(s, vm)
         Row(verticalAlignment = Alignment.CenterVertically) {
             Switch(s.printLogo, { vm.setPrintLogo(it) }); Spacer(Modifier.width(8.dp))
             Text("Print the company logo on bills, as on Odoo's PDF (if the printer refuses it, the bill prints without it)")
@@ -166,6 +168,28 @@ fun SetupScreen(vm: PosViewModel) {
     }
 }
 
+/** "Setup PIN": change the supervisor PIN (default 1234). Only a salted hash is stored. */
+@Composable
+private fun ChangePinRow(s: SetupState, vm: PosViewModel) {
+    var current by remember { mutableStateOf("") }
+    var new by remember { mutableStateOf("") }
+    var confirm by remember { mutableStateOf("") }
+    fun digits(v: String) = v.filter { it.isDigit() }.take(6)
+    Text("Setup PIN", fontWeight = FontWeight.Bold)
+    Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+        val pinField = KeyboardOptions(keyboardType = KeyboardType.NumberPassword)
+        OutlinedTextField(current, { current = digits(it) }, Modifier.width(160.dp), singleLine = true, label = { Text("Current PIN") },
+            visualTransformation = PasswordVisualTransformation(), keyboardOptions = pinField)
+        OutlinedTextField(new, { new = digits(it) }, Modifier.width(160.dp), singleLine = true, label = { Text("New PIN") },
+            visualTransformation = PasswordVisualTransformation(), keyboardOptions = pinField)
+        OutlinedTextField(confirm, { confirm = digits(it) }, Modifier.width(160.dp), singleLine = true, label = { Text("New PIN again") },
+            visualTransformation = PasswordVisualTransformation(), keyboardOptions = pinField)
+        OutlinedButton({ vm.changePin(current, new, confirm); current = ""; new = ""; confirm = "" },
+            enabled = current.isNotEmpty() && new.isNotEmpty() && confirm.isNotEmpty()) { Text("Change PIN") }
+    }
+    s.pinMessage?.let { Text(it, color = if (s.pinChanged) Zz.Green else MaterialTheme.colorScheme.error, fontSize = 13.sp) }
+}
+
 // ============================================================================ Sell
 
 @Composable
@@ -173,6 +197,9 @@ fun SellScreen(vm: PosViewModel) {
     val s by vm.sell.collectAsStateWithLifecycle()
     val outbox by vm.outboxCount.collectAsStateWithLifecycle()
     val unresolved by vm.unresolved.collectAsStateWithLifecycle()
+    // Back during a payment must not close the till: the terminal may still take the money, and
+    // the result has to reach Odoo. Swallowed until the payment has an outcome.
+    BackHandler(enabled = s.pay is PayUi.Working) {}
 
     Column(Modifier.fillMaxSize()) {
         // Top bar
@@ -186,7 +213,7 @@ fun SellScreen(vm: PosViewModel) {
             Spacer(Modifier.width(12.dp))
             // PROD is the normal state; anything else (UAT, NO PINE SDK) is flagged in gold.
             val prod = vm.envLabel == "PROD"
-            Badge(containerColor = if (prod) Zz.Ink else Zz.Gold) { Text(vm.envLabel, color = if (prod) Zz.MutedOnBlack else Zz.Black) }
+            Badge(containerColor = if (prod) Zz.Ink else Zz.Gold) { Text("${vm.envLabel} · ${BuildConfig.VERSION_NAME}", color = if (prod) Zz.MutedOnBlack else Zz.Black) }
             Spacer(Modifier.weight(1f))
             if (outbox > 0) Badge(containerColor = Zz.Red) { Text("$outbox not synced to Odoo", color = Zz.Cream) }
             if (unresolved.isNotEmpty()) { Spacer(Modifier.width(8.dp)); Badge(containerColor = Zz.Gold) { Text("${unresolved.size} payment(s) to check", color = Zz.Black) } }
@@ -194,7 +221,7 @@ fun SellScreen(vm: PosViewModel) {
             IconButton({ vm.loadCatalog() }) { MdiIcon(R.drawable.mdi_refresh, "Reload menu and photos from Odoo", Zz.Cream) }
             TextButton({ vm.startVoid() }) { Text("VOID", color = Zz.Cream, style = ZzHeading) }
             if (s.config?.sessionOpen == true) TextButton({ vm.startClose() }) { Text("CLOSE SESSION", color = Zz.Cream, style = ZzHeading) }
-            TextButton({ vm.reopenSetup() }) { Text("SETUP", color = Zz.MutedOnBlack, style = ZzHeading) }
+            TextButton({ vm.requestSetup() }) { Text("SETUP", color = Zz.MutedOnBlack, style = ZzHeading) }
         }
         s.error?.let { Text(it, color = MaterialTheme.colorScheme.error, modifier = Modifier.padding(8.dp)) }
         s.offlineCatalogSavedAt?.let { at ->
@@ -211,7 +238,14 @@ fun SellScreen(vm: PosViewModel) {
                 Button({ vm.openSession() }, enabled = !s.loading) { Text("Open session") }
             }
         }
-        if (unresolved.isNotEmpty()) UnresolvedBar(unresolved.first().billingRef, unresolved.first().mode, vm)
+        if (unresolved.isNotEmpty()) {
+            val busy by vm.barBusy.collectAsStateWithLifecycle()
+            val checking by vm.checking.collectAsStateWithLifecycle()
+            val ref = unresolved.first().billingRef
+            UnresolvedBar(ref, unresolved.first().mode, acting = ref in busy, checking = ref in checking, vm)
+        }
+        val partly by vm.partlyPaid.collectAsStateWithLifecycle()
+        partly.firstOrNull()?.let { PartlyPaidBar(it, vm) }
         val openVoids by vm.openVoids.collectAsStateWithLifecycle()
         openVoids.firstOrNull()?.let { VoidBar(it, vm) }
 
@@ -221,11 +255,28 @@ fun SellScreen(vm: PosViewModel) {
             ProductPanel(s, vm, Modifier.weight(0.62f).fillMaxHeight())
         }
     }
+    // The split screen first, so the "complete it on the terminal" dialog of a charge shows on top of it.
+    val split by vm.split.collectAsStateWithLifecycle()
+    split?.let { PaymentScreen(it, vm) }
     PaymentDialog(s.pay, vm)
+    val pinPrompt by vm.pinPrompt.collectAsStateWithLifecycle()
+    pinPrompt?.let { SetupPinDialog(it, vm) }
     val closing by vm.closing.collectAsStateWithLifecycle()
     closing?.let { ClosingDialog(it, cashControl = s.config?.cashControl == true, vm) }
     val voiding by vm.voiding.collectAsStateWithLifecycle()
     voiding?.let { VoidDialog(it, vm) }
+}
+
+/** A split bill with a card / UPI part paid but not the whole total: it must be finished before a new bill. */
+@Composable
+private fun PartlyPaidBar(p: com.bohemian.odoo.pos.odoo.PartlyPaid, vm: PosViewModel) {
+    Row(Modifier.fillMaxWidth().background(Zz.RedSoft).padding(8.dp), verticalAlignment = Alignment.CenterVertically) {
+        Text("Bill partly paid: ${p.paid.format()} of ${p.total.format()}, ${p.due.format()} still due. Finish it before a new bill.",
+            Modifier.weight(1f))
+        Button({ vm.resumePartlyPaid(p.orderUuid) }, colors = ButtonDefaults.buttonColors(containerColor = Zz.Black, contentColor = Zz.Cream)) {
+            Text("FINISH")
+        }
+    }
 }
 
 /** A void that still needs a person: review on the terminal, or the Odoo refund. */
@@ -352,14 +403,32 @@ private fun PayButton(label: String, enabled: Boolean, modifier: Modifier, dark:
     ) { Text(label, style = ZzHeading, fontSize = 16.sp) }
 
 @Composable
-private fun UnresolvedBar(ref: String, mode: String, vm: PosViewModel) {
+/**
+ * A payment the terminal has not confirmed. [checking]: the till is asking the terminal right now;
+ * [acting]: a tap on this bar is being saved. The supervisor can always decide (their decision
+ * stops a running check); each button works once per tap, never twice.
+ */
+private fun UnresolvedBar(ref: String, mode: String, acting: Boolean, checking: Boolean, vm: PosViewModel) {
+    val label = when (mode) {
+        PayMode.CARD.name -> "Card"
+        PayMode.UPI.name -> "UPI"
+        PayMode.BHARAT_QR.name -> "UPI (Bharat QR)"
+        else -> mode
+    }
     Row(Modifier.fillMaxWidth().background(Zz.GoldSoft).padding(8.dp), verticalAlignment = Alignment.CenterVertically) {
-        Text("Payment $ref ($mode) not confirmed. ", Modifier.weight(1f))
-        if (mode != PayMode.CARD.name) OutlinedButton({ vm.checkAgain(ref) }) { Text("Check status") }
+        Text(
+            "Payment $ref ($label) not confirmed. " + when {
+                acting -> "Saving…"
+                checking -> "Checking with the terminal…"
+                else -> ""
+            },
+            Modifier.weight(1f),
+        )
+        if (mode != PayMode.CARD.name) OutlinedButton({ vm.checkAgain(ref) }, enabled = !acting && !checking) { Text("Check status") }
         Spacer(Modifier.width(6.dp))
-        OutlinedButton({ vm.resolveManually(ref, paid = true) }) { Text("Supervisor: PAID") }
+        OutlinedButton({ vm.resolveManually(ref, paid = true) }, enabled = !acting) { Text("Supervisor: PAID") }
         Spacer(Modifier.width(6.dp))
-        OutlinedButton({ vm.resolveManually(ref, paid = false) }) { Text("Supervisor: NOT paid") }
+        OutlinedButton({ vm.resolveManually(ref, paid = false) }, enabled = !acting) { Text("Supervisor: NOT paid") }
     }
 }
 
@@ -378,6 +447,7 @@ private fun PaymentDialog(pay: PayUi, vm: PosViewModel) {
         is PayUi.Done -> {
             val (title, body) = when {
                 pay.paidByCash -> "✓ PAID (CASH)" to (pay.cashChange?.let { "Change to return: ${it.format()}" } ?: "")
+                pay.splitSummary != null -> "✓ PAID (SPLIT)" to (pay.splitSummary + (pay.cashChange?.let { "\nChange to return: ${it.format()}" } ?: ""))
                 else -> when (val o = pay.outcome) {
                     is PaymentOutcome.Paid -> "✓ PAYMENT SUCCESSFUL" to listOfNotNull(
                         o.attempt.amount.format(), o.attempt.details?.rrn?.let { "RRN $it" }, o.attempt.details?.last4?.let { "Card ****$it" },
@@ -392,10 +462,15 @@ private fun PaymentDialog(pay: PayUi, vm: PosViewModel) {
                     null -> "" to ""
                 }
             }
-            val printedNote = when (pay.printed) { false -> "\n\nReceipt did not print — check paper."; else -> "" }
+            val printedNote = when {
+                pay.printing -> "\n\nPrinting the bill…"
+                pay.printed == false -> "\n\nThe bill did not print. Check the paper, then Print again."
+                else -> ""
+            }
             AlertDialog(
                 onDismissRequest = { vm.dismissPayResult() },
                 confirmButton = { Button({ vm.dismissPayResult() }) { Text(if (pay.isPaid) "NEW BILL" else "BACK TO CART") } },
+                dismissButton = if (pay.isPaid && pay.printed == false) ({ OutlinedButton({ vm.printAgain() }) { Text("PRINT AGAIN") } }) else null,
                 title = { Text(title, fontWeight = FontWeight.Bold) },
                 text = { Text(body + printedNote) },
             )

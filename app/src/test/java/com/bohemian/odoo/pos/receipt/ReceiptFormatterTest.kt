@@ -28,7 +28,7 @@ class ReceiptFormatterTest {
             ReceiptItem("Makino Corn Munch Cream & Onion", "2", Paise(7000), Paise(14000), "12% GST S", discountPct = "10"),
             ReceiptItem("₹400 off (400 ZZ Cash)", "1", Paise(-23523), Paise(-23523), "18% GST S"),
         ),
-        terminal = TerminalSlip("CARD", "4242", "412345678901", "A1B2C3"),
+        terminals = listOf(TerminalSlip("CARD", "4242", "412345678901", "A1B2C3"), TerminalSlip("UPI", null, "512345678901", null)),
         zzCash = ReceiptZzCash("401.44", "400", "36.04", "26 Nov 2026"),
         eBillUrl = "https://zenzebra1.odoo.com/pos/ticket/validate?access_token=abc",
     )
@@ -97,6 +97,21 @@ class ReceiptFormatterTest {
         val lines = ReceiptFormatter(32).format(long()).map { it.text }
         assertTrue(lines.contains(ReceiptFormatter(32).twoCol("Card", "**** 4242")))
         assertTrue(lines.contains(ReceiptFormatter(32).twoCol("RRN", "412345678901")))
+    }
+
+    @Test fun `a split bill prints every payment line and every terminal part`() {
+        val split = bill000020().copy(
+            payments = listOf(ReceiptPayment("Pine Labs E700 (A2A)", Paise(30000)), ReceiptPayment("Pine Labs E700 (A2A)", Paise(15000)),
+                ReceiptPayment("Cash", Paise(5000))),
+            terminals = listOf(TerminalSlip("UPI", null, "512345678901", null), TerminalSlip("CARD", "4242", "412345678901", "A1")),
+        )
+        val lines = ReceiptFormatter(32).format(split).map { it.text }
+        val f = ReceiptFormatter(32)
+        // The method name is too long to share a 32-char line with the amount: the amount goes below it.
+        assertEquals(2, lines.count { it == "Paid via Pine Labs E700 (A2A)" })
+        assertTrue(lines.contains("Rs 300.00".padStart(32)) && lines.contains("Rs 150.00".padStart(32)))
+        assertTrue(lines.contains(f.twoCol("Paid via Cash", "Rs 50.00")))
+        assertEquals(listOf("UPI", "CARD"), lines.filter { it.startsWith("Mode") }.map { it.removePrefix("Mode").trim() })
     }
 
     @Test fun `bill not yet in Odoo says the WhatsApp bill follows`() {
