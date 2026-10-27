@@ -1,7 +1,7 @@
 # Infosec pack — Bohemian Odoo POS (for Pine Labs review)
 
 App `com.bohemian.odoo.pos`, native Android (Kotlin), minSdk 25 (PAX E700, Android 7.1.2).
-Facts below are taken from the merged release manifest (`uatRelease`) and the source, 2026-10-24.
+Facts below are taken from the signed production APK (`prodRelease`, versionCode 1 / 0.1.0) and the source, 2026-10-27.
 
 ## 1. Permissions
 
@@ -27,7 +27,7 @@ third-party SDKs. OkHttp does not retry POSTs automatically (`retryOnConnectionF
 
 **Payments** never touch the network from this app: they go App-to-App over Android IPC to
 the resident Pine Labs MasterApp (`com.pinelabs.masterapp`, declared in `<queries>`) through
-the Pine Billing SDK 1.0.0. The app never sees or handles card data. It receives only the
+the Pine Billing SDK 2.0.0. The app never sees or handles card data. It receives only the
 masked PAN, from which it keeps the last 4 digits.
 
 ## 3. Exported components
@@ -61,7 +61,8 @@ external storage for diffing.
 - One tag (`BohemianPOS`), structured `[EVENT] key=value` lines (`core/Log.kt`).
 - Never logged: API keys, keystore passwords, full card PAN, customer phone numbers
   (HARD RULE 11). Phones go through `Redact.phone` (last 4), PANs through `Redact.last4`.
-- Release builds are minified with R8, and `Log.v` / `Log.d` calls are stripped
+- Free-text values (`err`, `detail`, `msg`: Odoo or terminal error text) go through the same
+  redaction as crash reports before they are logged (`PosLogTest`). Release builds are minified with R8, and `Log.v` / `Log.d` calls are stripped
   (`proguard-rules.pro`, `-assumenosideeffects`).
 - Crash reports go through `CrashLog.redact`: digit runs of 10 or more are masked to their
   last 4 (phones, PANs), `bearer` tokens and `api_key=` values are removed. Covered by
@@ -85,3 +86,33 @@ void is saved before the terminal is called. An unclear outcome is never sent ag
 to a supervisor. The amount the terminal reports must equal the amount requested. Paid
 orders wait in a durable outbox until Odoo confirms them. A POS session cannot close while
 any of that is unfinished. Full list: `CLAUDE.md` §3–§4 and `docs/INVARIANTS.md`.
+
+## 8. Pre-release security audit (production APK, 2026-10-27)
+
+Checked on `bohemian-odoo-pos-PROD-1-0.1.0-signed.apk` (6,067,647 bytes,
+SHA-256 `23cbd48d6f7ed28d0ade76d7165c069a26db55b983548fb32ded768c506757b9`).
+
+| Check | Result |
+|---|---|
+| Signing | v1 (JAR) + v2 verified (`apksigner verify --min-sdk-version 21`); cert SHA-256 `5062f7cff3f3cc2daaa5ab03c0543ee0ff0417bf7cad2eb34735cfc60fc2cbda` |
+| `debuggable` | Absent (not debuggable) |
+| Secrets in the APK (dex strings, assets, resources) | None. No API key, token, password, keystore or `.env` content. The only 32-hex strings are the PROD Pine Application ID and Room schema hashes. The UAT Application ID is not in the PROD build |
+| Network | One host, `https://zenzebra1.odoo.com`; cleartext disabled; system trust store only; no HTTP body logging |
+| Debug-only features | FAKE payment gateway and `sync_from_ui` payload dump are gated by `BuildConfig.DEBUG` (false in release); the Setup switch is hidden |
+| `Log.d` / `Log.v` | 0 calls left in the release dex (R8 strip) |
+| Exported components | Launcher activity, `BootReceiver` (protected `BOOT_COMPLETED` only), AndroidX `ProfileInstallReceiver` (needs `DUMP`). Provider and service not exported |
+| Backup / device transfer | Disabled (`allowBackup=false`, `dataExtractionRules` exclude all) |
+| Odoo API key on screen | Never shown again after saving; entry field is masked |
+| Lint (`lintProdRelease`) | 0 errors; 4 warnings, none security-relevant (target API, package visibility of the Pine check, fixed landscape, ChromeOS ABI) |
+| Unit tests | 139 pass |
+| Native code | Only the Pine SDK's `libuniffi_pine_billing.so` and JNA `libjnidispatch.so` (arm64-v8a, armeabi-v7a) |
+
+Known, accepted:
+
+- The customer's mobile number (when a customer is attached to the sale) is passed to the Pine
+  MasterApp as `customer_mobile` on the sale. It is never logged by this app; Pine's debug
+  MasterApp build was seen logging request bodies — a Pine-side setting.
+- `androidx.security:security-crypto` 1.1.0-alpha06 (EncryptedSharedPreferences) is deprecated
+  upstream but has no known vulnerability. Replacing it would need a key-migration step.
+- The Setup screen (Odoo API key, POS config, kiosk switch) has no supervisor PIN yet. Store
+  procedure until then: kiosk mode on, and the device kept by the store manager.
