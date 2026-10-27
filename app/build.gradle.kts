@@ -44,8 +44,8 @@ android {
         applicationId = "com.bohemian.odoo.pos"
         minSdk = 25          // E700 = PayDroid Android 7.1.2 (API 25)
         targetSdk = 34
-        versionCode = 2     // +1 for every build sent to PAXSTORE (1 = first signed PROD APK, 2026-10-27)
-        versionName = "0.1.1"
+        versionCode = 3     // +1 for every build sent to PAXSTORE (1 = first signed PROD APK, 2026-10-27; 2 was used by three different builds)
+        versionName = "0.3.0" // above release-rc1's 0.2.0, so the newest build never looks older
 
         buildConfigField("String", "ODOO_BASE_URL", "\"$odooBaseUrl\"")
         buildConfigField("String", "ODOO_DB", "\"$odooDb\"")
