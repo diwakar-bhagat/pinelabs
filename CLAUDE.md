@@ -310,8 +310,8 @@ components, data at rest, logging policy, kiosk requirement, money-safety summar
   bar, CASH), cream #F5F2EC (working areas), blood red #E0000F (CARD/UPI/BQR, alerts), gold
   #E6A525 (warnings, non-PROD badge). Headings heavy, all caps (site: Montserrat 900; the E700 has
   no Montserrat, so system sans at Black weight). No hard-coded colours outside `Theme.kt`.
-- **Logo:** the ZenZebra pixel-zebra is the launcher icon (cream rounded tile, mipmap mdpi→xxxhdpi,
-  made with `make_icons.swift`-style rendering from the official PNG) and sits in the header and Setup title.
+- **Logo:** the ZenZebra pixel-zebra on its rich-black square (official artwork, 2026-10-27) is the
+  launcher icon (rounded tile, mipmap mdpi→xxxhdpi) and sits in the header and Setup title.
 - **Security:** debug builds are no longer signed with the release key, since a debuggable build
   could otherwise install over the production app. Android 12+ backup and device-transfer are excluded
   (`res/xml/data_extraction_rules.xml`). Android lint (`lintProdRelease`): 0 errors; remaining
