@@ -29,7 +29,11 @@ import androidx.compose.ui.text.input.ImeAction
 import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.text.style.TextOverflow
+import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
+import com.bohemian.odoo.pos.R
+import androidx.compose.ui.res.painterResource
+import androidx.compose.foundation.Image
 import androidx.compose.ui.unit.sp
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.ViewModelProvider
@@ -84,7 +88,11 @@ fun SetupScreen(vm: PosViewModel) {
     val s by vm.setup.collectAsStateWithLifecycle()
     var key by remember { mutableStateOf("") }
     Column(Modifier.fillMaxSize().verticalScroll(rememberScrollState()).padding(24.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
-        Text("Bohemian Odoo POS · Setup (${vm.envLabel})", fontSize = 22.sp, fontWeight = FontWeight.Bold)
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            ZzLogo(48.dp)
+            Spacer(Modifier.width(12.dp))
+            Text("BOHEMIAN ODOO POS · SETUP (${vm.envLabel})", style = ZzHeading, fontSize = 22.sp)
+        }
         s.error?.let { Text(it, color = MaterialTheme.colorScheme.error) }
 
         Text("1. Odoo API key for this terminal's user")
@@ -165,6 +173,8 @@ fun SellScreen(vm: PosViewModel) {
         // Top bar
         Row(Modifier.fillMaxWidth().background(Zz.Black).padding(horizontal = 16.dp, vertical = 10.dp),
             verticalAlignment = Alignment.CenterVertically) {
+            ZzLogo(36.dp)
+            Spacer(Modifier.width(10.dp))
             Text("ZENZEBRA", color = Zz.Red, style = ZzHeading, fontSize = 20.sp)
             Text("  ·  ${(s.config?.name ?: "…").uppercase()}", color = Zz.Cream, style = ZzHeading, fontSize = 16.sp)
             Spacer(Modifier.width(12.dp))
@@ -503,3 +513,9 @@ private fun PaymentDialog(pay: PayUi, vm: PosViewModel) {
         }
     }
 }
+
+/** The ZenZebra logo (pixel zebra on a cream tile), the same artwork as the launcher icon. */
+@Composable
+private fun ZzLogo(size: Dp) =
+    Image(painterResource(R.mipmap.ic_launcher), contentDescription = "ZenZebra", modifier = Modifier.size(size))
+
