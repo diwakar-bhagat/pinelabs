@@ -28,7 +28,7 @@ class BillReceiptTest {
 
     private val bill = OdooBill(
         name = "ZenZebra - 000020", posReference = "260-1-000020", dateOrderUtc = "2026-10-27 12:04:16",
-        storeName = "ZenZebra", customerName = "Diwakar", customerPhone = "+91 70489 80055", cashier = "Ankur",
+        storeName = "ZenZebra", customerName = "Diwakar", customerPhone = "+91 98765 43210", cashier = "Ankur",
         lines = listOf(
             OdooBillLine("Go desi Masala Jamun Popz 8gm", BigDecimal("1.0"), BigDecimal("0.0"), listOf("5% GST S"), Paise(500)),
             OdooBillLine("Makino Corn Munch", BigDecimal("3.0"), BigDecimal("10.0"), listOf("12% GST S", "Cess"), Paise(10000)),
@@ -44,7 +44,7 @@ class BillReceiptTest {
         assertEquals("ZenZebra - 000020", r.billNo)
         assertEquals("27 oct 2026, 05:34 pm", r.dateTime.lowercase())
         assertEquals("Ankur", r.servedBy)
-        assertEquals("+91 70489 80055", r.customerPhone)
+        assertEquals("+91 98765 43210", r.customerPhone)
         assertEquals(ReceiptItem("Go desi Masala Jamun Popz 8gm", "1", Paise(500), Paise(500), "5% GST S"), r.items[0])
         // rate = amount ÷ qty, as the template prints it; the discount is shown like Odoo's
         assertEquals(ReceiptItem("Makino Corn Munch", "3", Paise(3333), Paise(10000), "12% GST S, Cess", "10"), r.items[1])
@@ -61,7 +61,7 @@ class BillReceiptTest {
             orderUuid = "3c5e0cf3-41ea", sessionId = 391,
             lines = listOf(CartLine("l1", chai, 2, totalIncl = Paise(4000), totalExcl = Paise(3810))),
             totals = CartTotals(Paise(4000), Paise(3810)),
-            customer = Customer(19, "Diwakar", "+917048980055"),
+            customer = Customer(19, "Diwakar", "+919876543210"),
             payments = listOf(PaymentLineData(22, Paise(4000), PayMode.UPI, "ZENZ261027173400123", null)),
             paidAtMillis = 1_793_104_456_000L,
         )

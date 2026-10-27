@@ -13,7 +13,7 @@ class ReceiptFormatterTest {
         companyAddress = "A-11, 2nd Floor, A Block Rd, DDA Sheds, Pocket A, Pocket A, Okhla Phase I, New Delhi 110020",
         billNo = "ZenZebra - 000020",
         dateTime = "27 Oct 2026, 05:34 pm",
-        customerName = "Diwakar", customerPhone = "+91 70489 80055",
+        customerName = "Diwakar", customerPhone = "+91 98765 43210",
         servedBy = "Ankur",
         items = listOf(ReceiptItem("Go desi Masala Jamun Popz 8gm", "1", Paise(500), Paise(500), taxes = "5% GST S")),
         taxable = Paise(476), tax = Paise(24), total = Paise(500),
@@ -61,7 +61,7 @@ class ReceiptFormatterTest {
         val lines = ReceiptFormatter(32).format(bill000020()).map { it.text }
         assertTrue(lines.contains(ReceiptFormatter(32).twoCol("Bill No.", "ZenZebra - 000020")))
         // 25 characters do not fit beside "Customer" on 32: the value goes right-aligned below it.
-        assertTrue(lines.contains("Diwakar (+91 70489 80055)".padStart(32)))
+        assertTrue(lines.contains("Diwakar (+91 98765 43210)".padStart(32)))
         assertTrue(lines.contains(ReceiptFormatter(32).twoCol("Taxable value", "Rs 4.76")))
         assertTrue(lines.contains(ReceiptFormatter(32).twoCol("GST", "Rs 0.24")))
         assertTrue(lines.contains(ReceiptFormatter(32).twoCol("TOTAL", "Rs 5.00")))
@@ -71,10 +71,10 @@ class ReceiptFormatterTest {
 
     @Test fun `a value too long for one row goes under its label`() {
         val f = ReceiptFormatter(24)
-        val rows = f.keyValue("Customer", "Diwakar (+91 70489 80055)")
+        val rows = f.keyValue("Customer", "Diwakar (+91 98765 43210)")
         assertEquals("Customer", rows.first())
         assertTrue(rows.drop(1).all { it.length == 24 })
-        assertEquals("Diwakar (+91 70489 80055)", rows.drop(1).joinToString(" ") { it.trim() })
+        assertEquals("Diwakar (+91 98765 43210)", rows.drop(1).joinToString(" ") { it.trim() })
     }
 
     @Test fun `24 character paper puts Item above the number columns`() {

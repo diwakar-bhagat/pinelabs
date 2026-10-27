@@ -24,7 +24,7 @@ data class OdooBill(
     val dateOrderUtc: String,
     val storeName: String,
     val customerName: String?,
-    /** res.partner.phone as typed in Odoo ("+91 70489 80055"), printed like the PDF. */
+    /** res.partner.phone as typed in Odoo ("+91 98765 43210"), printed like the PDF. */
     val customerPhone: String?,
     /** pos.order.cashier ("Served by"). */
     val cashier: String?,

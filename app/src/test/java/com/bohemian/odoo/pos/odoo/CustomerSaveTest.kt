@@ -30,23 +30,23 @@ class CustomerSaveTest {
 
     @Test fun `create sends the name and E164 mobile only, then reads the partner back`() = runTest {
         server.enqueue(MockResponse().setBody("[77]"))
-        server.enqueue(MockResponse().setBody("""[{"id": 77, "name": "Riya", "phone": "+917048980055", "vat": false,
+        server.enqueue(MockResponse().setBody("""[{"id": 77, "name": "Riya", "phone": "+919876543210", "vat": false,
             "l10n_in_gst_treatment": "consumer", "state_id": false, "property_account_position_id": false}]"""))
-        val c = service().create("Riya", "+917048980055")
+        val c = service().create("Riya", "+919876543210")
         assertEquals(77, c.id)
         assertEquals("Riya", c.name)
         val (method, create) = body()
         assertEquals("create", method)
         val vals = create["vals_list"]!!.jsonArray.single().jsonObject
-        assertEquals(mapOf("name" to JsonPrimitive("Riya"), "phone" to JsonPrimitive("+917048980055")), vals)
+        assertEquals(mapOf("name" to JsonPrimitive("Riya"), "phone" to JsonPrimitive("+919876543210")), vals)
         assertEquals("read", body().first)
     }
 
     @Test fun `exact lookup is by the sanitized phone`() = runTest {
         server.enqueue(MockResponse().setBody("[]"))
-        assertNull(service().findByPhone("+917048980055"))
+        assertNull(service().findByPhone("+919876543210"))
         val (method, req) = body()
         assertEquals("search_read", method)
-        assertEquals("""[["phone_sanitized","=","+917048980055"]]""", req["domain"].toString())
+        assertEquals("""[["phone_sanitized","=","+919876543210"]]""", req["domain"].toString())
     }
 }

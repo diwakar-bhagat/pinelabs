@@ -34,7 +34,7 @@ class BillServiceTest {
             "qty": 1.0, "price_subtotal_incl": 5.0, "discount": 0.0, "tax_ids": [31]}]""")
         ok("""[{"id": 31, "name": "5% GST S"}]""")
         ok("""[{"id": 15661, "payment_method_id": [2, "Cash"], "amount": 5.0}]""")
-        ok("""[{"id": 19, "phone": "+91 70489 80055"}]""")
+        ok("""[{"id": 19, "phone": "+91 98765 43210"}]""")
         server.enqueue(zz)
     }
 
@@ -46,7 +46,7 @@ class BillServiceTest {
         assertEquals("260-1-000020", b.posReference)
         assertEquals("ZenZebra", b.storeName)
         assertEquals("Diwakar", b.customerName)
-        assertEquals("+91 70489 80055", b.customerPhone)
+        assertEquals("+91 98765 43210", b.customerPhone)
         assertEquals("Ankur", b.cashier)
         assertEquals(listOf(OdooBillLine("Go desi Masala Jamun Popz 8gm", BigDecimal("1.0"), BigDecimal("0.0"), listOf("5% GST S"), Paise(500))), b.lines)
         assertEquals(Paise(500), b.amountTotal)
