@@ -36,9 +36,8 @@ import com.bohemian.odoo.pos.payment.PaymentOutcome
 import com.bohemian.odoo.pos.payment.VoidOutcome
 import com.bohemian.odoo.pos.pine.PayMode
 import com.bohemian.odoo.pos.pine.PrintResult
-import com.bohemian.odoo.pos.receipt.ReceiptData
+import com.bohemian.odoo.pos.receipt.TerminalSlip
 import com.bohemian.odoo.pos.receipt.ReceiptFormatter
-import com.bohemian.odoo.pos.receipt.ReceiptItem
 import com.bohemian.odoo.pos.odoo.ClosingSummary
 import com.bohemian.odoo.pos.odoo.CloseResult
 import com.bohemian.odoo.pos.odoo.RefundResult
@@ -88,6 +87,8 @@ data class SetupState(
     val printerWidth: Int = 24,
     val useFake: Boolean = false,
     val kioskMode: Boolean = false,
+    /** Company logo at the top of the bill (Pine image printing still to be proven on the E700). */
+    val printLogo: Boolean = false,
     /** Local crash reports (newest first): count and the first lines of the latest. */
     val crashCount: Int = 0,
     val latestCrash: String? = null,
@@ -192,6 +193,7 @@ class PosViewModel(private val c: AppContainer) : ViewModel() {
             printerWidth = c.settings.printerWidth,
             useFake = c.settings.useFakeGateway,
             kioskMode = c.settings.kioskMode,
+            printLogo = c.settings.printLogo,
         ).withCrashes()
     )
 
@@ -204,6 +206,11 @@ class PosViewModel(private val c: AppContainer) : ViewModel() {
     fun setKioskMode(v: Boolean) {
         c.settings.kioskMode = v
         _setup.update { it.copy(kioskMode = v) }
+    }
+
+    fun setPrintLogo(v: Boolean) {
+        c.settings.printLogo = v
+        _setup.update { it.copy(printLogo = v) }
     }
 
     fun clearCrashReports() {
@@ -317,6 +324,10 @@ class PosViewModel(private val c: AppContainer) : ViewModel() {
             val rules = runCatching { c.zzCash.rules() }.onFailure { PosLog.w("ZZ_RULES_LOAD_FAILED", "err" to it.message) }.getOrNull()
             val categories = runCatching { c.catalog.categories(cfg) }.onFailure { PosLog.w("MENU_LOAD_FAILED", "err" to it.message) }.getOrDefault(emptyList())
             val notes = runCatching { c.catalog.notes(cfg.noteIds) }.getOrDefault(emptyList())
+            cfg.companyId?.let { id ->
+                runCatching { c.bills.companyAddress(id) }.onFailure { PosLog.w("BILL_ADDRESS_FAILED", "err" to it.message) }
+                    .getOrNull()?.let { companyAddress = it }
+            }
             useCatalog(products, categories)
             completeCatalogAt = System.currentTimeMillis()
             _sell.update {
@@ -948,35 +959,48 @@ class PosViewModel(private val c: AppContainer) : ViewModel() {
         PosLog.i("PAY_UI_OUTCOME", "outcome" to outcome::class.simpleName)
     }
 
-    /** The e-bill link for this sale, or null if Odoo has no token for it yet. Never blocks printing. */
-    private suspend fun eBillQr(uuid: String): String? = try {
-        c.orderSync.accessTokenFor(uuid)?.let { TicketQr.ticketUrl(BuildConfig.ODOO_BASE_URL, it) }
-    } catch (e: Exception) {
-        PosLog.w("EBILL_QR_SKIPPED", "order" to uuid, "err" to e.message)
-        null
+    /** "street, street2, city zip" of the company, read with the catalogue, for the bill header. */
+    private var companyAddress: String? = null
+
+    /** The company logo, shrunk for the printer; read once, only when the Setup switch is on. */
+    private var printerLogo: String? = null
+
+    private suspend fun logoForBill(): String? {
+        if (!c.settings.printLogo) return null
+        printerLogo?.let { return it }
+        val companyId = _sell.value.config?.companyId ?: return null
+        return runCatching { c.bills.companyLogo(companyId)?.let { BillLogo.forPrinter(it) } }
+            .onFailure { PosLog.w("BILL_LOGO_FAILED", "err" to it.message) }.getOrNull()
+            ?.also { printerLogo = it }
     }
 
+    /**
+     * Print the bill Odoo sends the customer (report "ZenZebra Bill"): read the order back from Odoo
+     * right after sync and print it as Odoo has it. Only while the order waits in the outbox is the
+     * till's own copy printed. Never blocks the sale (I8).
+     */
     private suspend fun print(sale: PaidSale, label: String, attempt: PaymentAttempt?, reprint: Boolean = false): Boolean {
-        val cfg = _sell.value.config
+        val bill = runCatching { c.bills.bill(sale.orderUuid) }
+            .onFailure { PosLog.w("BILL_READ_FAILED", "order" to sale.orderUuid, "err" to it.message) }.getOrNull()
+        val eBill = bill?.accessToken?.let { runCatching { TicketQr.ticketUrl(BuildConfig.ODOO_BASE_URL, it) }.getOrNull() }
+        val ref = attempt?.billingRef ?: sale.orderUuid.take(8).uppercase()
+        val data = (bill?.let { BillReceipt.fromOdoo(it, eBill) }
+            ?: BillReceipt.fromSale(sale, _sell.value.config?.name ?: "", ref))
+            .copy(
+                companyAddress = companyAddress,
+                terminal = attempt?.let { TerminalSlip(label, it.details?.last4, it.details?.rrn ?: it.details?.transactionId, it.details?.authCode) },
+                reprint = reprint,
+                logoBase64 = logoForBill(),
+            )
+        PosLog.i("BILL_PRINT", "order" to sale.orderUuid, "from" to if (bill != null) "odoo" else "till", "lines" to data.items.size)
         val fmt = ReceiptFormatter(c.settings.printerWidth)
-        val qr = eBillQr(sale.orderUuid)
-        val data = ReceiptData(
-            storeName = cfg?.companyName?.ifBlank { null } ?: "ZenZebra",
-            storeLines = listOfNotNull(cfg?.name),
-            orderRef = attempt?.billingRef ?: sale.orderUuid.take(8).uppercase(),
-            dateTime = SimpleDateFormat("dd-MMM-yyyy HH:mm", Locale("en", "IN")).format(Date(sale.paidAtMillis)),
-            items = sale.lines.map { ReceiptItem(it.product.name, it.qty, it.product.price, it.totalIncl!!) },
-            subtotalExcl = sale.totals.totalExcl, tax = sale.totals.tax, total = sale.totals.totalIncl,
-            paymentLabel = label,
-            paymentRef = attempt?.details?.rrn ?: attempt?.details?.transactionId,
-            authCode = attempt?.details?.authCode,
-            cardLast4 = attempt?.details?.last4,
-            customerName = sale.customer?.name,
-            footer = listOf("Thank you for shopping!", "Try it. Love it. ZenZebra."),
-            reprint = reprint,
-            eBillUrl = qr,
-        )
-        return when (val r = c.gateway.print(fmt.format(data), attempt?.billingRef ?: sale.orderUuid.take(12), c.settings.printerWidth)) {
+        var r = c.gateway.print(fmt.format(data), attempt?.billingRef ?: sale.orderUuid.take(12), c.settings.printerWidth)
+        if (r is PrintResult.Failed && data.logoBase64 != null) {
+            // Pine's image printing is not proven on the E700 yet: never lose the bill over the logo.
+            PosLog.w("PRINT_LOGO_FAILED", "reason" to r.reason)
+            r = c.gateway.print(fmt.format(data.copy(logoBase64 = null)), attempt?.billingRef ?: sale.orderUuid.take(12), c.settings.printerWidth)
+        }
+        return when (r) {
             PrintResult.Printed -> true
             is PrintResult.Failed -> { PosLog.w("PRINT_FAILED", "reason" to r.reason); false }
         }

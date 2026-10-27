@@ -54,6 +54,14 @@ class DeviceSettings(context: Context) {
         get() = prefs.getBoolean("kiosk_mode", false)
         set(v) = prefs.edit().putBoolean("kiosk_mode", v).apply()
 
+    /**
+     * Print the company logo at the top of the bill, as on Odoo's PDF. Off by default: Pine's
+     * image printing is not proven on the E700 yet (a refused image prints the bill without it).
+     */
+    var printLogo: Boolean
+        get() = prefs.getBoolean("print_logo", false)
+        set(v) = prefs.edit().putBoolean("print_logo", v).apply()
+
     /** Height of a keypad key in dp as the cashier last sized it; 0 = keypad folded away. */
     var keypadKeyDp: Int
         get() = prefs.getInt("keypad_key_dp", 36)

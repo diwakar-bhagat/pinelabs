@@ -354,6 +354,18 @@ Reviewed against the web POS (config 1 "ZenZebra") and the live DB.
   number blocks the charge with a message.
 - **BQR removed from the till** (CARD · UPI · CASH). `PayMode.BHARAT_QR` stays for old journal rows and
   the Reconciler.
+- **The paper bill is Odoo's bill.** The customer's PDF on WhatsApp is the QWeb report "ZenZebra Bill"
+  (`x_zenzebra.pos_bill`, ir.ui.view 3800). After sync the till reads the order back
+  (`odoo/BillService.kt`: name, pos_reference, date, partner + phone, cashier, lines with
+  `full_product_name` / qty / `price_subtotal_incl` / discount / tax names, payments, `access_token`,
+  and the custom `x_zz_*` ZZ Cash texts, which are readable but not searchable) and prints it in the
+  template's order (`receipt/ReceiptFormatter.kt`; fixed words in `ZenZebraBill`, so they must change
+  when the template changes). The header wordmark is "ZENZEBRA" because the template prints it that way.
+  The date is local time: Odoo's PDF prints UTC (12:04 pm for a 17:34 sale), which is an Odoo user
+  time zone setting. While an order waits in the outbox the till prints its own copy, marked "Odoo bill
+  follows on WhatsApp.". The E700 card or UPI details print under "Paid via". The company logo is
+  behind a Setup switch (off), because Pine image printing is unproven; if the printer refuses it, the
+  bill prints again without the logo.
 - **Keypad is resizable**: drag the grip (snaps 0 / 36 / 48 dp per key), tap to fold; kept in
   `DeviceSettings.keypadKeyDp`. The cart scrolls to the selected line.
 
@@ -507,6 +519,7 @@ company password manager + encrypted drive.
 | 7 | Wi-Fi off after payment success | Outbox, red badge, syncs when Wi-Fi returns |
 | 8 | Void a card sale (same day) | Void accepted with `bank_code` "01" and `original_transaction_id` = sale txn id; Odoo shows a "… REFUND" order linked to the sale, stock returned, no red bar |
 | 9 | Printer out of paper | Payment still SUCCESS; "reprint" offered |
+| 9b | Cash sale with a customer; compare the paper bill with the WhatsApp PDF | Same bill no., lines, taxes, totals, payment, ZZ Cash block and bill ref; date in local time. Then switch "Print the company logo" on in Setup and sell again: logo prints, or the bill prints without it |
 | 10 | Two taps on Pay | Second tap ignored (single in-flight) |
 | 11 | Close session with an unconfirmed payment, then resolve it and close | First close blocked (I9, nothing sent to Odoo); second closes, Z-report matches Odoo's session report |
 | 12 | Kiosk on, reboot the E700, then take a card payment | Till starts by itself and is pinned; MasterApp payment screen opens normally; payment SUCCESS |
@@ -564,6 +577,8 @@ company password manager + encrypted drive.
 - [ ] Live check of `confirm_coupon_programs` from the till: one approved cash sale, then `loyalty.history` read back
 - [ ] Odoo API key in use belongs to Ankur (internal user, res.users 28) — create a POS-User-only user for the E700 and issue its own key
 - [ ] Under that POS-User key, confirm `res.partner.create` (Save customer) and `loyalty.card` reads are allowed
+- [ ] Odoo's "ZenZebra Bill" PDF prints the order time in UTC (12:04 pm for a 17:34 sale): set Asia/Kolkata as the time zone of the user the WhatsApp automation runs as
+- [ ] Pine image print type for the bill logo (Setup switch, UAT 9b)
 - [ ] 2,362 of 2,421 POS products have no POS category: they show under All / search / barcode only. Tagging them into tabs is Odoo data work
 - [ ] On device: first full catalogue load time and memory with 2,421 tiles on the E700 (UAT case 14)
 

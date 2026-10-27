@@ -149,6 +149,10 @@ fun SetupScreen(vm: PosViewModel) {
             )
         }
         Row(verticalAlignment = Alignment.CenterVertically) {
+            Switch(s.printLogo, { vm.setPrintLogo(it) }); Spacer(Modifier.width(8.dp))
+            Text("Print the company logo on bills, as on Odoo's PDF (if the printer refuses it, the bill prints without it)")
+        }
+        Row(verticalAlignment = Alignment.CenterVertically) {
             Text(if (s.crashCount == 0) "No crash reports." else "${s.crashCount} crash report(s) on this terminal.", Modifier.weight(1f))
             if (s.crashCount > 0) OutlinedButton({ vm.clearCrashReports() }) { Text("Clear") }
         }
