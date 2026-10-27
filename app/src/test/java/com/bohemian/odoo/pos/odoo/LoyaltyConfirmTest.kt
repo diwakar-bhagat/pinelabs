@@ -28,6 +28,7 @@ private class MemOutbox : OutboxDao {
     override suspend fun due(now: Long) = rows.values.filter { it.nextAttemptAt <= now }
     override fun observeCount(): Flow<Int> = MutableStateFlow(rows.size)
     override suspend fun count() = rows.size
+    override suspend fun contains(uuid: String) = uuid in rows
     override suspend fun delete(uuid: String) { rows.remove(uuid) }
     override suspend fun markFailed(uuid: String, error: String, next: Long) {
         rows[uuid] = rows[uuid]!!.let { it.copy(attempts = it.attempts + 1, lastError = error, nextAttemptAt = next) }

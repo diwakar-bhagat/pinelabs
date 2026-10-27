@@ -53,6 +53,7 @@ import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withTimeoutOrNull
 import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
@@ -341,8 +342,11 @@ class PosViewModel(private val c: AppContainer) : ViewModel() {
             val categories = runCatching { c.catalog.categories(cfg) }.onFailure { PosLog.w("MENU_LOAD_FAILED", "err" to it.message) }.getOrDefault(emptyList())
             val notes = runCatching { c.catalog.notes(cfg.noteIds) }.getOrDefault(emptyList())
             cfg.companyId?.let { id ->
-                runCatching { c.bills.companyAddress(id) }.onFailure { PosLog.w("BILL_ADDRESS_FAILED", "err" to it.message) }
-                    .getOrNull()?.let { companyAddress = it }
+                val address = runCatching { c.bills.companyAddress(id) }
+                    .onFailure { PosLog.w("BILL_ADDRESS_FAILED", "err" to it.message) }.getOrNull()
+                // Keep the last address only for the same company; another company's never prints.
+                if (address != null) companyAddress = id to address
+                else if (companyAddress?.first != id) companyAddress = null
             }
             useCatalog(products, categories)
             completeCatalogAt = System.currentTimeMillis()
@@ -362,17 +366,20 @@ class PosViewModel(private val c: AppContainer) : ViewModel() {
             // Photos of the menu tabs in the background; the rest load as their tiles appear.
             viewModelScope.launch { c.productImages.prefetch(products.filter { it.categIds.isNotEmpty() }, products) }
         } catch (e: Exception) {
-            val reason = when (e) {
-                is OdooException.Network -> "No connection to Odoo"
-                is CatalogIncomplete -> "Odoo sent ${e.got} of ${e.expected} products"
+            val reason = when {
+                e is OdooException.Network -> "No connection to Odoo"
+                e is OdooException.Server && e.status >= 500 -> "Odoo is not answering (HTTP ${e.status})"
+                e is CatalogIncomplete -> "Odoo sent ${e.got} of ${e.expected} products"
                 else -> null
             }
             if (reason == null) { _sell.update { it.copy(loading = false, error = friendly(e)) }; return@launch }
             PosLog.w("CATALOG_REFRESH_FAILED", "reason" to e::class.simpleName, "err" to e.message)
             // Phase 5: keep the last complete catalogue so the till is usable for browsing; selling
             // still needs Odoo pricing (I2), which fails with a friendly error until it is back.
-            val onScreen = _sell.value.products.isNotEmpty() && completeCatalogAt > 0
-            val cached = if (onScreen) null else c.catalogCache.load()
+            // Only the catalogue of the POS this terminal is set to: never another POS's session.
+            val posId = c.settings.posConfigId
+            val onScreen = _sell.value.products.isNotEmpty() && completeCatalogAt > 0 && _sell.value.config?.id == posId
+            val cached = if (onScreen) null else c.catalogCache.load()?.takeIf { it.config.id == posId }
             if (cached != null) useCatalog(cached.products, cached.categories)
             _sell.update {
                 when {
@@ -648,9 +655,12 @@ class PosViewModel(private val c: AppContainer) : ViewModel() {
     fun lookupCustomer() = viewModelScope.launch {
         val e164 = c.customers.normalizeIndianMobile(_sell.value.phone)
             ?: return@launch _sell.update { it.copy(customerNote = "Enter the 10-digit mobile number.") }
+        val typed = _sell.value.phone
         _sell.update { it.copy(customerBusy = true, customerNote = null, customerNoteOk = false) }
         try {
             val found = c.customers.findByPhone(e164)
+            // The cashier typed another number meanwhile: this answer is for the old one, drop it.
+            if (_sell.value.phone != typed) return@launch _sell.update { it.copy(customerBusy = false) }
             if (found != null) pickCustomer(found)
             _sell.update { it.copy(customerBusy = false, customerNotFound = found == null) }
         } catch (e: Exception) {
@@ -675,6 +685,13 @@ class PosViewModel(private val c: AppContainer) : ViewModel() {
             val existing = c.customers.findByPhone(e164)
             val saved = existing ?: c.customers.create(name, e164)
             PosLog.i("CUSTOMER_SAVED", "partner" to saved.id, "new" to (existing == null))
+            // The form is locked while saving; if the number changed anyway, do not attach this one.
+            if (c.customers.normalizeIndianMobile(_sell.value.phone) != e164) {
+                return@launch _sell.update {
+                    it.copy(customerBusy = false, customerNoteOk = false,
+                        customerNote = "Saved ${saved.name} (••••${e164.takeLast(4)}), but the number was changed, so it was not attached.")
+                }
+            }
             pickCustomer(saved)
             _sell.update {
                 it.copy(customerBusy = false, customerNoteOk = true, customerNote =
@@ -779,12 +796,17 @@ class PosViewModel(private val c: AppContainer) : ViewModel() {
 
     /** Clear the attached customer, search results, ZZ Cash balance and any reward. */
     fun clearCustomer() {
+        if (_sell.value.pay is PayUi.Working) return // the charge already holds this customer
         phoneSearchJob?.cancel()
+        val hadReward = _sell.value.zzRedemption != null
         _sell.update {
             it.copy(customer = null, customerMatches = emptyList(), phone = "", customerName = "",
                 customerNotFound = false, customerNote = null,
-                zzCash = null, zzRewards = emptyList(), zzRedemption = null, zzLookup = ZzLookup.NONE)
+                zzCash = null, zzRewards = emptyList(), zzRedemption = null, zzLookup = ZzLookup.NONE,
+                // The reward was inside the total: without it the old total must never be charged.
+                totals = if (hadReward) null else it.totals)
         }
+        if (hadReward) reprice()
     }
 
     private var phoneSearchJob: kotlinx.coroutines.Job? = null
@@ -1010,19 +1032,19 @@ class PosViewModel(private val c: AppContainer) : ViewModel() {
         PosLog.i("PAY_UI_OUTCOME", "outcome" to outcome::class.simpleName)
     }
 
-    /** "street, street2, city zip" of the company, read with the catalogue, for the bill header. */
-    private var companyAddress: String? = null
+    /** Company id → "street, street2, city zip", read with the catalogue, for the bill header. */
+    private var companyAddress: Pair<Int, String>? = null
 
-    /** The company logo, shrunk for the printer; read once, only when the Setup switch is on. */
-    private var printerLogo: String? = null
+    /** Company id → its logo shrunk for the printer; read once, only when the Setup switch is on. */
+    private var printerLogo: Pair<Int, String>? = null
 
     private suspend fun logoForBill(): String? {
         if (!c.settings.printLogo) return null
-        printerLogo?.let { return it }
         val companyId = _sell.value.config?.companyId ?: return null
+        printerLogo?.takeIf { it.first == companyId }?.let { return it.second }
         return runCatching { c.bills.companyLogo(companyId)?.let { BillLogo.forPrinter(it) } }
             .onFailure { PosLog.w("BILL_LOGO_FAILED", "err" to it.message) }.getOrNull()
-            ?.also { printerLogo = it }
+            ?.also { printerLogo = companyId to it }
     }
 
     /**
@@ -1031,14 +1053,17 @@ class PosViewModel(private val c: AppContainer) : ViewModel() {
      * till's own copy printed. Never blocks the sale (I8).
      */
     private suspend fun print(sale: PaidSale, label: String, attempt: PaymentAttempt?, reprint: Boolean = false): Boolean {
-        val bill = runCatching { c.bills.bill(sale.orderUuid) }
+        // An order still in the outbox is not in Odoo: print the till's copy at once, no Odoo wait.
+        // A synced one is read back, but a slow Odoo never holds the paid customer longer than this.
+        val inOutbox = runCatching { c.db.outbox().contains(sale.orderUuid) }.getOrDefault(false)
+        val bill = if (inOutbox) null else runCatching { withTimeoutOrNull(BILL_READ_TIMEOUT_MS) { c.bills.bill(sale.orderUuid) } }
             .onFailure { PosLog.w("BILL_READ_FAILED", "order" to sale.orderUuid, "err" to it.message) }.getOrNull()
         val eBill = bill?.accessToken?.let { runCatching { TicketQr.ticketUrl(BuildConfig.ODOO_BASE_URL, it) }.getOrNull() }
         val ref = attempt?.billingRef ?: sale.orderUuid.take(8).uppercase()
         val data = (bill?.let { BillReceipt.fromOdoo(it, eBill) }
             ?: BillReceipt.fromSale(sale, _sell.value.config?.name ?: "", ref))
             .copy(
-                companyAddress = companyAddress,
+                companyAddress = companyAddress?.takeIf { it.first == _sell.value.config?.companyId }?.second,
                 terminal = attempt?.let { TerminalSlip(label, it.details?.last4, it.details?.rrn ?: it.details?.transactionId, it.details?.authCode) },
                 reprint = reprint,
                 logoBase64 = logoForBill(),
@@ -1095,5 +1120,8 @@ class PosViewModel(private val c: AppContainer) : ViewModel() {
     companion object {
         /** Tallest keypad key (dp), as before the keypad became resizable. */
         const val MAX_KEY_DP = 48
+
+        /** Longest the paid customer waits for Odoo's bill before the till prints its own copy. */
+        private const val BILL_READ_TIMEOUT_MS = 8_000L
     }
 }

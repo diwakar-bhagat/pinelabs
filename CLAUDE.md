@@ -39,7 +39,7 @@ uses **Odoo 19 (Odoo Online, `zenzebra1.odoo.com`) as the system of record**.
 
 | Item | Value |
 |---|---|
-| App name | ZenZebra (launcher label since 0.1.1; always written "ZenZebra", never upper-cased) |
+| App name | ZenZebra (launcher label since 0.1.1; written "ZenZebra" in the app, never upper-cased) |
 | Package (applicationId) | `com.bohemian.odoo.pos` — **never change** (registered with Pine Labs) |
 | Company | Bohemian Curations Pvt Ltd (brand: ZenZebra) |
 | Device | PAX E700 ("Aries6"), PayDroid **Android 7.1.2 (API 25)**, firmware Scorpio V10.1.32 |
@@ -324,7 +324,8 @@ components, data at rest, logging policy, kiosk requirement, money-safety summar
   bar, CASH), cream #F5F2EC (working areas), blood red #E0000F (CARD/UPI, alerts), gold
   #E6A525 (warnings, non-PROD badge). Headings heavy, all caps (site: Montserrat 900; the E700 has
   no Montserrat, so system sans at Black weight). No hard-coded colours outside `Theme.kt`.
-  **The brand name is always "ZenZebra"** — header, Setup, receipt and Z-report never upper-case it.
+  **In the app the brand name is always "ZenZebra"** (header, Setup, launcher, Z-report), never upper-cased.
+  The paper bill is the exception: it follows Odoo's "ZenZebra Bill" template, whose wordmark is "ZENZEBRA".
 - **Logo:** the ZenZebra pixel-zebra on its rich-black square (official artwork, 2026-10-27) is the
   launcher icon (rounded tile, mipmap mdpi→xxxhdpi) and sits in the header and Setup title.
 - **Security:** debug builds are no longer signed with the release key, since a debuggable build

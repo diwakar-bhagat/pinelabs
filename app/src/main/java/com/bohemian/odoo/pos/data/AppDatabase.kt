@@ -160,6 +160,10 @@ interface OutboxDao {
     @Query("SELECT COUNT(*) FROM order_outbox")
     suspend fun count(): Int
 
+    /** The order is still waiting to reach Odoo. */
+    @Query("SELECT EXISTS(SELECT 1 FROM order_outbox WHERE orderUuid = :uuid)")
+    suspend fun contains(uuid: String): Boolean
+
     @Query("DELETE FROM order_outbox WHERE orderUuid = :uuid")
     suspend fun delete(uuid: String)
 

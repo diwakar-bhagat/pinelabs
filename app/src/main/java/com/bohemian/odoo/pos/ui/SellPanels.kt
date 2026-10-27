@@ -530,7 +530,8 @@ private fun CustomerDialog(s: SellState, vm: PosViewModel, onDismiss: () -> Unit
                     }
                 } else {
                     Row(verticalAlignment = Alignment.CenterVertically) {
-                        OutlinedTextField(s.phone, vm::setPhone, Modifier.weight(1f), singleLine = true,
+                        // Locked while Find / Save talk to Odoo, so the answer always matches the number shown.
+                        OutlinedTextField(s.phone, vm::setPhone, Modifier.weight(1f), singleLine = true, enabled = !s.customerBusy,
                             label = { Text("Customer mobile (for WhatsApp bill)") },
                             keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Phone, imeAction = ImeAction.Search),
                             keyboardActions = KeyboardActions(onSearch = { vm.lookupCustomer() }))
@@ -553,7 +554,7 @@ private fun CustomerDialog(s: SellState, vm: PosViewModel, onDismiss: () -> Unit
                         fontWeight = FontWeight.Bold, fontSize = 14.sp, color = if (s.customerNotFound) Zz.Red else Zz.Black)
                     Row(verticalAlignment = Alignment.CenterVertically) {
                         OutlinedTextField(s.customerName, vm::setCustomerName, Modifier.weight(1f), singleLine = true,
-                            label = { Text("Name") })
+                            enabled = !s.customerBusy, label = { Text("Name") })
                         Spacer(Modifier.width(8.dp))
                         Button({ vm.saveNewCustomer() }, Modifier.height(56.dp), shape = RoundedCornerShape(6.dp),
                             enabled = !s.customerBusy && s.customerName.isNotBlank() && s.phone.count { it.isDigit() } >= 10,
