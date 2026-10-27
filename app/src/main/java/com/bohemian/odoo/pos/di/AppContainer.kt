@@ -41,6 +41,7 @@ class AppContainer(context: Context) {
     val odoo = OdooJson2Client(BuildConfig.ODOO_BASE_URL, BuildConfig.ODOO_DB, apiKey = { settings.odooApiKey })
     val catalog = CatalogService(odoo)
     val catalogCache = com.bohemian.odoo.pos.odoo.CatalogCache(java.io.File(context.filesDir, "catalog/catalog.json"))
+    val productImages = com.bohemian.odoo.pos.ui.ProductImages(java.io.File(context.filesDir, "img")) { ids -> catalog.images(ids) }
     val fiscalPositions = com.bohemian.odoo.pos.odoo.FiscalPositionService(odoo)
     val pricing = PricingService(odoo, fiscalPositions)
     val sessions = SessionService(odoo, pendingWork = {
@@ -48,6 +49,7 @@ class AppContainer(context: Context) {
             unresolvedAttempts = journal.unresolved().size,
             unsyncedOrders = db.outbox().count(),
             openVoids = voidJournal.open().size,
+            pendingLoyalty = db.loyalty().count(),
         )
     })
     val customers = CustomerService(odoo)
@@ -55,6 +57,7 @@ class AppContainer(context: Context) {
     val orderSync = OrderSyncService(
         odoo = odoo,
         outbox = db.outbox(),
+        loyalty = db.loyalty(),
         onPayloadGenerated = { uuid, payload ->
             if (BuildConfig.DEBUG) {
                 runCatching {

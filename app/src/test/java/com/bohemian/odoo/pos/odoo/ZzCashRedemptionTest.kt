@@ -35,20 +35,35 @@ class ZzCashRedemptionTest {
 
     // ---- tax ---------------------------------------------------------------------
 
-    @Test fun `one tax rate across the cart is accepted`() {
-        assertEquals(listOf(39), ZzCashRules.singleTaxSet(listOf(listOf(39), listOf(39))))
+    private fun line(uuid: String, rupees: Long, taxIds: List<Int>) = CartLine(
+        uuid, Product(uuid.hashCode(), uuid, Paise.ofRupees(rupees), null, null, taxIds), 1,
+        totalIncl = Paise.ofRupees(rupees), totalExcl = Paise.ofRupees(rupees),
+    )
+
+    @Test fun `one tax rate gives one reward line`() {
+        val parts = ZzCashRules.split(Paise.ofRupees(50), listOf(line("a", 125, listOf(39)), line("b", 75, listOf(39))))
+        assertEquals(listOf(RewardPart(listOf(39), Paise.ofRupees(50))), parts)
     }
 
-    @Test fun `tax order does not matter`() {
-        assertEquals(listOf(36, 39), ZzCashRules.singleTaxSet(listOf(listOf(39, 36), listOf(36, 39))))
+    @Test fun `mixed rates split like the recorded web POS sale`() {
+        // ₹4,945 cart: ₹2,037 of 5% food, ₹2,908 of 18% retail. Odoo showed −164.77 and −235.23.
+        val cart = listOf(line("food", 2037, listOf(5)), line("scent", 854, listOf(18)),
+            line("tee", 1200, listOf(18)), line("scent2", 854, listOf(18)))
+        val parts = ZzCashRules.split(Paise.ofRupees(400), cart)
+        assertEquals(listOf(RewardPart(listOf(5), Paise(16477)), RewardPart(listOf(18), Paise(23523))), parts)
     }
 
-    @Test fun `mixed tax rates are refused`() {
-        assertNull(ZzCashRules.singleTaxSet(listOf(listOf(39), listOf(36))))
+    @Test fun `parts always add up to the reward and tax order does not matter`() {
+        val cart = listOf(line("a", 100, listOf(39, 36)), line("b", 100, listOf(36, 39)), line("c", 100, listOf(7)))
+        val parts = ZzCashRules.split(Paise.ofRupees(100), cart)
+        assertEquals(2, parts.size)
+        assertEquals(Paise.ofRupees(100), parts.fold(Paise.ZERO) { a, p -> a + p.amount })
+        assertEquals(listOf(36, 39), parts[0].taxIds)
     }
 
-    @Test fun `empty cart has no tax set`() {
-        assertNull(ZzCashRules.singleTaxSet(emptyList()))
+    @Test fun `unpriced or empty cart cannot be split`() {
+        assertTrue(ZzCashRules.split(Paise.ofRupees(50), emptyList()).isEmpty())
+        assertTrue(ZzCashRules.split(Paise.ofRupees(50), listOf(line("a", 100, listOf(5)).copy(totalIncl = null))).isEmpty())
     }
 
     // ---- reward code -------------------------------------------------------------

@@ -30,7 +30,8 @@ class CatalogService(private val odoo: OdooJson2Client) {
         while (true) {
             val page = odoo.call("product.product", "search_read", jsonOf(
                 "domain" to listOf(listOf("available_in_pos", "=", true), listOf("sale_ok", "=", true)),
-                "fields" to listOf("display_name", "lst_price", "barcode", "default_code", "taxes_id", "l10n_in_hsn_code"),
+                "fields" to listOf("display_name", "lst_price", "barcode", "default_code", "taxes_id", "l10n_in_hsn_code",
+                    "pos_categ_ids", "write_date"),
                 "order" to "name, id", // display_name is not stored → cannot sort on it
                 "limit" to pageSize,
                 "offset" to offset,
@@ -54,6 +55,10 @@ class CatalogService(private val odoo: OdooJson2Client) {
         defaultFiscalPositionId = m2oId("default_fiscal_position_id"),
         fiscalPositionIds = ids("fiscal_position_ids"),
         cashControl = bool("cash_control"),
+        manualDiscount = bool("manual_discount"),
+        defaultPresetId = m2oId("default_preset_id"),
+        defaultPresetName = m2oName("default_preset_id"),
+        noteIds = ids("note_ids"),
     )
 
     private fun JsonObject.toProduct() = Product(
@@ -64,7 +69,35 @@ class CatalogService(private val odoo: OdooJson2Client) {
         defaultCode = str("default_code"),
         taxIds = ids("taxes_id"),
         hsnCode = str("l10n_in_hsn_code"),
+        categIds = ids("pos_categ_ids"),
+        writeDate = str("write_date"),
     )
+
+    /** The menu tree, in Odoo's tab order. */
+    suspend fun categories(): List<PosCategory> =
+        odoo.call("pos.category", "search_read", jsonOf(
+            "domain" to emptyList<Any>(),
+            "fields" to listOf("name", "parent_id", "sequence", "color"),
+            "order" to "sequence, id",
+        )).objects().map {
+            PosCategory(it.int("id")!!, it.str("name") ?: "?", it.m2oId("parent_id"), it.int("sequence") ?: 0, it.int("color") ?: 0)
+        }
+
+    /** Note tags; an empty [ids] (pos.config.note_ids unset) means every tag, as in the web POS. */
+    suspend fun notes(ids: List<Int>): List<PosNote> =
+        odoo.call("pos.note", "search_read", jsonOf(
+            "domain" to if (ids.isEmpty()) emptyList<Any>() else listOf(listOf("id", "in", ids)),
+            "fields" to listOf("name", "color", "sequence"),
+            "order" to "sequence, id",
+        )).objects().map { PosNote(it.int("id")!!, it.str("name") ?: "?", it.int("color") ?: 0) }
+
+    /**
+     * Product photos as base64 PNG/JPEG (`image_256`, the size the web POS grid uses), through the
+     * same authenticated JSON-2 call as everything else. Products without a photo are left out.
+     */
+    suspend fun images(ids: List<Int>): Map<Int, String> =
+        odoo.call("product.product", "read", jsonOf("ids" to ids, "fields" to listOf("image_256")))
+            .objects().mapNotNull { r -> r.str("image_256")?.takeIf { it.isNotBlank() }?.let { r.int("id")!! to it } }.toMap()
 
     /** res.company GST settings — read once at setup, checked before the till may sell. */
     suspend fun companyGst(companyId: Int): CompanyGst =
@@ -87,7 +120,7 @@ class CatalogService(private val odoo: OdooJson2Client) {
         val CONFIG_FIELDS = listOf(
             "name", "current_session_id", "current_session_state", "payment_method_ids",
             "company_id", "invoice_journal_id", "default_fiscal_position_id", "fiscal_position_ids",
-            "cash_control",
+            "cash_control", "manual_discount", "default_preset_id", "note_ids",
         )
     }
 }

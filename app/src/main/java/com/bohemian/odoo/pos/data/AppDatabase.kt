@@ -41,6 +41,41 @@ data class OutboxEntity(
     val nextAttemptAt: Long,
 )
 
+/**
+ * ZZ Cash points still to book for a synced sale (`pos.order.confirm_coupon_programs`).
+ * Written together with the outbox row, deleted only after Odoo answers. Blocks session close (I9).
+ */
+@Entity(tableName = "loyalty_confirm")
+data class LoyaltyConfirmEntity(
+    @PrimaryKey val orderUuid: String,
+    val couponDataJson: String,
+    val attempts: Int,
+    val lastError: String?,
+    val createdAt: Long,
+    val nextAttemptAt: Long,
+)
+
+@Dao
+interface LoyaltyConfirmDao {
+    @Insert(onConflict = OnConflictStrategy.REPLACE)
+    suspend fun upsert(e: LoyaltyConfirmEntity)
+
+    @Query("SELECT * FROM loyalty_confirm WHERE orderUuid = :uuid")
+    suspend fun get(uuid: String): LoyaltyConfirmEntity?
+
+    @Query("SELECT * FROM loyalty_confirm WHERE nextAttemptAt <= :now ORDER BY createdAt")
+    suspend fun due(now: Long): List<LoyaltyConfirmEntity>
+
+    @Query("SELECT COUNT(*) FROM loyalty_confirm")
+    suspend fun count(): Int
+
+    @Query("DELETE FROM loyalty_confirm WHERE orderUuid = :uuid")
+    suspend fun delete(uuid: String)
+
+    @Query("UPDATE loyalty_confirm SET attempts = attempts + 1, lastError = :error, nextAttemptAt = :next WHERE orderUuid = :uuid")
+    suspend fun markFailed(uuid: String, error: String, next: Long)
+}
+
 /** A card Void on the terminal (Phase 4b). Never deleted: it is the audit trail of a reversal. */
 @Entity(tableName = "void_attempt")
 data class VoidAttemptEntity(
@@ -160,14 +195,16 @@ interface VoidAttemptDao {
 }
 
 @Database(
-    entities = [PaymentAttemptEntity::class, OutboxEntity::class, SaleSnapshotEntity::class, VoidAttemptEntity::class],
-    version = 2, exportSchema = false,
+    entities = [PaymentAttemptEntity::class, OutboxEntity::class, SaleSnapshotEntity::class, VoidAttemptEntity::class,
+        LoyaltyConfirmEntity::class],
+    version = 3, exportSchema = false,
 )
 abstract class AppDatabase : RoomDatabase() {
     abstract fun attempts(): PaymentAttemptDao
     abstract fun outbox(): OutboxDao
     abstract fun snapshots(): SaleSnapshotDao
     abstract fun voids(): VoidAttemptDao
+    abstract fun loyalty(): LoyaltyConfirmDao
 
     companion object {
         /** v2 (Phase 4b): void_attempt table. SQL matches Room's generated createAllTables. */
@@ -177,6 +214,17 @@ abstract class AppDatabase : RoomDatabase() {
             }
         }
 
+        /** v3: loyalty_confirm table (ZZ Cash booked after sync). SQL matches Room's createAllTables. */
+        val MIGRATION_2_3 = object : Migration(2, 3) {
+            override fun migrate(db: SupportSQLiteDatabase) {
+                db.execSQL(LOYALTY_CONFIRM_DDL)
+            }
+        }
+
+        internal const val LOYALTY_CONFIRM_DDL = "CREATE TABLE IF NOT EXISTS `loyalty_confirm` (" +
+            "`orderUuid` TEXT NOT NULL, `couponDataJson` TEXT NOT NULL, `attempts` INTEGER NOT NULL, " +
+            "`lastError` TEXT, `createdAt` INTEGER NOT NULL, `nextAttemptAt` INTEGER NOT NULL, PRIMARY KEY(`orderUuid`))"
+
         internal const val VOID_ATTEMPT_DDL = "CREATE TABLE IF NOT EXISTS `void_attempt` (" +
             "`billingRef` TEXT NOT NULL, `saleRef` TEXT NOT NULL, `orderUuid` TEXT NOT NULL, " +
             "`amountPaise` INTEGER NOT NULL, `state` TEXT NOT NULL, `eventId` TEXT, `detailsJson` TEXT, " +
@@ -185,7 +233,7 @@ abstract class AppDatabase : RoomDatabase() {
         fun create(context: Context): AppDatabase =
             Room.databaseBuilder(context, AppDatabase::class.java, "bohemian-pos.db")
                 // Payment data must never be silently dropped: no destructive migrations.
-                .addMigrations(MIGRATION_1_2)
+                .addMigrations(MIGRATION_1_2, MIGRATION_2_3)
                 .build()
     }
 }
