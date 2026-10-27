@@ -18,19 +18,34 @@ class ZzCashRedemptionTest {
 
     @Test fun `card with 67 rupees can pay 50 but not 100`() {
         val rewards = listOf(reward(6, 50), reward(7, 100))
-        val got = ZzCashRules.eligible(balance, rewards, cartTotal = Paise.ofRupees(125))
+        val got = ZzCashRules.eligible(balance, Paise.ZERO, rewards, cartTotal = Paise.ofRupees(125))
         assertEquals(listOf(6), got.map { it.rewardId })
     }
 
     @Test fun `reward must stay below the bill`() {
         // ₹50 off a ₹50 bill would be a zero-value sale: not offered.
-        assertTrue(ZzCashRules.eligible(balance, listOf(reward(6, 50)), cartTotal = Paise.ofRupees(50)).isEmpty())
-        assertEquals(1, ZzCashRules.eligible(balance, listOf(reward(6, 50)), cartTotal = Paise(5001)).size)
+        assertTrue(ZzCashRules.eligible(balance, Paise.ZERO, listOf(reward(6, 50)), cartTotal = Paise.ofRupees(50)).isEmpty())
+        assertEquals(1, ZzCashRules.eligible(balance, Paise.ZERO, listOf(reward(6, 50)), cartTotal = Paise(5001)).size)
     }
 
     @Test fun `partial rupees on the card do not count`() {
         val b = ZzCashBalance(19, 535, Paise(4999)) // ₹49.99 → only ₹49 redeemable
-        assertTrue(ZzCashRules.eligible(b, listOf(reward(6, 50)), Paise.ofRupees(200)).isEmpty())
+        assertTrue(ZzCashRules.eligible(b, Paise.ZERO, listOf(reward(6, 50)), Paise.ofRupees(200)).isEmpty())
+    }
+
+    /** The web POS sale of 2026-10-27: card 34.6, this bill earns 401.44, ₹400 off is offered. */
+    @Test fun `points earned on this bill count, as in Odoo`() {
+        val card = ZzCashBalance(19, 535, Paise(3460))
+        val rewards = listOf(reward(6, 50), reward(19, 400), reward(20, 450))
+        val got = ZzCashRules.eligible(card, earned = Paise(40144), rewards, cartTotal = Paise.ofRupees(4945))
+        assertEquals(listOf(6, 19), got.map { it.rewardId })
+        assertEquals(Paise.ofRupees(436), ZzCashRules.available(card, Paise(40144)))
+    }
+
+    @Test fun `a small card alone pays for nothing`() {
+        val card = ZzCashBalance(19, 535, Paise(3460))
+        assertTrue(ZzCashRules.eligible(card, Paise.ZERO, listOf(reward(6, 50)), Paise.ofRupees(500)).isEmpty())
+        assertEquals(1, ZzCashRules.eligible(card, Paise(1600), listOf(reward(6, 50)), Paise.ofRupees(500)).size)
     }
 
     // ---- tax ---------------------------------------------------------------------

@@ -26,6 +26,12 @@ data class PosConfig(
     val defaultPresetName: String? = null,
     /** pos.config.note_ids — the note tags offered; empty means all pos.note records. */
     val noteIds: List<Int> = emptyList(),
+    /**
+     * pos.config.limit_categories + iface_available_categ_ids: when on, this POS sells only the
+     * products of those categories (and their children), and shows only those tabs.
+     */
+    val limitCategories: Boolean = false,
+    val availableCategIds: List<Int> = emptyList(),
 )
 
 /** pos.category: the menu tabs (Chai & Coffee, Bites, WhatsApp Menu › WA HO …). */

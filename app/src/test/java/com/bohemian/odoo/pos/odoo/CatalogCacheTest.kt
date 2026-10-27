@@ -21,6 +21,22 @@ class CatalogCacheTest {
         Product(40, "Makino Corn Munch", Paise(14000), null, null, listOf(7)),
     )
 
+    @Test fun `a config that limits its categories survives a restart`() {
+        val cache = CatalogCache(File(tmp.root, "catalog/catalog.json"))
+        val limited = config.copy(limitCategories = true, availableCategIds = listOf(5, 6, 8, 7))
+        cache.save(limited, products, now = 1)
+        assertEquals(limited, cache.load()!!.config)
+    }
+
+    @Test fun `a refresh replaces the catalogue, so added, changed and archived products follow Odoo`() {
+        val cache = CatalogCache(File(tmp.root, "catalog/catalog.json"))
+        cache.save(config, products, now = 1)
+        val renamed = products[0].copy(name = "29 TEE orange S (new)", price = Paise(64900))
+        val added = Product(41, "A Fragrance Story Sea Breeze 50 ml", Paise(85400), "890612345", null, listOf(5))
+        cache.save(config, listOf(renamed, added), now = 2) // product 40 archived in Odoo
+        assertEquals(listOf(renamed, added), cache.load()!!.products)
+    }
+
     @Test fun `saved catalogue loads back exactly`() {
         val cache = CatalogCache(File(tmp.root, "catalog/catalog.json"))
         cache.save(config, products, now = 1234)

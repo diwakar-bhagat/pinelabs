@@ -39,7 +39,7 @@ class ReceiptFormatter(private val width: Int) {
         fun rule(c: Char = '-') = add(PrintLine(c.toString().repeat(width)))
 
         if (r.reprint) center("** REPRINT **", bold = true)
-        center(r.storeName.uppercase(), bold = true)
+        center(r.storeName, bold = true) // the brand prints as written: "ZenZebra", never upper-cased
         r.storeLines.forEach { center(it) }
         rule('=')
         left("Bill: ${r.orderRef}")

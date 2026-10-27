@@ -37,11 +37,19 @@ data class ZzCashRedemption(
 
 object ZzCashRules {
     /**
-     * Rewards this card can pay for and that stay below the cart total (a sale must never
-     * reach zero or go negative). The card needs whole-rupee points for the reward.
+     * Points this card can spend on this cart, in whole rupees. Like Odoo (pos_loyalty 19
+     * `_getRealCouponPoints`; ZZ Cash applies on the current order too), the points this cart
+     * [earned] count with the balance: 34.6 on the card + 401.44 earned can take ₹400 off.
      */
-    fun eligible(balance: ZzCashBalance, rewards: List<ZzCashReward>, cartTotal: Paise): List<ZzCashReward> =
-        rewards.filter { it.points <= balance.redeemable && it.amount < cartTotal }
+    fun available(balance: ZzCashBalance, earned: Paise): Paise =
+        (balance.points + earned).let { Paise(it.value - it.value % 100) }
+
+    /**
+     * Rewards this card can pay for on this cart ([available]) and that stay below the cart total
+     * (a sale must never reach zero or go negative).
+     */
+    fun eligible(balance: ZzCashBalance, earned: Paise, rewards: List<ZzCashReward>, cartTotal: Paise): List<ZzCashReward> =
+        rewards.filter { it.points <= available(balance, earned) && it.amount < cartTotal }
 
     /**
      * Odoo's split of a per-order discount over the cart's tax groups

@@ -27,7 +27,7 @@ class DeviceSettings(context: Context) {
         get() = prefs.getString("pos_config_name", "") ?: ""
         set(v) = prefs.edit().putString("pos_config_name", v).apply()
 
-    /** Odoo pos.payment.method used for Card/UPI/BQR taken on the E700. */
+    /** Odoo pos.payment.method used for Card/UPI taken on the E700. */
     var terminalPaymentMethodId: Int
         get() = prefs.getInt("terminal_pm_id", 0)
         set(v) = prefs.edit().putInt("terminal_pm_id", v).apply()
@@ -53,6 +53,11 @@ class DeviceSettings(context: Context) {
     var kioskMode: Boolean
         get() = prefs.getBoolean("kiosk_mode", false)
         set(v) = prefs.edit().putBoolean("kiosk_mode", v).apply()
+
+    /** Height of a keypad key in dp as the cashier last sized it; 0 = keypad folded away. */
+    var keypadKeyDp: Int
+        get() = prefs.getInt("keypad_key_dp", 36)
+        set(v) = prefs.edit().putInt("keypad_key_dp", v).apply()
 
     val isConfigured: Boolean
         get() = !odooApiKey.isNullOrBlank() && posConfigId > 0 && terminalPaymentMethodId > 0

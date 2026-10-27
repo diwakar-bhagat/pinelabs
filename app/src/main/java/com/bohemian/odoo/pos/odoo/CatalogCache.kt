@@ -22,6 +22,7 @@ class CatalogCache(private val file: File) {
         val cashControl: Boolean,
         val manualDiscount: Boolean = false, val defaultPresetId: Int? = null, val defaultPresetName: String? = null,
         val noteIds: List<Int> = emptyList(),
+        val limitCategories: Boolean = false, val availableCategIds: List<Int> = emptyList(),
     )
 
     @Serializable
@@ -57,7 +58,7 @@ class CatalogCache(private val file: File) {
             config = with(config) {
                 ConfigDto(id, name, currentSessionId, sessionOpen, paymentMethodIds, companyName, companyId,
                     invoiceJournalId, defaultFiscalPositionId, fiscalPositionIds, cashControl,
-                    manualDiscount, defaultPresetId, defaultPresetName, noteIds)
+                    manualDiscount, defaultPresetId, defaultPresetName, noteIds, limitCategories, availableCategIds)
             },
             products = products.map { ProductDto(it.id, it.name, it.price.value, it.barcode, it.defaultCode, it.taxIds, it.hsnCode, it.categIds, it.writeDate) },
             categories = categories.map { CategoryDto(it.id, it.name, it.parentId, it.sequence, it.color) },
@@ -77,7 +78,7 @@ class CatalogCache(private val file: File) {
             config = with(s.config) {
                 PosConfig(id, name, currentSessionId, sessionOpen, paymentMethodIds, companyName, companyId,
                     invoiceJournalId, defaultFiscalPositionId, fiscalPositionIds, cashControl,
-                    manualDiscount, defaultPresetId, defaultPresetName, noteIds)
+                    manualDiscount, defaultPresetId, defaultPresetName, noteIds, limitCategories, availableCategIds)
             },
             products = s.products.map { Product(it.id, it.name, Paise(it.pricePaise), it.barcode, it.defaultCode, it.taxIds, it.hsnCode, it.categIds, it.writeDate) },
             categories = s.categories.map { PosCategory(it.id, it.name, it.parentId, it.sequence, it.color) },

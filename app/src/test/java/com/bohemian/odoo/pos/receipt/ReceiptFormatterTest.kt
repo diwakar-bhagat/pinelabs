@@ -25,6 +25,12 @@ class ReceiptFormatterTest {
         }
     }
 
+    @Test fun `the brand prints as ZenZebra, not upper-cased`() {
+        val header = ReceiptFormatter(32).format(sample()).first()
+        assertEquals("ZenZebra", header.text.trim())
+        assertTrue(header.bold)
+    }
+
     @Test fun `total is right aligned and fully visible`() {
         val lines = ReceiptFormatter(32).format(sample()).map { it.text }
         val total = lines.single { it.startsWith("TOTAL") }

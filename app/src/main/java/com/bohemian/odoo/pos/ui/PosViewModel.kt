@@ -10,6 +10,8 @@ import com.bohemian.odoo.pos.receipt.TicketQr
 import com.bohemian.odoo.pos.di.AppContainer
 import com.bohemian.odoo.pos.odoo.CartLine
 import com.bohemian.odoo.pos.odoo.CartTotals
+import com.bohemian.odoo.pos.odoo.CatalogIncomplete
+import com.bohemian.odoo.pos.odoo.ProductGrid
 import com.bohemian.odoo.pos.odoo.Customer
 import com.bohemian.odoo.pos.odoo.ZzCashBalance
 import com.bohemian.odoo.pos.odoo.ZzCashReward
@@ -117,12 +119,21 @@ data class SellState(
     val pricing: Boolean = false,
     val phone: String = "",
     val customerName: String = "",
-    /** Resolved customer. Set by [PosViewModel.attachCustomer] or [PosViewModel.pickCustomer]. */
+    /** Attached customer. Set only by [PosViewModel.pickCustomer] (a match, a lookup or a saved new customer). */
     val customer: Customer? = null,
     /** Matches returned by partial phone search (last N digits). */
     val customerMatches: List<Customer> = emptyList(),
+    /** The typed mobile is valid but no customer has it: the dialog offers to save a new one. */
+    val customerNotFound: Boolean = false,
+    /** Confirmation or error in the customer dialog ("Saved: …", "Enter the customer's name"). */
+    val customerNote: String? = null,
+    /** [customerNote] confirms a save rather than reporting a problem. */
+    val customerNoteOk: Boolean = false,
+    val customerBusy: Boolean = false,
     /** ZZ Cash balance of [customer], read live from Odoo. Null while loading or if none. */
     val zzCash: ZzCashBalance? = null,
+    /** Where the balance lookup of [customer] stands, so "loading", "no card" and "failed" look different. */
+    val zzLookup: ZzLookup = ZzLookup.NONE,
     /** Rewards the card can pay for, from loyalty.reward. Empty until the balance loads. */
     val zzRewards: List<ZzCashReward> = emptyList(),
     /** The ZZ Cash reward applied to this sale, priced by Odoo once the cart is priced. */
@@ -130,8 +141,10 @@ data class SellState(
     /** Menu tabs (pos.category) and note tags (pos.note) from Odoo. */
     val categories: List<PosCategory> = emptyList(),
     val notes: List<PosNote> = emptyList(),
-    /** Selected tab; null = whole catalogue. Set to the first tab when the menu loads. */
+    /** Selected tab; null = All (the whole catalogue), which is where the till opens. */
     val selectedCateg: Int? = null,
+    /** The tiles to draw for [selectedCateg] / [query], from [PosViewModel]'s [ProductGrid]. */
+    val filtered: List<Product> = emptyList(),
     /** Selected cart line (the keypad acts on it). */
     val selectedLine: String? = null,
     /** Digits typed on the keypad for the selected line. */
@@ -146,26 +159,27 @@ data class SellState(
     val loading: Boolean = false,
     val error: String? = null,
     val pay: PayUi = PayUi.Idle,
-    /** Set when Odoo was unreachable and the catalogue comes from the device cache (Phase 5). */
+    /**
+     * Set when the last refresh failed (Odoo unreachable, or it sent fewer products than it counts) and
+     * the till shows the last complete catalogue, loaded or saved at this time (Phase 5).
+     */
     val offlineCatalogSavedAt: Long? = null,
+    /** Why the refresh failed, for the amber bar. */
+    val catalogStaleReason: String? = null,
+    /** Keypad key height in dp (0 = folded away), resized by the cashier and kept per terminal. */
+    val keypadKeyDp: Int = 36,
 ) {
     /** ZZ Cash this cart earns, as the web POS shows it ("34.6 +1.2 = 35.8"). */
     val zzEarned: Paise get() = zzRules?.let { LoyaltyPoints.earned(it, lines) } ?: Paise.ZERO
 
     val menu: MenuTree get() = MenuTree(categories)
 
-    /** The selected tab (and everything under it), or the search results across the whole catalogue. */
-    val filtered: List<Product>
-        get() = if (query.isBlank()) menu.filter(products, selectedCateg).take(MAX_TILES)
-        else query.trim().lowercase().let { q ->
-            products.filter { it.name.lowercase().contains(q) || it.barcode == q || it.defaultCode?.lowercase() == q }.take(MAX_TILES)
-        }
-
     /** Units of each product in the cart, for the badge on its tile. */
     val qtyInCart: Map<Int, Int> get() = lines.groupBy { it.product.id }.mapValues { (_, l) -> l.sumOf { it.qty } }
-
-    private companion object { const val MAX_TILES = 200 }
 }
+
+/** The ZZ Cash card lookup of the attached customer. */
+enum class ZzLookup { NONE, LOADING, NO_CARD, FAILED, LOADED }
 
 class PosViewModel(private val c: AppContainer) : ViewModel() {
 
@@ -198,7 +212,7 @@ class PosViewModel(private val c: AppContainer) : ViewModel() {
     }
     val setup: StateFlow<SetupState> = _setup.asStateFlow()
 
-    private val _sell = MutableStateFlow(SellState())
+    private val _sell = MutableStateFlow(SellState(keypadKeyDp = c.settings.keypadKeyDp))
     val sell: StateFlow<SellState> = _sell.asStateFlow()
 
     val outboxCount: StateFlow<Int> = c.db.outbox().observeCount().stateIn(viewModelScope, SharingStarted.Eagerly, 0)
@@ -270,45 +284,79 @@ class PosViewModel(private val c: AppContainer) : ViewModel() {
 
     val images get() = c.productImages
 
+    /** Built once per catalogue load; [SellState.filtered] is read from it. */
+    private var grid = ProductGrid.EMPTY
+
+    /** When the products on screen were last loaded complete from Odoo. */
+    private var completeCatalogAt = 0L
+
+    /** Recompute the tiles after the catalogue, the tab or the search changed. */
+    private fun SellState.regrid(): SellState {
+        val shown = grid.show(selectedCateg, query)
+        if (shown.size != filtered.size) {
+            PosLog.d("GRID_FILTER", "tab" to (selectedCateg ?: "all"), "query_len" to query.trim().length, "shown" to shown.size)
+        }
+        return copy(filtered = shown)
+    }
+
+    private fun useCatalog(products: List<Product>, categories: List<PosCategory>) {
+        grid = ProductGrid(products, MenuTree(categories))
+        PosLog.i("CATALOG_SHOWN", "products" to products.size, "tabs" to categories.size,
+            "unknown_categ_refs" to grid.unknownCategoryRefs())
+    }
+
     fun loadCatalog() = viewModelScope.launch {
         catalogLoadedAt = System.currentTimeMillis() // also stops refreshIfStale from loading twice
         _sell.update { it.copy(loading = true, error = null) }
         try {
             val cfg = c.catalog.config(c.settings.posConfigId)
-            val products = c.catalog.products()
+            val products = c.catalog.products(cfg)
             val fposIds = (cfg.fiscalPositionIds + listOfNotNull(cfg.defaultFiscalPositionId)).distinct()
             fiscalPositionsById = c.fiscalPositions.load(fposIds)
             c.fiscalPositions.primeTaxFiscalPositions(products.flatMap { it.taxIds })
             val rules = runCatching { c.zzCash.rules() }.onFailure { PosLog.w("ZZ_RULES_LOAD_FAILED", "err" to it.message) }.getOrNull()
-            val categories = runCatching { c.catalog.categories() }.onFailure { PosLog.w("MENU_LOAD_FAILED", "err" to it.message) }.getOrDefault(emptyList())
+            val categories = runCatching { c.catalog.categories(cfg) }.onFailure { PosLog.w("MENU_LOAD_FAILED", "err" to it.message) }.getOrDefault(emptyList())
             val notes = runCatching { c.catalog.notes(cfg.noteIds) }.getOrDefault(emptyList())
+            useCatalog(products, categories)
+            completeCatalogAt = System.currentTimeMillis()
             _sell.update {
                 it.copy(
-                    config = cfg, products = products, loading = false, offlineCatalogSavedAt = null,
+                    config = cfg, products = products, loading = false, offlineCatalogSavedAt = null, catalogStaleReason = null,
                     zzRules = rules, categories = categories, notes = notes,
-                    selectedCateg = it.selectedCateg?.takeIf { id -> categories.any { c -> c.id == id } }
-                        ?: MenuTree(categories).roots.firstOrNull()?.id,
+                    // The cashier's tab survives a reload; All when it is gone or none was chosen.
+                    selectedCateg = it.selectedCateg?.takeIf { id -> categories.any { c -> c.id == id } },
                     fiscalPosition = fiscalPositionsById[cfg.defaultFiscalPositionId],
-                )
+                ).regrid()
             }
+            // Only a complete catalogue is cached, so a later failure never falls back to a partial one.
             runCatching { c.catalogCache.save(cfg, products, categories = categories, notes = notes) }
                 .onFailure { PosLog.w("CATALOG_CACHE_SAVE_FAILED", "err" to it.message) }
             catalogLoadedAt = System.currentTimeMillis()
             // Photos of the menu tabs in the background; the rest load as their tiles appear.
             viewModelScope.launch { c.productImages.prefetch(products.filter { it.categIds.isNotEmpty() }, products) }
-        } catch (e: OdooException.Network) {
-            // Phase 5: show the last catalogue so the till is usable for browsing; selling
-            // still needs Odoo pricing (I2), which fails with a friendly error until it is back.
-            val cached = c.catalogCache.load()
-            _sell.update {
-                if (cached == null) it.copy(loading = false, error = friendly(e))
-                else it.copy(config = cached.config, products = cached.products, loading = false,
-                    categories = cached.categories, notes = cached.notes,
-                    selectedCateg = it.selectedCateg ?: MenuTree(cached.categories).roots.firstOrNull()?.id,
-                    offlineCatalogSavedAt = cached.savedAt, error = null)
-            }
         } catch (e: Exception) {
-            _sell.update { it.copy(loading = false, error = friendly(e)) }
+            val reason = when (e) {
+                is OdooException.Network -> "No connection to Odoo"
+                is CatalogIncomplete -> "Odoo sent ${e.got} of ${e.expected} products"
+                else -> null
+            }
+            if (reason == null) { _sell.update { it.copy(loading = false, error = friendly(e)) }; return@launch }
+            PosLog.w("CATALOG_REFRESH_FAILED", "reason" to e::class.simpleName, "err" to e.message)
+            // Phase 5: keep the last complete catalogue so the till is usable for browsing; selling
+            // still needs Odoo pricing (I2), which fails with a friendly error until it is back.
+            val onScreen = _sell.value.products.isNotEmpty() && completeCatalogAt > 0
+            val cached = if (onScreen) null else c.catalogCache.load()
+            if (cached != null) useCatalog(cached.products, cached.categories)
+            _sell.update {
+                when {
+                    onScreen -> it.copy(loading = false, offlineCatalogSavedAt = completeCatalogAt, catalogStaleReason = reason, error = null)
+                    cached == null -> it.copy(loading = false, error = friendly(e))
+                    else -> it.copy(config = cached.config, products = cached.products, loading = false,
+                        categories = cached.categories, notes = cached.notes,
+                        selectedCateg = it.selectedCateg?.takeIf { id -> cached.categories.any { c -> c.id == id } },
+                        offlineCatalogSavedAt = cached.savedAt, catalogStaleReason = reason, error = null).regrid()
+                }
+            }
         }
     }
 
@@ -474,13 +522,13 @@ class PosViewModel(private val c: AppContainer) : ViewModel() {
         "Odoo refund not created (${friendly(e)}). Retry from the red bar."
     }
 
-    fun setQuery(q: String) = _sell.update { it.copy(query = q) }
+    fun setQuery(q: String) = _sell.update { it.copy(query = q).regrid() }
 
     /** Keyboard-wedge scanners type the barcode then Enter. */
     fun submitQuery() {
         val s = _sell.value
         val exact = s.products.firstOrNull { it.barcode == s.query.trim() }
-        if (exact != null) { add(exact); _sell.update { it.copy(query = "") } }
+        if (exact != null) { add(exact); _sell.update { it.copy(query = "").regrid() } }
     }
 
     fun add(p: Product) {
@@ -495,8 +543,19 @@ class PosViewModel(private val c: AppContainer) : ViewModel() {
 
     // ------------------------------------------------------------------ menu, line selection, keypad, notes
 
-    /** Tap a tab: select it, or clear the filter when it is already selected (Odoo web POS). */
-    fun selectCategory(id: Int) = _sell.update { it.copy(selectedCateg = if (it.selectedCateg == id) null else id, query = "") }
+    /**
+     * Tap a tab: select it, or go back to All when it is already selected (Odoo web POS). Filters the
+     * catalogue already in memory; never fetches.
+     */
+    fun selectCategory(id: Int?) =
+        _sell.update { it.copy(selectedCateg = if (id != null && it.selectedCateg == id) null else id, query = "").regrid() }
+
+    /** Fold, shrink or grow the keypad (key height in dp, 0 = folded); kept for this terminal. */
+    fun setKeypadKeyDp(dp: Int) {
+        val v = dp.coerceIn(0, MAX_KEY_DP)
+        c.settings.keypadKeyDp = v
+        _sell.update { it.copy(keypadKeyDp = v) }
+    }
 
     fun selectLine(uuid: String) = _sell.update { it.copy(selectedLine = uuid, keypad = "") }
 
@@ -543,13 +602,59 @@ class PosViewModel(private val c: AppContainer) : ViewModel() {
 
     fun setPhone(v: String) {
         val cleaned = v.filter { ch -> ch.isDigit() || ch == '+' }.take(14)
-        _sell.update { it.copy(phone = cleaned) }
+        _sell.update { it.copy(phone = cleaned, customerNotFound = false, customerNote = null) }
         searchCustomerByPhone(cleaned)
     }
 
-    fun setCustomerName(v: String) = _sell.update { it.copy(customerName = v.take(60)) }
+    fun setCustomerName(v: String) = _sell.update { it.copy(customerName = v.take(60), customerNote = null) }
 
-    /** Pick a customer from the search results (cashier tapped a match). */
+    /**
+     * Done on the mobile field: attach the customer with exactly this number, or offer the
+     * new-customer form when nobody has it.
+     */
+    fun lookupCustomer() = viewModelScope.launch {
+        val e164 = c.customers.normalizeIndianMobile(_sell.value.phone)
+            ?: return@launch _sell.update { it.copy(customerNote = "Enter the 10-digit mobile number.") }
+        _sell.update { it.copy(customerBusy = true, customerNote = null, customerNoteOk = false) }
+        try {
+            val found = c.customers.findByPhone(e164)
+            if (found != null) pickCustomer(found)
+            _sell.update { it.copy(customerBusy = false, customerNotFound = found == null) }
+        } catch (e: Exception) {
+            PosLog.w("CUSTOMER_LOOKUP_FAILED", "phone" to Redact.phone(e164), "err" to e.message)
+            _sell.update { it.copy(customerBusy = false, customerNote = "Could not search Odoo: ${friendly(e)}") }
+        }
+    }
+
+    /**
+     * Save the typed name and mobile as a new Odoo customer (res.partner) and attach them. The
+     * number is looked up again first, so a customer is never created twice.
+     */
+    fun saveNewCustomer() = viewModelScope.launch {
+        val s = _sell.value
+        if (s.customerBusy) return@launch
+        val e164 = c.customers.normalizeIndianMobile(s.phone)
+            ?: return@launch _sell.update { it.copy(customerNote = "Enter the 10-digit mobile number.") }
+        val name = s.customerName.trim()
+        if (name.isEmpty()) return@launch _sell.update { it.copy(customerNote = "Enter the customer's name.") }
+        _sell.update { it.copy(customerBusy = true, customerNote = null, customerNoteOk = false) }
+        try {
+            val existing = c.customers.findByPhone(e164)
+            val saved = existing ?: c.customers.create(name, e164)
+            PosLog.i("CUSTOMER_SAVED", "partner" to saved.id, "new" to (existing == null))
+            pickCustomer(saved)
+            _sell.update {
+                it.copy(customerBusy = false, customerNoteOk = true, customerNote =
+                    if (existing == null) "Saved: ${saved.name} · ••••${e164.takeLast(4)}"
+                    else "Already in Odoo as ${saved.name}: attached.")
+            }
+        } catch (e: Exception) {
+            PosLog.w("CUSTOMER_SAVE_FAILED", "phone" to Redact.phone(e164), "err" to e.message)
+            _sell.update { it.copy(customerBusy = false, customerNoteOk = false, customerNote = "Customer not saved: ${friendly(e)}") }
+        }
+    }
+
+    /** Pick a customer from the search results, an exact lookup, or a just-saved new customer. */
     fun pickCustomer(customer: Customer) {
         val changed = _sell.value.customer?.id != customer.id
         _sell.update { it.copy(
@@ -557,7 +662,9 @@ class PosViewModel(private val c: AppContainer) : ViewModel() {
             customerName = customer.name,
             phone = customer.phone?.filter { it.isDigit() || it == '+' } ?: _sell.value.phone,
             customerMatches = emptyList(),
-            // A different customer has a different card: the old reward must not carry over.
+            customerNotFound = false,
+            // A different customer has a different card: the old balance and reward must not carry over.
+            zzCash = if (changed) null else it.zzCash,
             zzRedemption = if (changed) null else it.zzRedemption,
             totals = if (changed) null else it.totals,
         ) }
@@ -575,21 +682,26 @@ class PosViewModel(private val c: AppContainer) : ViewModel() {
      * just sees no balance. The result is only applied if the same customer is still attached.
      */
     private fun refreshZzCash(customer: Customer) = viewModelScope.launch {
-        val (balance, rewards) = try {
+        _sell.update { s -> if (s.customer?.id == customer.id) s.copy(zzLookup = ZzLookup.LOADING) else s }
+        val (lookup, balance, rewards) = try {
             val b = c.zzCash.balance(customer.id)
-            b to (if (b == null) emptyList() else c.zzCash.rewards())
+            if (b == null) Triple(ZzLookup.NO_CARD, null, emptyList()) else Triple(ZzLookup.LOADED, b, c.zzCash.rewards())
         } catch (e: Exception) {
             PosLog.w("ZZ_CASH_LOOKUP_FAILED", "partner" to customer.id, "err" to e.message)
-            null to emptyList()
+            Triple(ZzLookup.FAILED, null, emptyList<ZzCashReward>())
         }
         _sell.update { s ->
-            if (s.customer?.id == customer.id) s.copy(zzCash = balance, zzRewards = rewards) else s
+            if (s.customer?.id == customer.id) s.copy(zzCash = balance, zzRewards = rewards, zzLookup = lookup) else s
         }
     }
 
+    /** "Retry" on the ZZ Cash row after a failed lookup. */
+    fun retryZzCash() { _sell.value.customer?.let { refreshZzCash(it) } }
+
     /**
-     * Apply a ZZ Cash reward to this sale. It is priced by Odoo on the next reprice, and the
-     * payment total includes it. Refused when the cart has mixed tax rates or the card cannot pay.
+     * Apply a ZZ Cash reward to this sale. It is priced by Odoo on the next reprice (split over the
+     * cart's tax groups), and the payment total includes it. Refused when the card cannot pay,
+     * counting the points this cart earns as Odoo does.
      */
     fun applyZzCash(reward: ZzCashReward) {
         val s = _sell.value
@@ -601,7 +713,7 @@ class PosViewModel(private val c: AppContainer) : ViewModel() {
         if (s.lines.isEmpty() || s.lines.any { !it.isPriced }) {
             _sell.update { it.copy(error = "Wait for Odoo prices before applying ZZ Cash") }; return
         }
-        if (reward.points > balance.redeemable) {
+        if (reward.points > ZzCashRules.available(balance, s.zzEarned)) {
             _sell.update { it.copy(error = "Not enough ZZ Cash for ${reward.description}") }; return
         }
         val cartTotal = c.pricing.totals(s.lines)?.totalIncl
@@ -627,7 +739,8 @@ class PosViewModel(private val c: AppContainer) : ViewModel() {
     /** Clear the attached customer, search results, ZZ Cash balance and any reward. */
     fun clearCustomer() = _sell.update {
         it.copy(customer = null, customerMatches = emptyList(), phone = "", customerName = "",
-            zzCash = null, zzRewards = emptyList(), zzRedemption = null)
+            customerNotFound = false, customerNote = null,
+            zzCash = null, zzRewards = emptyList(), zzRedemption = null, zzLookup = ZzLookup.NONE)
     }
 
     private var phoneSearchJob: kotlinx.coroutines.Job? = null
@@ -667,7 +780,7 @@ class PosViewModel(private val c: AppContainer) : ViewModel() {
             val position = _sell.value.fiscalPosition
             val priced = c.pricing.priceAll(_sell.value.lines, position)
             val wanted = _sell.value.zzRedemption
-            val pricedRedemption = wanted?.let { priceRedemption(it, priced, position) }
+            val pricedRedemption = wanted?.takeIf { affordable(it, priced) }?.let { priceRedemption(it, priced, position) }
             val dropped = wanted != null && pricedRedemption == null
             _sell.update { s ->
                 // Ignore if the cart changed while we were pricing.
@@ -683,6 +796,13 @@ class PosViewModel(private val c: AppContainer) : ViewModel() {
         } catch (e: Exception) {
             _sell.update { it.copy(pricing = false, error = "Could not get prices from Odoo: ${friendly(e)}") }
         }
+    }
+
+    /** The card, with what [lines] earn, still pays for [r]: a smaller cart earns less. */
+    private fun affordable(r: ZzCashRedemption, lines: List<CartLine>): Boolean {
+        val s = _sell.value
+        val balance = s.zzCash?.takeIf { it.cardId == r.cardId } ?: return false
+        return r.reward.points <= ZzCashRules.available(balance, LoyaltyPoints.earned(s.zzRules.orEmpty(), lines))
     }
 
     /**
@@ -749,7 +869,19 @@ class PosViewModel(private val c: AppContainer) : ViewModel() {
         // the coordinator will answer Blocked / AlreadyPaid and nothing new is charged.
         val earlier = c.journal.forOrder(s.orderUuid).any { it.state.blocksNewCharge || it.state.isPaid }
         if (earlier) return c.finalizer.load(s.orderUuid)
-        val customer = s.customer ?: resolveCustomer()
+        val customer = s.customer ?: run {
+            if (s.phone.isBlank()) return@run null
+            // A typed number must belong to a saved customer: nobody is created silently at payment.
+            val e164 = c.customers.normalizeIndianMobile(s.phone)
+                ?: return null.also { _sell.update { it.copy(error = "The customer mobile is not valid. Fix or clear it under Customer.") } }
+            val found = try { c.customers.findByPhone(e164) } catch (e: Exception) {
+                PosLog.w("CUSTOMER_LOOKUP_FAILED", "phone" to Redact.phone(e164), "err" to e.message)
+                return null.also { _sell.update { it.copy(error = "Could not find the customer in Odoo: ${friendly(e)}") } }
+            }
+            found ?: return null.also {
+                _sell.update { it.copy(error = "Mobile ••••${e164.takeLast(4)} is not a saved customer. Save it under Customer, or clear the number.") }
+            }
+        }
         // The cart was priced under s.fiscalPosition. If resolving the customer now would
         // pick a different one, the totals we hold are wrong for this customer — re-price
         // first rather than send Odoo figures it will not reproduce.
@@ -777,13 +909,14 @@ class PosViewModel(private val c: AppContainer) : ViewModel() {
                 ?: run { _sell.update { it.copy(error = "Could not load ZZ Cash rules from Odoo. Check the connection and try again.") }; return null }
             _sell.update { it.copy(zzRules = rules) }
         }
+        val earned = if (customer != null) LoyaltyPoints.earned(rules.orEmpty(), s.lines) else Paise.ZERO
         s.zzRedemption?.let { r ->
-            // Odoo's own pre-payment check (validate_coupon_programs): the card still covers the reward.
-            val check = runCatching { c.zzCash.validateRedemption(r.cardId, r.reward.points) }
+            // Odoo's own pre-payment check (validate_coupon_programs): the card, with what this
+            // order earns, still covers the reward.
+            val check = runCatching { c.zzCash.validateRedemption(r.cardId, earned, r.reward.points) }
                 .getOrElse { err -> _sell.update { it.copy(error = friendly(err as? Exception ?: Exception(err))) }; return null }
             if (check != null) { _sell.update { it.copy(error = "ZZ Cash: $check") }; return null }
         }
-        val earned = if (customer != null) LoyaltyPoints.earned(rules.orEmpty(), s.lines) else Paise.ZERO
         val cardId = s.zzCash?.takeIf { it.partnerId == customer?.id }?.cardId
         val snap = SaleSnapshot.of(s.orderUuid, cfg, s.lines, totals, customer, s.fiscalPosition?.id, s.zzRedemption, earned, cardId)
         c.finalizer.save(snap) // HARD RULE 4/7: the cart survives a crash mid-payment
@@ -852,34 +985,11 @@ class PosViewModel(private val c: AppContainer) : ViewModel() {
     /** account.fiscal.position records this till may use, keyed by id. */
     private var fiscalPositionsById: Map<Int, FiscalPosition> = emptyMap()
 
-    /**
-     * Resolve the customer from the typed phone / GSTIN and re-price the cart under
-     * their fiscal position. Must run BEFORE payment: an inter-state B2B cart is
-     * IGST, and the price changes with it.
-     */
-    fun attachCustomer() = viewModelScope.launch {
-        val found = resolveCustomer()
-        val fposId = c.fiscalPositions.resolve(_sell.value.config ?: return@launch, found)
-        _sell.update { it.copy(customer = found, fiscalPosition = fiscalPositionsById[fposId], zzCash = null, zzRewards = emptyList(), zzRedemption = null) }
-        reprice()
-        found?.let { refreshZzCash(it) }
-    }
-
-    private suspend fun resolveCustomer(): Customer? {
-        val s = _sell.value
-        val e164 = c.customers.normalizeIndianMobile(s.phone) ?: return null
-        return try {
-            c.customers.findByPhone(e164) ?: c.customers.create(s.customerName, e164)
-        } catch (e: Exception) {
-            PosLog.w("CUSTOMER_LOOKUP_FAILED", "phone" to Redact.phone(e164), "err" to e.message)
-            null // never block a sale on customer lookup
-        }
-    }
-
     fun newSale() = _sell.update {
         it.copy(
             orderUuid = UUID.randomUUID().toString(), lines = emptyList(), totals = null,
             phone = "", customerName = "", customer = null, customerMatches = emptyList(), zzCash = null,
+            customerNotFound = false, customerNote = null, zzLookup = ZzLookup.NONE,
             zzRewards = emptyList(), zzRedemption = null, selectedLine = null, keypad = "",
             fiscalPosition = fiscalPositionsById[it.config?.defaultFiscalPositionId],
             pay = PayUi.Idle, error = null,
@@ -900,4 +1010,9 @@ class PosViewModel(private val c: AppContainer) : ViewModel() {
     }
 
     private fun PayMode.label() = when (this) { PayMode.CARD -> "CARD"; PayMode.UPI -> "UPI"; PayMode.BHARAT_QR -> "BHARAT QR" }
+
+    companion object {
+        /** Tallest keypad key (dp), as before the keypad became resizable. */
+        const val MAX_KEY_DP = 48
+    }
 }

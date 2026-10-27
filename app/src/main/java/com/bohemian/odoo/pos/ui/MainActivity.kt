@@ -92,7 +92,7 @@ fun SetupScreen(vm: PosViewModel) {
         Row(verticalAlignment = Alignment.CenterVertically) {
             ZzLogo(48.dp)
             Spacer(Modifier.width(12.dp))
-            Text("BOHEMIAN ODOO POS · SETUP (${vm.envLabel})", style = ZzHeading, fontSize = 22.sp)
+            Text("ZenZebra · Setup (${vm.envLabel})", style = ZzHeading, fontSize = 22.sp)
         }
         s.error?.let { Text(it, color = MaterialTheme.colorScheme.error) }
 
@@ -116,7 +116,7 @@ fun SetupScreen(vm: PosViewModel) {
             }
         }
         if (s.methods.isNotEmpty()) {
-            Text("3. Odoo payment method for Card / UPI / Bharat QR on this E700")
+            Text("3. Odoo payment method for Card / UPI on this E700")
             Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                 s.methods.filter { !it.isCash }.forEach { m ->
                     FilterChip(s.terminalMethodId == m.id, { vm.setTerminalMethod(m.id) }, label = { Text(m.name) })
@@ -176,8 +176,9 @@ fun SellScreen(vm: PosViewModel) {
             verticalAlignment = Alignment.CenterVertically) {
             ZzLogo(36.dp)
             Spacer(Modifier.width(10.dp))
-            Text("ZENZEBRA", color = Zz.Cream, style = ZzHeading, fontSize = 20.sp)
-            Text("  ·  ${(s.config?.name ?: "…").uppercase()}", color = Zz.Cream, style = ZzHeading, fontSize = 16.sp)
+            // The brand is always written "ZenZebra", and the POS name as it is in Odoo.
+            Text("ZenZebra", color = Zz.Cream, style = ZzHeading, fontSize = 20.sp)
+            Text("  ·  ${s.config?.name ?: "…"}", color = Zz.Cream, style = ZzHeading, fontSize = 16.sp)
             Spacer(Modifier.width(12.dp))
             // PROD is the normal state; anything else (UAT, NO PINE SDK) is flagged in gold.
             val prod = vm.envLabel == "PROD"
@@ -194,7 +195,7 @@ fun SellScreen(vm: PosViewModel) {
         s.error?.let { Text(it, color = MaterialTheme.colorScheme.error, modifier = Modifier.padding(8.dp)) }
         s.offlineCatalogSavedAt?.let { at ->
             Row(Modifier.fillMaxWidth().background(Zz.GoldSoft).padding(8.dp), verticalAlignment = Alignment.CenterVertically) {
-                Text("No connection to Odoo — showing the catalogue saved " +
+                Text("Catalogue not refreshed (${s.catalogStaleReason ?: "No connection to Odoo"}) — showing the complete one from " +
                     SimpleDateFormat("dd-MMM HH:mm", Locale("en", "IN")).format(Date(at)) +
                     ". Prices and payment need Odoo. ", Modifier.weight(1f))
                 OutlinedButton({ vm.loadCatalog() }) { Text("Retry") }
