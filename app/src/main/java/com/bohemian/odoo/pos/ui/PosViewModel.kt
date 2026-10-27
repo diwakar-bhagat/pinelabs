@@ -12,6 +12,7 @@ import com.bohemian.odoo.pos.odoo.CartLine
 import com.bohemian.odoo.pos.odoo.CartTotals
 import com.bohemian.odoo.pos.odoo.Customer
 import com.bohemian.odoo.pos.odoo.ZzCashBalance
+import com.bohemian.odoo.pos.odoo.ZzCashProgram
 import com.bohemian.odoo.pos.odoo.ZzCashReward
 import com.bohemian.odoo.pos.odoo.ZzCashRedemption
 import com.bohemian.odoo.pos.odoo.ZzCashRules
@@ -235,7 +236,16 @@ class PosViewModel(private val c: AppContainer) : ViewModel() {
     fun loadCatalog() = viewModelScope.launch {
         _sell.update { it.copy(loading = true, error = null) }
         try {
-            val cfg = c.catalog.config(c.settings.posConfigId)
+            val cfg = c.catalog.config(c.settings.posConfigId) ?: run {
+                _sell.update { it.copy(config = null, loading = false, error =
+                    "POS \"${c.settings.posConfigName}\" is archived, deleted or not open to this Odoo user. Open Setup and choose a POS.") }
+                return@launch
+            }
+            // No config in the state = no selling (prepareSnapshot), until Setup fixes it.
+            cfg.paymentMethodProblem(c.settings.terminalPaymentMethodId, c.settings.cashPaymentMethodId)?.let { problem ->
+                _sell.update { it.copy(config = null, loading = false, error = problem) }
+                return@launch
+            }
             val products = c.catalog.products()
             val fposIds = (cfg.fiscalPositionIds + listOfNotNull(cfg.defaultFiscalPositionId)).distinct()
             fiscalPositionsById = c.fiscalPositions.load(fposIds)
@@ -247,6 +257,10 @@ class PosViewModel(private val c: AppContainer) : ViewModel() {
                 )
             }
             runCatching { c.catalogCache.save(cfg, products) }.onFailure { PosLog.w("CATALOG_CACHE_SAVE_FAILED", "err" to it.message) }
+            // ZZ Cash is optional: a failed lookup hides the balance, it never blocks a sale.
+            zzProgram = try { c.zzCash.program(cfg) } catch (e: Exception) {
+                PosLog.w("ZZ_CASH_PROGRAM_LOOKUP_FAILED", "err" to e.message); null
+            }
         } catch (e: OdooException.Network) {
             // Phase 5: show the last catalogue so the till is usable for browsing; selling
             // still needs Odoo pricing (I2), which fails with a friendly error until it is back.
@@ -262,10 +276,12 @@ class PosViewModel(private val c: AppContainer) : ViewModel() {
     }
 
     fun openSession() = viewModelScope.launch {
+        if (_sell.value.loading) return@launch // a second tap must not create a second pos.session
         _sell.update { it.copy(loading = true, error = null) }
         try {
             c.sessions.open(c.settings.posConfigId)
-            _sell.update { it.copy(config = c.catalog.config(c.settings.posConfigId), loading = false) }
+            val cfg = c.catalog.config(c.settings.posConfigId)
+            _sell.update { it.copy(config = cfg ?: it.config, loading = false) }
         } catch (e: Exception) {
             _sell.update { it.copy(loading = false, error = friendly(e)) }
         }
@@ -278,6 +294,7 @@ class PosViewModel(private val c: AppContainer) : ViewModel() {
 
     /** Sync the outbox like the web POS does, then load Odoo's closing figures. */
     fun startClose() = viewModelScope.launch {
+        if (_closing.value != null) return@launch // dialog already open
         val sessionId = _sell.value.config?.currentSessionId ?: return@launch
         _closing.value = ClosingUi(busy = true)
         runCatching { c.orderSync.flushAll() }.onFailure { PosLog.w("CLOSE_FLUSH_FAILED", "err" to it.message) }
@@ -294,6 +311,9 @@ class PosViewModel(private val c: AppContainer) : ViewModel() {
 
     fun confirmClose() = viewModelScope.launch {
         val ui = _closing.value ?: return@launch
+        // One close at a time: runs on Main.immediate, so this check and busy=true below happen
+        // before the first suspension and a second tap sees busy. Closed is final.
+        if (ui.busy || ui.closed) return@launch
         val cfg = _sell.value.config ?: return@launch
         val sessionId = cfg.currentSessionId ?: return@launch
         val counted = if (cfg.cashControl) {
@@ -455,6 +475,7 @@ class PosViewModel(private val c: AppContainer) : ViewModel() {
 
     /** Pick a customer from the search results (cashier tapped a match). */
     fun pickCustomer(customer: Customer) {
+        phoneSearchJob?.cancel() // a late search result must not reopen the list
         val changed = _sell.value.customer?.id != customer.id
         _sell.update { it.copy(
             customer = customer,
@@ -468,6 +489,8 @@ class PosViewModel(private val c: AppContainer) : ViewModel() {
         // Re-resolve fiscal position for the picked customer's state.
         viewModelScope.launch {
             val fposId = c.fiscalPositions.resolve(_sell.value.config ?: return@launch, customer)
+            // Another customer may have been picked meanwhile: apply only to the one still attached.
+            if (_sell.value.customer?.id != customer.id) return@launch
             _sell.update { it.copy(fiscalPosition = fiscalPositionsById[fposId]) }
             reprice()
         }
@@ -479,9 +502,10 @@ class PosViewModel(private val c: AppContainer) : ViewModel() {
      * just sees no balance. The result is only applied if the same customer is still attached.
      */
     private fun refreshZzCash(customer: Customer) = viewModelScope.launch {
+        val program = zzProgram ?: return@launch
         val (balance, rewards) = try {
-            val b = c.zzCash.balance(customer.id)
-            b to (if (b == null) emptyList() else c.zzCash.rewards())
+            val b = c.zzCash.balance(customer.id, program.id)
+            b to (if (b == null) emptyList() else c.zzCash.rewards(program.id))
         } catch (e: Exception) {
             PosLog.w("ZZ_CASH_LOOKUP_FAILED", "partner" to customer.id, "err" to e.message)
             null to emptyList()
@@ -532,9 +556,12 @@ class PosViewModel(private val c: AppContainer) : ViewModel() {
     }
 
     /** Clear the attached customer, search results, ZZ Cash balance and any reward. */
-    fun clearCustomer() = _sell.update {
-        it.copy(customer = null, customerMatches = emptyList(), phone = "", customerName = "",
-            zzCash = null, zzRewards = emptyList(), zzRedemption = null)
+    fun clearCustomer() {
+        phoneSearchJob?.cancel()
+        _sell.update {
+            it.copy(customer = null, customerMatches = emptyList(), phone = "", customerName = "",
+                zzCash = null, zzRewards = emptyList(), zzRedemption = null)
+        }
     }
 
     private var phoneSearchJob: kotlinx.coroutines.Job? = null
@@ -545,16 +572,17 @@ class PosViewModel(private val c: AppContainer) : ViewModel() {
      */
     private fun searchCustomerByPhone(digits: String) {
         val clean = digits.filter { it.isDigit() }
+        phoneSearchJob?.cancel()
         if (clean.length < 4) {
             _sell.update { it.copy(customerMatches = emptyList()) }
             return
         }
-        phoneSearchJob?.cancel()
         phoneSearchJob = viewModelScope.launch {
             kotlinx.coroutines.delay(300) // debounce keystrokes
             try {
                 val matches = c.customers.searchByPhoneSuffix(clean)
-                _sell.update { it.copy(customerMatches = matches) }
+                // Only for the digits still typed: an older answer must not replace newer matches.
+                _sell.update { if (it.phone.filter { ch -> ch.isDigit() } == clean) it.copy(customerMatches = matches) else it }
             } catch (_: Exception) {
                 // search failure is silent — the cashier can still type the full number
             }
@@ -621,16 +649,29 @@ class PosViewModel(private val c: AppContainer) : ViewModel() {
 
     // ------------------------------------------------------------------ payment
 
-    fun payWithTerminal(mode: PayMode) = viewModelScope.launch {
-        val snap = prepareSnapshot() ?: return@launch
+    /**
+     * True from the tap until the pay flow ends. pay only becomes Working after
+     * prepareSnapshot has suspended, so without this a second tap in that gap would start a
+     * second flow for the same order (UAT case 10). Main thread only.
+     */
+    private var payStarting = false
+
+    private fun launchPay(block: suspend () -> Unit) = viewModelScope.launch {
+        if (payStarting || _sell.value.pay is PayUi.Working) return@launch
+        payStarting = true
+        try { block() } finally { payStarting = false }
+    }
+
+    fun payWithTerminal(mode: PayMode) = launchPay {
+        val snap = prepareSnapshot() ?: return@launchPay
         _sell.update { it.copy(pay = PayUi.Working(mode.label(), "Complete the payment on the terminal…")) }
         val outcome = c.payments.pay(snap.orderUuid, snap.totals().totalIncl, mode, snap.customerPhone?.takeLast(10))
         handleOutcome(outcome)
     }
 
-    fun payCash(tendered: Paise?) = viewModelScope.launch {
-        if (c.settings.cashPaymentMethodId == 0) { _sell.update { it.copy(error = "No cash method configured") }; return@launch }
-        val snap = prepareSnapshot() ?: return@launch
+    fun payCash(tendered: Paise?) = launchPay {
+        if (c.settings.cashPaymentMethodId == 0) { _sell.update { it.copy(error = "No cash method configured") }; return@launchPay }
+        val snap = prepareSnapshot() ?: return@launchPay
         val total = snap.totals().totalIncl
         val change = tendered?.takeIf { it >= total }?.minus(total)
         _sell.update { it.copy(pay = PayUi.Working("CASH", "Saving order…")) }
@@ -737,6 +778,9 @@ class PosViewModel(private val c: AppContainer) : ViewModel() {
         }
     }
 
+    /** The config's ZZ Cash loyalty.program, found at catalogue load. Null = no ZZ Cash on this till. */
+    private var zzProgram: ZzCashProgram? = null
+
     /** account.fiscal.position records this till may use, keyed by id. */
     private var fiscalPositionsById: Map<Int, FiscalPosition> = emptyMap()
 
@@ -746,8 +790,12 @@ class PosViewModel(private val c: AppContainer) : ViewModel() {
      * IGST, and the price changes with it.
      */
     fun attachCustomer() = viewModelScope.launch {
+        val typed = _sell.value.phone to _sell.value.customer?.id
         val found = resolveCustomer()
         val fposId = c.fiscalPositions.resolve(_sell.value.config ?: return@launch, found)
+        // The cashier typed another number or picked a match while we looked this one up:
+        // their newer choice wins, this result is dropped.
+        if ((_sell.value.phone to _sell.value.customer?.id) != typed) return@launch
         _sell.update { it.copy(customer = found, fiscalPosition = fiscalPositionsById[fposId], zzCash = null, zzRewards = emptyList(), zzRedemption = null) }
         reprice()
         found?.let { refreshZzCash(it) }
@@ -764,14 +812,17 @@ class PosViewModel(private val c: AppContainer) : ViewModel() {
         }
     }
 
-    fun newSale() = _sell.update {
-        it.copy(
-            orderUuid = UUID.randomUUID().toString(), lines = emptyList(), totals = null,
-            phone = "", customerName = "", customer = null, customerMatches = emptyList(), zzCash = null,
-            zzRewards = emptyList(), zzRedemption = null,
-            fiscalPosition = fiscalPositionsById[it.config?.defaultFiscalPositionId],
-            pay = PayUi.Idle, error = null,
-        )
+    fun newSale() {
+        phoneSearchJob?.cancel()
+        _sell.update {
+            it.copy(
+                orderUuid = UUID.randomUUID().toString(), lines = emptyList(), totals = null,
+                phone = "", customerName = "", customer = null, customerMatches = emptyList(), zzCash = null,
+                zzRewards = emptyList(), zzRedemption = null,
+                fiscalPosition = fiscalPositionsById[it.config?.defaultFiscalPositionId],
+                pay = PayUi.Idle, error = null,
+            )
+        }
     }
 
     fun dismissPayResult() {

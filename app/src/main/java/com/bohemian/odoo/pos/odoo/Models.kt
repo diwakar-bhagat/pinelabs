@@ -19,7 +19,21 @@ data class PosConfig(
     val fiscalPositionIds: List<Int> = emptyList(),
     /** pos.config.cash_control (computed: a cash-count method exists) — closing needs counted cash. */
     val cashControl: Boolean = false,
-)
+) {
+    /**
+     * Why the payment methods saved on this terminal no longer fit this config, or null.
+     * Odoo rejects a sync_from_ui payment on a method the config does not have, so a sale
+     * charged on the terminal would sit in the outbox forever (HARD RULE 7). Checked on
+     * every catalogue load; 0 = not set.
+     */
+    fun paymentMethodProblem(terminalMethodId: Int, cashMethodId: Int): String? = when {
+        terminalMethodId !in paymentMethodIds ->
+            "The E700 payment method is no longer on $name in Odoo. Open Setup and choose it again."
+        cashMethodId != 0 && cashMethodId !in paymentMethodIds ->
+            "The cash method is no longer on $name in Odoo. Open Setup and choose it again."
+        else -> null
+    }
+}
 
 /** res.company GST settings, needed before the till may sell. */
 data class CompanyGst(

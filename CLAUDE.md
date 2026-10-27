@@ -120,7 +120,7 @@ This lets the project build and test everywhere without distributing the proprie
 ### Codebase stats (2026-10-24, after Phase 5)
 
 - **61 Kotlin files**, **6,529 lines** total (40 in `main`, 19 tests, real + stub gateway)
-- **19 unit test files, 143 `@Test` methods** (all pass on the dev Mac) covering: `Paise`, `CrashLog`, `CatalogCache`,
+- **21 unit test files, 151 tests run** (all pass on the dev Mac, 2026-10-27) covering: `Paise`, `CrashLog`, `CatalogCache`,
   `BillingRef`, `PaymentCoordinator`, `PaymentSplit`, `ReceiptFormatter`, `TicketQr`,
   `ZReportFormatter`, `OrderPayload`, `CustomerService`, `SessionService`, `RefundService`, `GstFoundation`,
   `ZzCashService`, `ZzCashRedemption`, `ZzCashRewardCatalog`, `ZzCashPayload`
@@ -346,7 +346,9 @@ Private (`_x`) methods are not callable.
   `close_session_from_ui()` closes. Check via `pos.config.current_session_id/state`.
 - **Payment methods:** Dedicated "Pine Labs E700 (A2A)" method (type bank,
   `use_payment_terminal` empty — app drives terminal). Cash = config's `is_cash_count` method.
-- **ZZ Cash:** `loyalty.program` id 4 (30 rules, 10 rewards). Balance read from
+- **ZZ Cash:** `loyalty.program` id 4 (30 rules, 10 rewards) on the live DB, but the app never
+  hard-codes it: `ZzCashService.program(config)` finds the one `pos_ok` + `program_type=loyalty`
+  program open to the till's config (none or 2+ → ZZ Cash hidden). Balance read from
   `loyalty.card`; redemption sent as a reward line on `sync_from_ui`, and Odoo deducts the
   points when it syncs the order (Phase 3b). Earning stays server-side.
 - **Automations:** WhatsApp bill, ZZ Cash expiry, dashboard webhook fire server-side on
@@ -514,6 +516,7 @@ company password manager + encrypted drive.
 - [ ] Written confirmation from Pine Labs on WebView/PAXSTORE position
 - [x] Run unit tests on Mac (`./gradlew testUatDebugUnitTest`) — 47 pass with real SDK (2026-10-23)
 - [ ] Rotate exposed release keystore password
+- [ ] Build and `apksigner`-verify the signed PROD APK at versionCode 2 / 0.1.1 (`docs/REVIEW.md` §6)
 - [ ] PAXSTORE: lock-task whitelist for `com.bohemian.odoo.pos` **and** `com.pinelabs.masterapp` (kiosk mode, UAT case 12)
 - [ ] Setup screen (kiosk switch, API key) has no supervisor PIN — any cashier can open it
 - [ ] Odoo API key in use belongs to Ankur (internal user, res.users 28) — create a POS-User-only user for the E700 and issue its own key
@@ -539,4 +542,5 @@ in the repo root (`ODOO_URL`, `ODOO_DB`, `ODOO_USER`, `ODOO_API_KEY`). Writes ne
 | `UI_PARITY.md` | Screen-by-screen parity with Odoo 19 POS, split payment rules |
 | `INFOSEC.md` | Infosec pack for Pine: permissions, endpoints, data at rest, logging, kiosk requirement |
 | `PINE_CASE_2026-10-24.md` | Integration case for Pine: routes (AppToApp / Cloud / PadController), what works vs blocked, questions |
+| `REVIEW.md` | External review checklist (2026-10-27): findings F1–F6 with fixes, endpoint map, identity/signing, commands run, blockers |
 | `AGENT_PROMPT_E700_A2A.md` | Prompt for an on-device AI agent (adb) to run and report the App-to-App flow safely |

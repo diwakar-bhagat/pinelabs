@@ -6,8 +6,10 @@ loyalty cards exist.
 
 ## What the app does now (Phase 3a — shipped)
 
-- `odoo/ZzCashService.kt` reads the customer's card (`loyalty.card` `search_read` on
-  `partner_id` + `program_id = 4`) and returns the balance in paise.
+- `odoo/ZzCashService.kt` finds the program for the till's config (`loyalty.program`
+  `search_read`: `pos_ok`, `program_type = loyalty`, company, `pos_config_ids` empty or
+  containing the config; exactly one match, else ZZ Cash is hidden), then reads the
+  customer's card (`loyalty.card` on `partner_id` + that `program_id`) in paise.
 - `redeemable` is the balance floored to whole rupees: rewards are whole rupees.
 - The cart shows `ZZ Cash ₹X` next to the customer, only for the customer on screen.
 - A failed lookup never blocks a sale; the badge is just hidden.
