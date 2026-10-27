@@ -48,7 +48,9 @@ masked PAN, from which it keeps the last 4 digits.
 | Void journal (same fields for reversals) | Room DB | App-private |
 | Order outbox: `sync_from_ui` payloads waiting for Odoo (lines, totals, partner id, payment lines as above) | Room DB | App-private; deleted once Odoo confirms |
 | Sale snapshot (cart at payment start, incl. customer name and phone, for crash recovery) | Room DB | App-private; deleted once the sale is finalised |
-| Catalogue cache (products, prices, barcodes, POS config) | `files/catalog/catalog.json` | App-private; not sensitive |
+| Catalogue cache (products, prices, barcodes, menu tabs, note tags, POS config) | `files/catalog/catalog.json` | App-private; not sensitive |
+| Product photos (`image_256` from Odoo) | `files/img/` | App-private; not sensitive; old versions deleted on refresh |
+| ZZ Cash points to book (`confirm_coupon_programs` data: card id, partner id, points) | Room DB `loyalty_confirm` | App-private; deleted once Odoo confirms |
 | Crash reports (stack traces) | `files/crash/` | App-private; redacted before writing (§5); newest 10 kept |
 
 `android:allowBackup="false"`, `fullBackupContent="false"` and `dataExtractionRules` (Android 12+, everything excluded): nothing goes to a device or cloud backup or device transfer.
@@ -112,6 +114,7 @@ Known, accepted:
 - The customer's mobile number (when a customer is attached to the sale) is passed to the Pine
   MasterApp as `customer_mobile` on the sale. It is never logged by this app; Pine's debug
   MasterApp build was seen logging request bodies — a Pine-side setting.
+- Icons: Material Design Icons (pictogrammers.com, Apache-2.0), copied as vector drawables; no new dependency.
 - `androidx.security:security-crypto` 1.1.0-alpha06 (EncryptedSharedPreferences) is deprecated
   upstream but has no known vulnerability. Replacing it would need a key-migration step.
 - The Setup screen (Odoo API key, POS config, kiosk switch) has no supervisor PIN yet. Store

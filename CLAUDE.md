@@ -120,7 +120,7 @@ This lets the project build and test everywhere without distributing the proprie
 ### Codebase stats (2026-10-24, after Phase 5)
 
 - **61 Kotlin files**, **6,529 lines** total (40 in `main`, 19 tests, real + stub gateway)
-- **21 unit test files, 151 tests run** (all pass on the dev Mac, 2026-10-27) covering: `Paise`, `CrashLog`, `CatalogCache`,
+- **24 unit test files, 171 tests run** (all pass on the dev Mac, 2026-10-27) covering: `Paise`, `CrashLog`, `CatalogCache`,
   `BillingRef`, `PaymentCoordinator`, `PaymentSplit`, `ReceiptFormatter`, `TicketQr`,
   `ZReportFormatter`, `OrderPayload`, `CustomerService`, `SessionService`, `RefundService`, `GstFoundation`,
   `ZzCashService`, `ZzCashRedemption`, `ZzCashRewardCatalog`, `ZzCashPayload`
@@ -171,7 +171,7 @@ This lets the project build and test everywhere without distributing the proprie
 | I6 | Amount equality check — terminal amount must match requested | `payment/PaymentCoordinator.kt` |
 | I7 | Durable Outbox — paid orders in Room, idempotent via Odoo UUID dedup | `odoo/OrderSyncService.kt` |
 | I8 | Decoupled Printing — print failure never un-pays an order | `pine/PineSdkGateway.kt` |
-| I9 | Session Close Protection — can't close with unresolved attempts/outbox/open voids | `odoo/SessionService.kt` |
+| I9 | Session Close Protection — can't close with unresolved attempts/outbox/open voids/unbooked ZZ Cash | `odoo/SessionService.kt` |
 | I10 | Zero Secrets Leakage — no keys/passwords/PANs/phones in source or logs | `core/Redact.kt` |
 
 ---
@@ -301,6 +301,20 @@ components, data at rest, logging policy, kiosk requirement, money-safety summar
 
 ---
 
+### Decisions 2026-10-27 (Odoo POS parity, round 1)
+
+- **P0 fixed: ZZ Cash was never booked for E700 sales.** See §6 and `docs/ZZ_CASH.md`. New Room table
+  `loyalty_confirm` (v3); I9 now also waits for it.
+- **Menu from Odoo:** `pos.category` tabs with Odoo colours and child rows (`odoo/MenuTree.kt`),
+  product photos from `image_256` cached on disk by `write_date` (`ui/ProductImages.kt`), refreshed on
+  start, on the reload icon, and on resume after 30 min.
+- **Cart like the web POS:** order panel on the left (`ui/SellPanels.kt`), line selection, Qty keypad,
+  `pos.note` tags sent as `pos.order.line.note` JSON, the config's default preset (`preset_id`, Pickup),
+  points row `balance +earned −spent = after`, full rewards dialog. % and Price keys are disabled
+  (config `manual_discount=false`). Payment screen and customer create/edit: next round.
+- **Theme:** Material `primary` is rich black; blood red only on pay buttons and real alarms.
+  Icons are Material Design Icons vector drawables (`res/drawable/mdi_*`, Apache-2.0). No new library.
+
 ### Decisions 2026-10-27 (production prep)
 
 - **UPI ID comes from Pine only.** The merchant UPI ID for the dynamic QR is configured on Pine's
@@ -348,9 +362,11 @@ Private (`_x`) methods are not callable.
   `use_payment_terminal` empty — app drives terminal). Cash = config's `is_cash_count` method.
 - **ZZ Cash:** `loyalty.program` id 4 (30 rules, 10 rewards) on the live DB, but the app never
   hard-codes it: `ZzCashService.program(config)` finds the one `pos_ok` + `program_type=loyalty`
-  program open to the till's config (none or 2+ → ZZ Cash hidden). Balance read from
-  `loyalty.card`; redemption sent as a reward line on `sync_from_ui`, and Odoo deducts the
-  points when it syncs the order (Phase 3b). Earning stays server-side.
+  program open to the till's config (none or 2+ → ZZ Cash hidden), and the sale snapshot keeps
+  that id. Balance read from
+  `loyalty.card`; the reward goes as reward line(s) on `sync_from_ui` (split per tax group), and the
+  points (earned − spent) are booked right after with `pos.order.confirm_coupon_programs` —
+  `sync_from_ui` alone never moves them (`docs/ZZ_CASH.md`, 2026-10-27).
 - **Automations:** WhatsApp bill, ZZ Cash expiry, dashboard webhook fire server-side on
   `sync_from_ui` orders. E700 `pos.config` id must be added to their filters.
 
@@ -519,6 +535,8 @@ company password manager + encrypted drive.
 - [ ] Build and `apksigner`-verify the signed PROD APK at versionCode 2 / 0.1.1 (`docs/REVIEW.md` §6)
 - [ ] PAXSTORE: lock-task whitelist for `com.bohemian.odoo.pos` **and** `com.pinelabs.masterapp` (kiosk mode, UAT case 12)
 - [ ] Setup screen (kiosk switch, API key) has no supervisor PIN — any cashier can open it
+- [ ] A voided E700 sale keeps its earned ZZ Cash (Odoo's refund books negative points) — fix with the settled-sale refund
+- [ ] Live check of `confirm_coupon_programs` from the till: one approved cash sale, then `loyalty.history` read back
 - [ ] Odoo API key in use belongs to Ankur (internal user, res.users 28) — create a POS-User-only user for the E700 and issue its own key
 
 ---

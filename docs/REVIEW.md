@@ -109,6 +109,7 @@ Changing it would break in-place updates and the Pine registration.
 |---|---|
 | `./gradlew testUatDebugUnitTest` (before changes) | pass: 139 tests, 0 failures |
 | `./gradlew testUatDebugUnitTest` (after changes) | pass: 151 tests, 0 failures |
+| `./gradlew testUatDebugUnitTest` (after merging main #14) | pass: 171 tests, 0 failures. #14 books ZZ Cash with `confirm_coupon_programs`; the sale snapshot now carries the program id that was found (`loyaltyProgramId`), so a sale retried from the outbox is booked on the program it was sold under. Snapshots written before this have no id and book no points. |
 | `./gradlew lintProdRelease` | pass: 0 errors, 22 warnings, all of kinds already accepted (dependency versions, AGP, targetSdk, ABI, package visibility, `getIdentifier`). None in the changed code |
 | `./gradlew assembleProdRelease` | **refused as designed**: "keystore.properties is missing: a PROD release must be signed with the release key". No APK built on this branch |
 

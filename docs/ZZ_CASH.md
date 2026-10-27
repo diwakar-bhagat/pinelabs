@@ -75,7 +75,7 @@ These must not be changed by the POS work.
    deducting points. Odoo dedupes by order UUID; check that the coupon change is part of
    the same transaction.
 4. **Ambiguous outcome.** Card payments follow HARD RULE 5 (`NEEDS_REVIEW`, no retry).
-   Points are only deducted when the order syncs, so a failed sync never deducts them.
+   Points move only in `confirm_coupon_programs`, after the order is in Odoo, so a failed sync never deducts them.
 5. **UAT case.** Add a UAT case: redeem ₹50 on a card with ≥ ₹50, then sync, then check
    the card balance dropped by exactly ₹50 and `loyalty.history` has one `spent` line.
 
@@ -84,3 +84,38 @@ These must not be changed by the POS work.
 - Whether `validate_coupon_programs` is called over JSON-2 from outside the POS
   front end, and with what argument names.
 - Behaviour when a customer has two ZZ Cash cards (the service takes the first).
+
+## Booking the points: confirm_coupon_programs (2026-10-27)
+
+**Correction.** `sync_from_ui` does **not** change loyalty cards in Odoo 19. The web POS books the
+points in a second call right after the order is synced (`pos_loyalty/static/src/app/services/pos_store.js`,
+`postProcessLoyalty`):
+
+```
+pos.order.confirm_coupon_programs(ids=[order_id], coupon_data={card_id: {
+    points, points_earned, points_spent, program_id, coupon_id, barcode, partner_id, line_codes}})
+```
+
+Until 2026-10-27 the till never made this call, so a ZZ Cash reward used on the E700 was **not
+deducted** from the card and E700 sales **earned nothing**. Every web POS sale leaves a
+`loyalty.history` row ("Onsite KLJ - 003047, issued 5.94"); E700 sales left none.
+
+What the till does now:
+- **Earned points** (`odoo/LoyaltyPoints.kt`) follow `pos_order.js pointsForPrograms`: per
+  `loyalty.rule` of program 4, `reward_point_amount` × the tax-included total of the matching lines
+  (`valid_product_ids`), rounded half-up to 2 decimals per rule. The live rules give +1.2 for a ₹20 chai,
+  and 6 % + 1.5 % (≥ ₹150) + 1.5 % (≥ ₹500) on Live menu items. `LoyaltyPointsTest` reproduces the
+  recorded +65.52, +142.38, +183.34 and +401.44.
+- The coupon data is saved with the order in the outbox (Room table `loyalty_confirm`, v3). Right after
+  `sync_from_ui` succeeds, the till finds the order by uuid and calls `confirm_coupon_programs`.
+  On any failure the row stays, is retried with the outbox, and blocks session close (I9).
+  Retrying is safe: Odoo skips coupon data for an order that already has a `loyalty.history` row
+  (`_remove_duplicate_coupon_data`).
+- Before charging a sale with a reward, the till calls `validate_coupon_programs` (verified over JSON-2,
+  read-only: `{"successful": true}` for card 535 with 34.6 points; "not enough points" for −99999).
+- **Mixed tax rates** are no longer refused: the reward is split per tax group exactly like
+  `_getRewardLineValuesDiscount` (₹400 on the recorded ₹4,945 cart → −164.77 at 5 % and −235.23 at 18 %),
+  one line per group with the same `reward_identifier_code`; only the first carries `points_cost`.
+
+Open: a **voided** E700 sale keeps the points it earned (Odoo's refund books negative points). Fix with
+the settled-sale refund work.

@@ -22,7 +22,7 @@ class ZzCashPayloadTest {
         cardId = 535,
         reward = ZzCashReward(6, "₹50 off (50 ZZ Cash)", Paise.ofRupees(50), Paise.ofRupees(50), 29102),
         rewardCode = "uvjen744u",
-        totalIncl = incl, totalExcl = excl, taxIds = taxIds,
+        parts = listOf(RewardPart(taxIds, Paise.ofRupees(50), incl, excl)),
     )
 
     private fun sale(red: ZzCashRedemption? = redemption()) = PaidSale(

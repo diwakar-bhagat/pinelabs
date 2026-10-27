@@ -62,6 +62,7 @@ class MainActivity : ComponentActivity() {
     override fun onResume() {
         super.onResume()
         Kiosk.apply(this, (application as PosApp).container.settings.kioskMode)
+        vm.refreshIfStale()
     }
 
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -175,7 +176,7 @@ fun SellScreen(vm: PosViewModel) {
             verticalAlignment = Alignment.CenterVertically) {
             ZzLogo(36.dp)
             Spacer(Modifier.width(10.dp))
-            Text("ZENZEBRA", color = Zz.Red, style = ZzHeading, fontSize = 20.sp)
+            Text("ZENZEBRA", color = Zz.Cream, style = ZzHeading, fontSize = 20.sp)
             Text("  ·  ${(s.config?.name ?: "…").uppercase()}", color = Zz.Cream, style = ZzHeading, fontSize = 16.sp)
             Spacer(Modifier.width(12.dp))
             // PROD is the normal state; anything else (UAT, NO PINE SDK) is flagged in gold.
@@ -185,6 +186,7 @@ fun SellScreen(vm: PosViewModel) {
             if (outbox > 0) Badge(containerColor = Zz.Red) { Text("$outbox not synced to Odoo", color = Zz.Cream) }
             if (unresolved.isNotEmpty()) { Spacer(Modifier.width(8.dp)); Badge(containerColor = Zz.Gold) { Text("${unresolved.size} payment(s) to check", color = Zz.Black) } }
             Spacer(Modifier.width(12.dp))
+            IconButton({ vm.loadCatalog() }) { MdiIcon(R.drawable.mdi_refresh, "Reload menu and photos from Odoo", Zz.Cream) }
             TextButton({ vm.startVoid() }) { Text("VOID", color = Zz.Cream, style = ZzHeading) }
             if (s.config?.sessionOpen == true) TextButton({ vm.startClose() }) { Text("CLOSE SESSION", color = Zz.Cream, style = ZzHeading) }
             TextButton({ vm.reopenSetup() }) { Text("SETUP", color = Zz.MutedOnBlack, style = ZzHeading) }
@@ -209,127 +211,9 @@ fun SellScreen(vm: PosViewModel) {
         openVoids.firstOrNull()?.let { VoidBar(it, vm) }
 
         Row(Modifier.fillMaxSize()) {
-            // Products
-            Column(Modifier.weight(0.62f).fillMaxHeight().padding(12.dp)) {
-                OutlinedTextField(
-                    s.query, vm::setQuery, Modifier.fillMaxWidth(), singleLine = true,
-                    placeholder = { Text("Search or scan barcode") },
-                    keyboardOptions = KeyboardOptions(imeAction = ImeAction.Search),
-                    keyboardActions = KeyboardActions(onSearch = { vm.submitQuery() }),
-                )
-                if (s.loading) LinearProgressIndicator(Modifier.fillMaxWidth())
-                LazyVerticalGrid(GridCells.Adaptive(170.dp), Modifier.fillMaxSize().padding(top = 8.dp),
-                    horizontalArrangement = Arrangement.spacedBy(8.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                    items(s.filtered, key = { it.id }) { p ->
-                        Card(Modifier.fillMaxWidth().height(86.dp).clickable { vm.add(p) }) {
-                            Column(Modifier.padding(10.dp)) {
-                                Text(p.name, maxLines = 2, overflow = TextOverflow.Ellipsis, fontSize = 14.sp)
-                                Spacer(Modifier.weight(1f))
-                                Text(p.price.format(), fontWeight = FontWeight.Bold)
-                            }
-                        }
-                    }
-                }
-            }
-            // Cart
-            Column(Modifier.weight(0.38f).fillMaxHeight().background(Zz.CreamDeep).padding(12.dp)) {
-                Text("CART", style = ZzHeading, fontSize = 18.sp)
-                LazyColumn(Modifier.weight(1f)) {
-                    items(s.lines, key = { it.uuid }) { l ->
-                        Row(Modifier.fillMaxWidth().padding(vertical = 4.dp), verticalAlignment = Alignment.CenterVertically) {
-                            Text(l.product.name, Modifier.weight(1f), maxLines = 1, overflow = TextOverflow.Ellipsis)
-                            TextButton({ vm.changeQty(l.uuid, -1) }) { Text("−") }
-                            Text("${l.qty}")
-                            TextButton({ vm.changeQty(l.uuid, +1) }) { Text("+") }
-                            Text(l.totalIncl?.format() ?: "…", Modifier.width(90.dp))
-                        }
-                    }
-                }
-                HorizontalDivider()
-                val t = s.totals
-                TotalRow("Excl. tax", t?.totalExcl)
-                TotalRow("GST", t?.tax)
-                // Total on rich black: the one number the cashier and customer must read.
-                Row(Modifier.fillMaxWidth().padding(top = 6.dp).background(Zz.Black).padding(horizontal = 12.dp, vertical = 10.dp),
-                    verticalAlignment = Alignment.CenterVertically) {
-                    Text("TOTAL", Modifier.weight(1f), color = Zz.Cream, style = ZzHeading, fontSize = 20.sp)
-                    Text(t?.totalIncl?.format() ?: "—", color = Zz.Cream, style = ZzHeading, fontSize = 26.sp)
-                }
-                if (s.pricing) Text("Getting prices from Odoo…", fontSize = 12.sp)
-
-                // ---- Customer section ----
-                val cust = s.customer
-                if (cust != null) {
-                    Row(Modifier.fillMaxWidth().background(Zz.GoldSoft).padding(horizontal = 12.dp, vertical = 6.dp),
-                        verticalAlignment = Alignment.CenterVertically) {
-                        Text("✓ ${cust.name}", Modifier.weight(1f), fontSize = 14.sp,
-                            fontWeight = FontWeight.Bold, color = Zz.Black)
-                        cust.phone?.let { Text(it, fontSize = 12.sp, color = Zz.Muted) }
-                        // Only show a balance that belongs to the customer on screen.
-                        s.zzCash?.takeIf { it.partnerId == cust.id }?.let { z ->
-                            Spacer(Modifier.width(8.dp))
-                            Text("ZZ Cash ${z.redeemable.format()}", fontSize = 12.sp,
-                                fontWeight = FontWeight.Bold, color = Zz.Black)
-                        }
-                        Spacer(Modifier.width(8.dp))
-                        TextButton({ vm.clearCustomer() }) { Text("Clear", fontSize = 12.sp) }
-                    }
-                    // ZZ Cash: show the applied reward, or the rewards this card can pay for.
-                    s.zzRedemption?.let { r ->
-                        Row(Modifier.fillMaxWidth().padding(horizontal = 12.dp), verticalAlignment = Alignment.CenterVertically) {
-                            Text("ZZ Cash −${r.reward.amount.format()} applied", Modifier.weight(1f),
-                                fontSize = 13.sp, color = Zz.Black)
-                            TextButton({ vm.removeZzCash() }) { Text("Remove", fontSize = 12.sp) }
-                        }
-                    }
-                    val totalNow = s.totals?.totalIncl
-                    val balance = s.zzCash?.takeIf { it.partnerId == cust.id }
-                    if (s.zzRedemption == null && balance != null && totalNow != null) {
-                        val options = ZzCashRules.eligible(balance, s.zzRewards, totalNow)
-                        if (options.isNotEmpty()) {
-                            Row(Modifier.fillMaxWidth().padding(horizontal = 12.dp),
-                                horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                                options.take(3).forEach { r ->
-                                    OutlinedButton({ vm.applyZzCash(r) }) {
-                                        Text("Use ${r.amount.format()} ZZ Cash", fontSize = 12.sp)
-                                    }
-                                }
-                            }
-                        }
-                    }
-                } else {
-                    OutlinedTextField(s.phone, vm::setPhone, Modifier.fillMaxWidth(), singleLine = true,
-                        label = { Text("Customer mobile (for WhatsApp bill)") },
-                        keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Phone))
-                    if (s.customerMatches.isNotEmpty()) {
-                        Card(Modifier.fillMaxWidth().heightIn(max = 120.dp),
-                            colors = CardDefaults.cardColors(containerColor = Zz.Cream)) {
-                            LazyColumn {
-                                items(s.customerMatches, key = { it.id }) { match ->
-                                    Row(Modifier.fillMaxWidth().clickable { vm.pickCustomer(match) }
-                                        .padding(horizontal = 12.dp, vertical = 6.dp),
-                                        verticalAlignment = Alignment.CenterVertically) {
-                                        Column(Modifier.weight(1f)) {
-                                            Text(match.name, fontSize = 14.sp, maxLines = 1, overflow = TextOverflow.Ellipsis)
-                                            Text(match.phone ?: "", fontSize = 12.sp, color = Zz.Muted)
-                                        }
-                                    }
-                                }
-                            }
-                        }
-                    }
-                    OutlinedTextField(s.customerName, vm::setCustomerName, Modifier.fillMaxWidth(), singleLine = true,
-                        label = { Text("Name (new customers)") })
-                }
-
-                val canPay = t != null && !s.pricing && s.pay == PayUi.Idle && s.config?.sessionOpen == true
-                Row(Modifier.fillMaxWidth().padding(top = 8.dp), horizontalArrangement = Arrangement.spacedBy(6.dp)) {
-                    PayButton("CARD", canPay, Modifier.weight(1f)) { vm.payWithTerminal(PayMode.CARD) }
-                    PayButton("UPI", canPay, Modifier.weight(1f)) { vm.payWithTerminal(PayMode.UPI) }
-                    PayButton("BQR", canPay, Modifier.weight(1f)) { vm.payWithTerminal(PayMode.BHARAT_QR) }
-                    PayButton("CASH", canPay, Modifier.weight(1f), dark = true) { vm.payCash(null) }
-                }
-            }
+            OrderPanel(s, vm, Modifier.weight(0.38f).fillMaxHeight())
+            VerticalDivider(color = Zz.Line)
+            ProductPanel(s, vm, Modifier.weight(0.62f).fillMaxHeight())
         }
     }
     PaymentDialog(s.pay, vm)

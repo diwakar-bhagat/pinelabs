@@ -86,6 +86,29 @@ class ZzCashService(private val odoo: OdooJson2Client) {
         return fromRewardRows(rows)
     }
 
+    /** Earning rules of the program, for the "+N points" preview and the post-sync confirm. */
+    suspend fun rules(programId: Int): List<LoyaltyRule> =
+        odoo.call("loyalty.rule", "search_read", jsonOf(
+            "domain" to listOf(listOf("program_id", "=", programId)),
+            "fields" to LoyaltyPoints.RULE_FIELDS,
+        )).objects().mapNotNull { LoyaltyPoints.ruleFromRow(it) }
+
+    /**
+     * Odoo's pre-payment check, as the web POS calls it before validating an order
+     * (`pos.order.validate_coupon_programs(point_changes, new_codes)`, pos_loyalty 19.0):
+     * the card still exists, is active and still holds the points. Returns Odoo's message
+     * when it refuses, or null when the reward can be charged.
+     */
+    suspend fun validateRedemption(cardId: Int, points: Paise): String? {
+        val res = odoo.call("pos.order", "validate_coupon_programs", jsonOf(
+            "ids" to emptyList<Int>(),
+            "point_changes" to mapOf(cardId.toString() to Paise(-points.value).toRupees()),
+            "new_codes" to emptyList<String>(),
+        )) as? JsonObject ?: return "unexpected answer from Odoo"
+        if (res.bool("successful")) return null
+        return (res["payload"] as? JsonObject)?.str("message") ?: "Odoo refused the reward"
+    }
+
     companion object {
         internal fun fromProgramRows(rows: List<JsonObject>): ZzCashProgram? {
             val row = rows.singleOrNull() ?: return null

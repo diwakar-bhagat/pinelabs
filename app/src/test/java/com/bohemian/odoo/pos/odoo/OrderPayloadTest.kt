@@ -39,6 +39,15 @@ class OrderPayloadTest {
         assertFalse(p.containsKey("card_no")) // UPI: no card digits
     }
 
+    @Test fun `preset and line note tags are sent like the web POS`() {
+        val tagged = sale().copy(presetId = 4, lines = listOf(line.copy(note = listOf(LineNote("Wait", 1)))))
+        val order = OrderSyncService.buildPayload(tagged)["orders"]!!.jsonArray.single().jsonObject
+        assertEquals("4", order["preset_id"]!!.jsonPrimitive.content)
+        val l = order["lines"]!!.jsonArray.single().jsonArray[2].jsonObject
+        assertEquals("[{\"text\":\"Wait\",\"colorIndex\":1}]", l["note"]!!.jsonPrimitive.content)
+        assertEquals("false", OrderSyncService.buildPayload(sale())["orders"]!!.jsonArray.single().jsonObject["preset_id"]!!.jsonPrimitive.content)
+    }
+
     @Test(expected = IllegalArgumentException::class)
     fun `refuses to sync when paid differs from total`() { OrderSyncService.buildPayload(sale(paid = Paise(13900))) }
 

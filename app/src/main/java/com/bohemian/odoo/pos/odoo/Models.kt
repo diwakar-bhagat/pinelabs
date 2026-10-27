@@ -19,6 +19,13 @@ data class PosConfig(
     val fiscalPositionIds: List<Int> = emptyList(),
     /** pos.config.cash_control (computed: a cash-count method exists) — closing needs counted cash. */
     val cashControl: Boolean = false,
+    /** pos.config.manual_discount — the cashier may type a line discount (% key). */
+    val manualDiscount: Boolean = false,
+    /** pos.config.default_preset_id (Odoo 19 presets: Pickup, Dine In…), sent on every order. */
+    val defaultPresetId: Int? = null,
+    val defaultPresetName: String? = null,
+    /** pos.config.note_ids — the note tags offered; empty means all pos.note records. */
+    val noteIds: List<Int> = emptyList(),
 ) {
     /**
      * Why the payment methods saved on this terminal no longer fit this config, or null.
@@ -34,6 +41,19 @@ data class PosConfig(
         else -> null
     }
 }
+
+/** pos.category: the menu tabs (Chai & Coffee, Bites, WhatsApp Menu › WA HO …). */
+data class PosCategory(
+    val id: Int,
+    val name: String,
+    val parentId: Int?,
+    val sequence: Int,
+    /** Odoo colour index 0–11 (0 = none), the same palette as the web POS tabs. */
+    val color: Int,
+)
+
+/** pos.note: a predefined line note tag (Wait, To Serve, Emergency, No Dressing). */
+data class PosNote(val id: Int, val name: String, val color: Int)
 
 /** res.company GST settings, needed before the till may sell. */
 data class CompanyGst(
@@ -73,6 +93,10 @@ data class Product(
     val taxIds: List<Int>,
     /** product.template.l10n_in_hsn_code — required on every sold line when GST-registered. */
     val hsnCode: String? = null,
+    /** pos_categ_ids: the menu tabs this product appears under. */
+    val categIds: List<Int> = emptyList(),
+    /** write_date, used to version the cached photo. */
+    val writeDate: String? = null,
 )
 
 data class Customer(
@@ -90,6 +114,14 @@ data class Customer(
     val fiscalPositionId: Int? = null,
 )
 
+/** One tag of a line note, as Odoo stores it in pos.order.line.note: `[{"text":…,"colorIndex":…}]`. */
+data class LineNote(val text: String, val colorIndex: Int = 0)
+
+object LineNotes {
+    /** Odoo's JSON for pos.order.line.note ("[]" when empty). */
+    fun toOdoo(notes: List<LineNote>): String = toJson(notes.map { mapOf("text" to it.text, "colorIndex" to it.colorIndex) }).toString()
+}
+
 data class CartLine(
     val uuid: String,
     val product: Product,
@@ -104,6 +136,8 @@ data class CartLine(
      * `tax_ids_after_fiscal_position` from the order's fiscal position itself.
      */
     val appliedTaxIds: List<Int> = emptyList(),
+    /** Kitchen/line note tags (Wait, To Serve…) and free text. Not part of the price. */
+    val note: List<LineNote> = emptyList(),
 ) {
     val isPriced: Boolean get() = totalIncl != null && totalExcl != null
 }
