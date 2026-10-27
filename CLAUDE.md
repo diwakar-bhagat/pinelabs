@@ -39,7 +39,7 @@ uses **Odoo 19 (Odoo Online, `zenzebra1.odoo.com`) as the system of record**.
 
 | Item | Value |
 |---|---|
-| App name | Bohemian Odoo POS |
+| App name | ZenZebra (launcher label since 0.1.1; always written "ZenZebra", never upper-cased) |
 | Package (applicationId) | `com.bohemian.odoo.pos` — **never change** (registered with Pine Labs) |
 | Company | Bohemian Curations Pvt Ltd (brand: ZenZebra) |
 | Device | PAX E700 ("Aries6"), PayDroid **Android 7.1.2 (API 25)**, firmware Scorpio V10.1.32 |
@@ -63,7 +63,7 @@ uses **Odoo 19 (Odoo Online, `zenzebra1.odoo.com`) as the system of record**.
 
 Replace the existing Odoo web POS at ZenZebra's physical store with this native till app
 running on Pine Labs E700 terminals. The app handles the full sale lifecycle — catalogue
-browse/search, cart, payment via card/UPI/BQR/Cash, receipt print, customer lookup, and
+browse/search, cart, payment via card/UPI/Cash, receipt print, customer lookup, and
 ZZ Cash loyalty — while Odoo remains the single system of record. WhatsApp bill delivery
 and loyalty automations fire server-side when `pos.order` is synced.
 
@@ -321,9 +321,10 @@ components, data at rest, logging policy, kiosk requirement, money-safety summar
   side for the terminal; `SaleRequest` never carried a VPA, so the till's UPI ID fields were cosmetic.
   Removed the Setup fields, the cart toggle, `UpiPayee`/`UpiUri` and the `upi.properties` pre-fill.
 - **Brand UI:** `ui/Theme.kt`, palette read from zenzebra.in. Rich black #0A0A0A (top bar, total
-  bar, CASH), cream #F5F2EC (working areas), blood red #E0000F (CARD/UPI/BQR, alerts), gold
+  bar, CASH), cream #F5F2EC (working areas), blood red #E0000F (CARD/UPI, alerts), gold
   #E6A525 (warnings, non-PROD badge). Headings heavy, all caps (site: Montserrat 900; the E700 has
   no Montserrat, so system sans at Black weight). No hard-coded colours outside `Theme.kt`.
+  **The brand name is always "ZenZebra"** — header, Setup, receipt and Z-report never upper-case it.
 - **Logo:** the ZenZebra pixel-zebra on its rich-black square (official artwork, 2026-10-27) is the
   launcher icon (rounded tile, mipmap mdpi→xxxhdpi) and sits in the header and Setup title.
 - **Security:** debug builds are no longer signed with the release key, since a debuggable build
@@ -331,6 +332,30 @@ components, data at rest, logging policy, kiosk requirement, money-safety summar
   (`res/xml/data_extraction_rules.xml`). Android lint (`lintProdRelease`): 0 errors; remaining
   warnings are accepted (targetSdk 34, fixed landscape, no x86_64, package
   visibility in `PineCheck` on Android 11+, which doesn't affect the E700's Android 7.1).
+
+### Decisions 2026-10-27 (production review, 0.1.1)
+
+Reviewed against the web POS (config 1 "ZenZebra") and the live DB.
+- **Every SKU on the till.** Odoo has 2,421 POS products; only 59 have a `pos_categ_ids`. The till
+  opened on one café tab, hid untagged products and capped every view at 200 tiles. Now:
+  `CatalogService.products(cfg)` uses the Odoo 19 POS domain (available in POS, sellable, company or
+  none, `child_of` the config's categories only when `limit_categories`), checks the result against
+  `search_count`, pages by `id`, merges by id, re-runs once if short and otherwise throws
+  `CatalogIncomplete`, so a partial catalogue is never shown or cached. The grid (`odoo/ProductGrid.kt`)
+  opens on **All**, filters the full list per tab and searches name / barcode / internal ref across
+  everything, with no caps. Logs: `CATALOG_START/PAGE/DONE/INCOMPLETE`, `CATALOG_SHOWN`, `GRID_FILTER`.
+- **ZZ Cash counts the points this cart earns** (`ZzCashRules.available`), as Odoo's
+  `_getRealCouponPoints` does for an `applies_on='both'` program, and `validate_coupon_programs` gets the
+  **net** change (earned − spent). The old `−cost` was refused by Odoo for any card under the reward
+  (live: card 535, 34.7 points, ₹100 → "not enough points"; net → accepted). "Use reward" sits on the
+  points row; loading / no card / failed + Retry are shown.
+- **Customers are saved explicitly**: Find (exact phone) or Save (name + mobile → `res.partner.create`,
+  looked up first so nobody is created twice). Payment never creates a customer; an unsaved typed
+  number blocks the charge with a message.
+- **BQR removed from the till** (CARD · UPI · CASH). `PayMode.BHARAT_QR` stays for old journal rows and
+  the Reconciler.
+- **Keypad is resizable**: drag the grip (snaps 0 / 36 / 48 dp per key), tap to fold; kept in
+  `DeviceSettings.keypadKeyDp`. The cart scrolls to the selected line.
 
 ---
 
@@ -478,7 +503,7 @@ company password manager + encrypted drive.
 | 3 | UPI sale, pay in time | SUCCESS |
 | 4 | UPI sale, let QR expire | GetStatus → DECLINED/expired, order open |
 | 5 | UPI sale, pay, kill app before result | Reconciler → GetStatus → SUCCESS, order synced |
-| 6 | Bharat QR sale | SUCCESS |
+| 6 | ~~Bharat QR sale~~ | Removed from the till 2026-10-27 (CARD · UPI · CASH only) |
 | 7 | Wi-Fi off after payment success | Outbox, red badge, syncs when Wi-Fi returns |
 | 8 | Void a card sale (same day) | Void accepted with `bank_code` "01" and `original_transaction_id` = sale txn id; Odoo shows a "… REFUND" order linked to the sale, stock returned, no red bar |
 | 9 | Printer out of paper | Payment still SUCCESS; "reprint" offered |
@@ -486,6 +511,10 @@ company password manager + encrypted drive.
 | 11 | Close session with an unconfirmed payment, then resolve it and close | First close blocked (I9, nothing sent to Odoo); second closes, Z-report matches Odoo's session report |
 | 12 | Kiosk on, reboot the E700, then take a card payment | Till starts by itself and is pinned; MasterApp payment screen opens normally; payment SUCCESS |
 | 13 | Wi-Fi off, restart the app | Cached catalogue shown with the yellow offline bar; pricing/payment refused with a friendly error; Retry recovers when Wi-Fi is back |
+| 14 | Open the till; scan or search a retail SKU (e.g. "Sea Breeze") | "All · 2421" tab selected; the SKU is found and added; café tabs filter the same list |
+| 15 | Customer with < ₹50 ZZ Cash buys enough to earn ≥ 50 | "Use reward" offered; ₹50 off applied; paid; Odoo shows the reward lines and the card ends at balance + earned − 50 |
+| 16 | New customer: type a new mobile, Find, enter a name, Save | "Saved: Name · ••••1234"; customer attached; partner exists once in Odoo; WhatsApp bill on payment |
+| 17 | Long cart: drag the keypad grip down, then tap it | Keypad shrinks, then folds; every cart line reachable; size kept after restart |
 
 ---
 
@@ -534,6 +563,9 @@ company password manager + encrypted drive.
 - [ ] A voided E700 sale keeps its earned ZZ Cash (Odoo's refund books negative points) — fix with the settled-sale refund
 - [ ] Live check of `confirm_coupon_programs` from the till: one approved cash sale, then `loyalty.history` read back
 - [ ] Odoo API key in use belongs to Ankur (internal user, res.users 28) — create a POS-User-only user for the E700 and issue its own key
+- [ ] Under that POS-User key, confirm `res.partner.create` (Save customer) and `loyalty.card` reads are allowed
+- [ ] 2,362 of 2,421 POS products have no POS category: they show under All / search / barcode only. Tagging them into tabs is Odoo data work
+- [ ] On device: first full catalogue load time and memory with 2,421 tiles on the E700 (UAT case 14)
 
 ---
 

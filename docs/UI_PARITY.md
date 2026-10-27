@@ -40,8 +40,9 @@ Opens from ⋮ → Reward. Lists each reward the customer can use, as
 `ZZ Cash — Add "₹50 off (50 ZZ Cash)"`, with a chevron. Matches `pos_loyalty`
 `loyalty.reward` rows (the 10 ₹50–₹500 "per order" rewards for program 4).
 
-Status: the app applies the reward from the cart. The popup list is in the cart's "Use ₹N ZZ Cash"
-buttons (max 3). **Next:** show the full list in a dialog with the same wording.
+Status (0.1.1): built. "Use reward" on the ZZ Cash points row (and ⋮ → Reward) opens the full list.
+As in the web POS, the points this cart earns count with the card balance (34.6 + 401.44 earned →
+₹400 off allowed).
 
 ## 3. Payment screen (`payment_screen/`)
 
