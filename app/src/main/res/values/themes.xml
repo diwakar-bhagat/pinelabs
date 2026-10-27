@@ -1,6 +1,8 @@
 <resources>
     <style name="Theme.BohemianPos" parent="android:Theme.Material.Light.NoActionBar">
         <item name="android:windowFullscreen">true</item>
-        <item name="android:statusBarColor">@android:color/black</item>
+        <item name="android:statusBarColor">#FF0A0A0A</item>
+        <item name="android:navigationBarColor">#FF0A0A0A</item>
+        <item name="android:windowBackground">@color/zz_cream</item>
     </style>
 </resources>

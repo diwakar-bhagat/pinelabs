@@ -47,7 +47,7 @@ uses **Odoo 19 (Odoo Online, `zenzebra1.odoo.com`) as the system of record**.
 | Printer | Pine SDK `print`, line width **24 / 32 / 48 chars** (configurable) |
 | Pine SDK | `com.pinelabs.billing:pine-billing-sdk-android` **2.0.0** (latest stable, 2026-10-24; 1.0.0 kept in `app/libs` for rollback) |
 | Pine App ID (UAT) | `771aabd360b64cd59d11806bd88d87b4` |
-| Pine App ID (PROD) | _not issued yet_ — Pine registers UAT and PROD separately |
+| Pine App ID (PROD) | `d0b34dd115e8487cb1e20b6706d90186` (issued by Pine 2026-10-27) |
 | Odoo | 19.0 Enterprise, Odoo Online (no custom Python modules possible; Odoo.sh is ruled out) |
 | Odoo API | **JSON-2** (`POST /json/2/<model>/<method>`, `Authorization: bearer <api key>`) |
 
@@ -91,10 +91,10 @@ ui (Compose)  ──►  viewmodels  ──►  domain services  ──►  adap
 | `odoo` | JSON-2 client, DTOs, catalog/pricing/order/session/customer/refund services, `CatalogCache`, `SaleFinalizer`, ZZ Cash balance + redemption | core |
 | `gst` | `GstTreatment`, `InvoiceDecision` — fiscal positions & GSTIN | core, odoo |
 | `pine` | `PaymentGateway` interface + `PineSdkGateway` + `FakePaymentGateway` | core |
-| `payment` | `PaymentCoordinator`, `Reconciler`, `PaymentAttempt` states, `PaymentSplit` rules, `UpiPayee` | core, pine, data |
+| `payment` | `PaymentCoordinator`, `Reconciler`, `PaymentAttempt` states, `PaymentSplit` rules | core, pine, data |
 | `receipt` | `ReceiptFormatter` (pure), `TicketQr` (Odoo e-bill QR) | core |
 | `data` | Room DB (payment journal, order outbox), `DeviceSettings` | core |
-| `ui` | Compose screens (`MainActivity`) + `PosViewModel` | everything above |
+| `ui` | Compose screens (`MainActivity`), `PosViewModel`, `Theme.kt` (ZenZebra brand palette) | everything above |
 | `di` | `AppContainer` (manual DI; no Hilt — fewer moving parts on API 25) | everything |
 
 **Only `pine/PineSdkGateway.kt` may import Pine SDK types** (`com.pinelabs.billing.sdk.*`,
@@ -121,7 +121,7 @@ This lets the project build and test everywhere without distributing the proprie
 
 - **61 Kotlin files**, **6,529 lines** total (40 in `main`, 19 tests, real + stub gateway)
 - **19 unit test files, 143 `@Test` methods** (all pass on the dev Mac) covering: `Paise`, `CrashLog`, `CatalogCache`,
-  `BillingRef`, `PaymentCoordinator`, `PaymentSplit`, `UpiPayee`, `ReceiptFormatter`, `TicketQr`,
+  `BillingRef`, `PaymentCoordinator`, `PaymentSplit`, `ReceiptFormatter`, `TicketQr`,
   `ZReportFormatter`, `OrderPayload`, `CustomerService`, `SessionService`, `RefundService`, `GstFoundation`,
   `ZzCashService`, `ZzCashRedemption`, `ZzCashRewardCatalog`, `ZzCashPayload`
 
@@ -194,7 +194,7 @@ on the E700 yet, so the real gate is **UAT on device** (§10): build the signed 
 send it to Pine with `docs/INFOSEC.md`, push via PAXSTORE, run the UAT script.
 
 **Built beyond the original plan:** split payment and Odoo 19 POS UI parity
-(`docs/UI_PARITY.md`), UPI payee (primary + fallback) with UPI IDs on Setup, Odoo e-bill QR
+(`docs/UI_PARITY.md`), Odoo e-bill QR
 on the printed receipt.
 
 ### What's been built (commits, newest first, merges omitted)
@@ -298,6 +298,23 @@ before writing (10+ digit runs → last 4, bearer / api_key values removed), new
 shown on Setup with Clear. Payment recovery after a crash stays with the Reconciler.
 **Infosec pack:** `docs/INFOSEC.md` — permissions, the single network endpoint, exported
 components, data at rest, logging policy, kiosk requirement, money-safety summary.
+
+---
+
+### Decisions 2026-10-27 (production prep)
+
+- **UPI ID comes from Pine only.** The merchant UPI ID for the dynamic QR is configured on Pine's
+  side for the terminal; `SaleRequest` never carried a VPA, so the till's UPI ID fields were cosmetic.
+  Removed the Setup fields, the cart toggle, `UpiPayee`/`UpiUri` and the `upi.properties` pre-fill.
+- **Brand UI:** `ui/Theme.kt`, palette read from zenzebra.in. Rich black #0A0A0A (top bar, total
+  bar, CASH), cream #F5F2EC (working areas), blood red #E0000F (CARD/UPI/BQR, alerts), gold
+  #E6A525 (warnings, non-PROD badge). Headings heavy, all caps (site: Montserrat 900; the E700 has
+  no Montserrat, so system sans at Black weight). No hard-coded colours outside `Theme.kt`.
+- **Security:** debug builds are no longer signed with the release key, since a debuggable build
+  could otherwise install over the production app. Android 12+ backup and device-transfer are excluded
+  (`res/xml/data_extraction_rules.xml`). Android lint (`lintProdRelease`): 0 errors; remaining
+  warnings are accepted (targetSdk 34, fixed landscape, launcher icon shape, no x86_64, package
+  visibility in `PineCheck` on Android 11+, which doesn't affect the E700's Android 7.1).
 
 ---
 
@@ -481,7 +498,7 @@ company password manager + encrypted drive.
 
 ## 13. Open items
 
-- [ ] PROD Pine Application ID (Pine issues after UAT sign-off)
+- [x] PROD Pine Application ID issued 2026-10-27 (`d0b34dd1…0186`); first signed prod APK built (v1+v2, cert SHA-256 `5062f7cf…cbda`)
 - [ ] Confirm `bank_code = "01"` for ZenZebra's acquirer (UAT case 8)
 - [ ] Void on SDK 2.0 sends `invoice_number = null`. Confirm at UAT case 8 whether MasterApp needs the sale's InvoiceNo, and where it comes from. `PINE_RESULT_META_KEYS` in logcat lists the extra result fields the terminal returns
 - [ ] **Blocker:** UAT E700 has Plutus Plus (`com.pinelabs.plutusplus`) but no `com.pinelabs.masterapp`. Pine must provision the AppToApp payments application / Master service (see `docs/PINE_LABS_VERIFIED.md` §6)

@@ -19,20 +19,7 @@ if (!pineSdkPresent) {
 
 // ---- Pine Application IDs (registered separately per environment) -------------
 val pineUatAppId = "771aabd360b64cd59d11806bd88d87b4"
-val pineProdAppId = ""   // TODO(pine): issued after UAT sign-off
-
-// ---- UPI IDs pre-filled on the Setup screen ----------------------------------
-// From git-ignored upi.properties (see upi.properties.example), so the public repo never holds
-// them. Only defaults: the Setup screen can still change them on the device.
-val upiProps = Properties().apply {
-    val f = rootProject.file("upi.properties")
-    if (f.exists()) f.inputStream().use { load(it) }
-}
-fun upiDefault(key: String): String {
-    val v = upiProps.getProperty(key, "").trim()
-    require(Regex("^[A-Za-z0-9._-]*(@[A-Za-z0-9.-]+)?$").matches(v)) { "upi.properties: $key is not a UPI ID" }
-    return v
-}
+val pineProdAppId = "d0b34dd115e8487cb1e20b6706d90186"   // issued by Pine Labs 2026-10-27
 
 // ---- Release signing ---------------------------------------------------------
 val keystoreProps = Properties().apply {
@@ -55,8 +42,6 @@ android {
         buildConfigField("String", "ODOO_BASE_URL", "\"https://zenzebra1.odoo.com\"")
         buildConfigField("String", "ODOO_DB", "\"zenzebra1\"")
         buildConfigField("boolean", "PINE_SDK_PRESENT", pineSdkPresent.toString())
-        buildConfigField("String", "UPI_PRIMARY_DEFAULT", "\"${upiDefault("upi.primary")}\"")
-        buildConfigField("String", "UPI_FALLBACK_DEFAULT", "\"${upiDefault("upi.fallback")}\"")
 
         ndk { abiFilters += listOf("arm64-v8a", "armeabi-v7a") } // SDK ships only these
     }
@@ -82,6 +67,8 @@ android {
                 storePassword = keystoreProps.getProperty("storePassword")
                 keyAlias = keystoreProps.getProperty("keyAlias")
                 keyPassword = keystoreProps.getProperty("keyPassword")
+                // Pine onboarding requires both. v1 is still written for minSdk 25: apksigner's
+                // default verify skips v1 when minSdk >= 24, so check with --min-sdk-version 21.
                 enableV1Signing = true
                 enableV2Signing = true
             }
@@ -91,7 +78,9 @@ android {
     buildTypes {
         debug {
             isDebuggable = true
-            if (keystoreProps.isNotEmpty()) signingConfig = signingConfigs.getByName("release")
+            // Debug builds use the local debug key, NEVER the release key: a debuggable build
+            // (which can enable the fake gateway) signed with the release key would install over
+            // the production app on a store terminal as a valid "update".
         }
         release {
             isMinifyEnabled = true
@@ -130,6 +119,16 @@ tasks.matching { it.name.startsWith("assembleProd") || it.name.startsWith("bundl
     doFirst {
         check(pineProdAppId.isNotBlank()) {
             "PROD Pine Application ID is empty. Set pineProdAppId in app/build.gradle.kts before building PROD."
+        }
+    }
+}
+
+// A PROD release must be signed with the one release key (Pine: same key for every update),
+// with both v1 and v2 signatures (Pine onboarding requirement, enabled in signingConfigs above).
+tasks.matching { it.name == "assembleProdRelease" || it.name == "bundleProdRelease" }.configureEach {
+    doFirst {
+        check(keystoreProps.isNotEmpty()) {
+            "keystore.properties is missing: a PROD release must be signed with the release key (docs/DEPLOY_E700.md §2)."
         }
     }
 }
