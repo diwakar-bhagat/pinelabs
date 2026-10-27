@@ -36,8 +36,8 @@ android {
         applicationId = "com.bohemian.odoo.pos"
         minSdk = 25          // E700 = PayDroid Android 7.1.2 (API 25)
         targetSdk = 34
-        versionCode = 1
-        versionName = "0.1.0"
+        versionCode = 2
+        versionName = "0.1.1"
 
         buildConfigField("String", "ODOO_BASE_URL", "\"https://zenzebra1.odoo.com\"")
         buildConfigField("String", "ODOO_DB", "\"zenzebra1\"")
