@@ -31,7 +31,11 @@ data class SnapshotLine(
     val uuid: String, val productId: Int, val name: String, val pricePaise: Long,
     val barcode: String? = null, val taxIds: List<Int>, val qty: Int,
     val totalInclPaise: Long, val totalExclPaise: Long,
+    val notes: List<SnapshotNote> = emptyList(),
 )
+
+@Serializable
+data class SnapshotNote(val text: String, val colorIndex: Int)
 
 @Serializable
 data class SaleSnapshot(
@@ -54,6 +58,8 @@ data class SaleSnapshot(
     /** ZZ Cash earned by this cart (LoyaltyPoints.earned), booked after sync. Absent in older snapshots. */
     val loyaltyEarnedPaise: Long = 0,
     val loyaltyCardId: Int? = null,
+    /** pos.config.default_preset_id at payment time (Pickup). */
+    val presetId: Int? = null,
 ) {
     fun zzRedemption(): ZzCashRedemption? = redemption?.let {
         ZzCashRedemption(
@@ -67,7 +73,7 @@ data class SaleSnapshot(
 
     fun cartLines() = lines.map {
         CartLine(it.uuid, Product(it.productId, it.name, Paise(it.pricePaise), it.barcode, null, it.taxIds), it.qty,
-            Paise(it.totalInclPaise), Paise(it.totalExclPaise))
+            Paise(it.totalInclPaise), Paise(it.totalExclPaise), note = it.notes.map { n -> LineNote(n.text, n.colorIndex) })
     }
     fun totals() = CartTotals(Paise(totalInclPaise), Paise(totalExclPaise))
     fun customer() = customerId?.let {
@@ -96,7 +102,8 @@ data class SaleSnapshot(
             configName = cfg.name, companyName = cfg.companyName,
             lines = lines.map {
                 SnapshotLine(it.uuid, it.product.id, it.product.name, it.product.price.value, it.product.barcode,
-                    it.product.taxIds, it.qty, it.totalIncl!!.value, it.totalExcl!!.value)
+                    it.product.taxIds, it.qty, it.totalIncl!!.value, it.totalExcl!!.value,
+                    it.note.map { n -> SnapshotNote(n.text, n.colorIndex) })
             },
             totalInclPaise = totals.totalIncl.value, totalExclPaise = totals.totalExcl.value,
             customerId = customer?.id, customerName = customer?.name, customerPhone = customer?.phone,
@@ -118,6 +125,7 @@ data class SaleSnapshot(
             },
             loyaltyEarnedPaise = loyaltyEarned.value,
             loyaltyCardId = loyaltyCardId,
+            presetId = cfg.defaultPresetId,
         )
     }
 }
@@ -156,6 +164,7 @@ class SaleFinalizer(
             redemption = snap.zzRedemption(),
             loyaltyEarned = Paise(snap.loyaltyEarnedPaise),
             loyaltyCardId = snap.loyaltyCardId,
+            presetId = snap.presetId,
         )
         orderSync.submit(sale)          // outbox row written first inside submit()
         snapshots.delete(snap.orderUuid)

@@ -28,12 +28,36 @@ object Zz {
     val Gold = Color(0xFFE6A525)
     val GoldSoft = Color(0xFFF6E3B8)
     val RedSoft = Color(0xFFFBD5D7)
+    val Green = Color(0xFF1E8E3E)          // points earned
+    /** Selected cart line (Odoo highlights it the same way). */
+    val Selected = Color(0xFFE6EEF0)
+
+    /**
+     * Odoo's 12-colour index (pos.category.color, pos.note.color) → the hex the Odoo web
+     * client uses. 0 = no colour.
+     */
+    private val odoo = longArrayOf(
+        0xFFFFFFFF, 0xFFF06050, 0xFFF4A460, 0xFFF7CD1F, 0xFF6CC1ED, 0xFF814968,
+        0xFFEB7E7F, 0xFF2C8397, 0xFF475577, 0xFFD6145F, 0xFF30C381, 0xFF9365B8,
+    )
+
+    /** Strong colour: the bar under a product tile. */
+    fun odooColor(index: Int): Color = Color(odoo[index.coerceIn(0, 11)])
+
+    /** Soft tint for a tab or tag background, the way the POS shows them; white for 0. */
+    fun odooTint(index: Int): Color =
+        if (index !in 1..11) Color.White else lerp(Color.White, odooColor(index), 0.38f)
+
+    private fun lerp(a: Color, b: Color, t: Float) =
+        Color(a.red + (b.red - a.red) * t, a.green + (b.green - a.green) * t, a.blue + (b.blue - a.blue) * t)
 }
 
+// Primary is rich black, not blood red: red is kept for the pay buttons and real alarms, so a
+// normal switch, focused field or progress bar never reads as an error.
 private val ZzColors = lightColorScheme(
-    primary = Zz.Red,
+    primary = Zz.Black,
     onPrimary = Zz.Cream,
-    primaryContainer = Zz.RedSoft,
+    primaryContainer = Zz.CreamDeep,
     onPrimaryContainer = Zz.Black,
     secondary = Zz.Black,
     onSecondary = Zz.Cream,
@@ -61,7 +85,7 @@ private val ZzColors = lightColorScheme(
     surfaceContainerHighest = Color(0xFFFFFDF9), // product cards: a touch lighter than the cream page
     inverseSurface = Zz.Black,
     inverseOnSurface = Zz.Cream,
-    inversePrimary = Zz.RedSoft,
+    inversePrimary = Zz.Cream,
     outlineVariant = Zz.Line,
 )
 

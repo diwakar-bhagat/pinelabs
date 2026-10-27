@@ -20,27 +20,48 @@ class CatalogCache(private val file: File) {
         val paymentMethodIds: List<Int>, val companyName: String, val companyId: Int?,
         val invoiceJournalId: Int?, val defaultFiscalPositionId: Int?, val fiscalPositionIds: List<Int>,
         val cashControl: Boolean,
+        val manualDiscount: Boolean = false, val defaultPresetId: Int? = null, val defaultPresetName: String? = null,
+        val noteIds: List<Int> = emptyList(),
     )
 
     @Serializable
     private data class ProductDto(
         val id: Int, val name: String, val pricePaise: Long, val barcode: String?, val defaultCode: String?,
         val taxIds: List<Int>, val hsnCode: String?,
+        val categIds: List<Int> = emptyList(), val writeDate: String? = null,
     )
 
     @Serializable
-    private data class Snapshot(val savedAt: Long, val config: ConfigDto, val products: List<ProductDto>)
+    private data class CategoryDto(val id: Int, val name: String, val parentId: Int?, val sequence: Int, val color: Int)
 
-    data class Cached(val savedAt: Long, val config: PosConfig, val products: List<Product>)
+    @Serializable
+    private data class NoteDto(val id: Int, val name: String, val color: Int)
 
-    fun save(config: PosConfig, products: List<Product>, now: Long = System.currentTimeMillis()) {
+    @Serializable
+    private data class Snapshot(
+        val savedAt: Long, val config: ConfigDto, val products: List<ProductDto>,
+        val categories: List<CategoryDto> = emptyList(), val notes: List<NoteDto> = emptyList(),
+    )
+
+    data class Cached(
+        val savedAt: Long, val config: PosConfig, val products: List<Product>,
+        val categories: List<PosCategory> = emptyList(), val notes: List<PosNote> = emptyList(),
+    )
+
+    fun save(
+        config: PosConfig, products: List<Product>, now: Long = System.currentTimeMillis(),
+        categories: List<PosCategory> = emptyList(), notes: List<PosNote> = emptyList(),
+    ) {
         val snap = Snapshot(
             savedAt = now,
             config = with(config) {
                 ConfigDto(id, name, currentSessionId, sessionOpen, paymentMethodIds, companyName, companyId,
-                    invoiceJournalId, defaultFiscalPositionId, fiscalPositionIds, cashControl)
+                    invoiceJournalId, defaultFiscalPositionId, fiscalPositionIds, cashControl,
+                    manualDiscount, defaultPresetId, defaultPresetName, noteIds)
             },
-            products = products.map { ProductDto(it.id, it.name, it.price.value, it.barcode, it.defaultCode, it.taxIds, it.hsnCode) },
+            products = products.map { ProductDto(it.id, it.name, it.price.value, it.barcode, it.defaultCode, it.taxIds, it.hsnCode, it.categIds, it.writeDate) },
+            categories = categories.map { CategoryDto(it.id, it.name, it.parentId, it.sequence, it.color) },
+            notes = notes.map { NoteDto(it.id, it.name, it.color) },
         )
         file.parentFile?.mkdirs()
         val tmp = File(file.path + ".tmp")
@@ -55,9 +76,12 @@ class CatalogCache(private val file: File) {
             savedAt = s.savedAt,
             config = with(s.config) {
                 PosConfig(id, name, currentSessionId, sessionOpen, paymentMethodIds, companyName, companyId,
-                    invoiceJournalId, defaultFiscalPositionId, fiscalPositionIds, cashControl)
+                    invoiceJournalId, defaultFiscalPositionId, fiscalPositionIds, cashControl,
+                    manualDiscount, defaultPresetId, defaultPresetName, noteIds)
             },
-            products = s.products.map { Product(it.id, it.name, Paise(it.pricePaise), it.barcode, it.defaultCode, it.taxIds, it.hsnCode) },
+            products = s.products.map { Product(it.id, it.name, Paise(it.pricePaise), it.barcode, it.defaultCode, it.taxIds, it.hsnCode, it.categIds, it.writeDate) },
+            categories = s.categories.map { PosCategory(it.id, it.name, it.parentId, it.sequence, it.color) },
+            notes = s.notes.map { PosNote(it.id, it.name, it.color) },
         )
     }.getOrNull()
 

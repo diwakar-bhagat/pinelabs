@@ -17,6 +17,10 @@ import com.bohemian.odoo.pos.odoo.ZzCashRedemption
 import com.bohemian.odoo.pos.odoo.ZzCashRules
 import com.bohemian.odoo.pos.odoo.LoyaltyPoints
 import com.bohemian.odoo.pos.odoo.LoyaltyRule
+import com.bohemian.odoo.pos.odoo.LineNote
+import com.bohemian.odoo.pos.odoo.MenuTree
+import com.bohemian.odoo.pos.odoo.PosCategory
+import com.bohemian.odoo.pos.odoo.PosNote
 import com.bohemian.odoo.pos.odoo.FiscalPosition
 import com.bohemian.odoo.pos.odoo.OdooException
 import com.bohemian.odoo.pos.odoo.PaidSale
@@ -123,6 +127,15 @@ data class SellState(
     val zzRewards: List<ZzCashReward> = emptyList(),
     /** The ZZ Cash reward applied to this sale, priced by Odoo once the cart is priced. */
     val zzRedemption: ZzCashRedemption? = null,
+    /** Menu tabs (pos.category) and note tags (pos.note) from Odoo. */
+    val categories: List<PosCategory> = emptyList(),
+    val notes: List<PosNote> = emptyList(),
+    /** Selected tab; null = whole catalogue. Set to the first tab when the menu loads. */
+    val selectedCateg: Int? = null,
+    /** Selected cart line (the keypad acts on it). */
+    val selectedLine: String? = null,
+    /** Digits typed on the keypad for the selected line. */
+    val keypad: String = "",
     /** ZZ Cash earning rules (loyalty.rule of program 4). Null until loaded. */
     val zzRules: List<LoyaltyRule>? = null,
     /**
@@ -139,11 +152,19 @@ data class SellState(
     /** ZZ Cash this cart earns, as the web POS shows it ("34.6 +1.2 = 35.8"). */
     val zzEarned: Paise get() = zzRules?.let { LoyaltyPoints.earned(it, lines) } ?: Paise.ZERO
 
+    val menu: MenuTree get() = MenuTree(categories)
+
+    /** The selected tab (and everything under it), or the search results across the whole catalogue. */
     val filtered: List<Product>
-        get() = if (query.isBlank()) products.take(60)
+        get() = if (query.isBlank()) menu.filter(products, selectedCateg).take(MAX_TILES)
         else query.trim().lowercase().let { q ->
-            products.filter { it.name.lowercase().contains(q) || it.barcode == q || it.defaultCode?.lowercase() == q }.take(60)
+            products.filter { it.name.lowercase().contains(q) || it.barcode == q || it.defaultCode?.lowercase() == q }.take(MAX_TILES)
         }
+
+    /** Units of each product in the cart, for the badge on its tile. */
+    val qtyInCart: Map<Int, Int> get() = lines.groupBy { it.product.id }.mapValues { (_, l) -> l.sumOf { it.qty } }
+
+    private companion object { const val MAX_TILES = 200 }
 }
 
 class PosViewModel(private val c: AppContainer) : ViewModel() {
@@ -239,7 +260,18 @@ class PosViewModel(private val c: AppContainer) : ViewModel() {
 
     // ------------------------------------------------------------------ catalogue & cart
 
+    private var catalogLoadedAt = 0L
+
+    /** On resume: refresh the catalogue and photos when the last load is older than 30 minutes. */
+    fun refreshIfStale() {
+        if (_configured.value && System.currentTimeMillis() - catalogLoadedAt > 30 * 60_000L && !_sell.value.loading
+            && _sell.value.pay == PayUi.Idle) loadCatalog()
+    }
+
+    val images get() = c.productImages
+
     fun loadCatalog() = viewModelScope.launch {
+        catalogLoadedAt = System.currentTimeMillis() // also stops refreshIfStale from loading twice
         _sell.update { it.copy(loading = true, error = null) }
         try {
             val cfg = c.catalog.config(c.settings.posConfigId)
@@ -248,14 +280,22 @@ class PosViewModel(private val c: AppContainer) : ViewModel() {
             fiscalPositionsById = c.fiscalPositions.load(fposIds)
             c.fiscalPositions.primeTaxFiscalPositions(products.flatMap { it.taxIds })
             val rules = runCatching { c.zzCash.rules() }.onFailure { PosLog.w("ZZ_RULES_LOAD_FAILED", "err" to it.message) }.getOrNull()
+            val categories = runCatching { c.catalog.categories() }.onFailure { PosLog.w("MENU_LOAD_FAILED", "err" to it.message) }.getOrDefault(emptyList())
+            val notes = runCatching { c.catalog.notes(cfg.noteIds) }.getOrDefault(emptyList())
             _sell.update {
                 it.copy(
                     config = cfg, products = products, loading = false, offlineCatalogSavedAt = null,
-                    zzRules = rules,
+                    zzRules = rules, categories = categories, notes = notes,
+                    selectedCateg = it.selectedCateg?.takeIf { id -> categories.any { c -> c.id == id } }
+                        ?: MenuTree(categories).roots.firstOrNull()?.id,
                     fiscalPosition = fiscalPositionsById[cfg.defaultFiscalPositionId],
                 )
             }
-            runCatching { c.catalogCache.save(cfg, products) }.onFailure { PosLog.w("CATALOG_CACHE_SAVE_FAILED", "err" to it.message) }
+            runCatching { c.catalogCache.save(cfg, products, categories = categories, notes = notes) }
+                .onFailure { PosLog.w("CATALOG_CACHE_SAVE_FAILED", "err" to it.message) }
+            catalogLoadedAt = System.currentTimeMillis()
+            // Photos of the menu tabs in the background; the rest load as their tiles appear.
+            viewModelScope.launch { c.productImages.prefetch(products.filter { it.categIds.isNotEmpty() }, products) }
         } catch (e: OdooException.Network) {
             // Phase 5: show the last catalogue so the till is usable for browsing; selling
             // still needs Odoo pricing (I2), which fails with a friendly error until it is back.
@@ -263,6 +303,8 @@ class PosViewModel(private val c: AppContainer) : ViewModel() {
             _sell.update {
                 if (cached == null) it.copy(loading = false, error = friendly(e))
                 else it.copy(config = cached.config, products = cached.products, loading = false,
+                    categories = cached.categories, notes = cached.notes,
+                    selectedCateg = it.selectedCateg ?: MenuTree(cached.categories).roots.firstOrNull()?.id,
                     offlineCatalogSavedAt = cached.savedAt, error = null)
             }
         } catch (e: Exception) {
@@ -441,10 +483,54 @@ class PosViewModel(private val c: AppContainer) : ViewModel() {
         if (exact != null) { add(exact); _sell.update { it.copy(query = "") } }
     }
 
-    fun add(p: Product) = editCart { lines ->
-        val i = lines.indexOfFirst { it.product.id == p.id }
-        if (i >= 0) lines.toMutableList().also { it[i] = it[i].copy(qty = it[i].qty + 1, totalIncl = null, totalExcl = null) }
-        else lines + CartLine(UUID.randomUUID().toString(), p, 1)
+    fun add(p: Product) {
+        var selected: String? = null
+        editCart { lines ->
+            val i = lines.indexOfFirst { it.product.id == p.id }
+            if (i >= 0) lines.toMutableList().also { it[i] = it[i].copy(qty = it[i].qty + 1, totalIncl = null, totalExcl = null); selected = it[i].uuid }
+            else (lines + CartLine(UUID.randomUUID().toString(), p, 1)).also { selected = it.last().uuid }
+        }
+        _sell.update { it.copy(selectedLine = selected, keypad = "") }
+    }
+
+    // ------------------------------------------------------------------ menu, line selection, keypad, notes
+
+    /** Tap a tab: select it, or clear the filter when it is already selected (Odoo web POS). */
+    fun selectCategory(id: Int) = _sell.update { it.copy(selectedCateg = if (it.selectedCateg == id) null else id, query = "") }
+
+    fun selectLine(uuid: String) = _sell.update { it.copy(selectedLine = uuid, keypad = "") }
+
+    /**
+     * Qty keypad, as in the Odoo numpad: digits replace the selected line's quantity; ⌫ removes the
+     * last digit, and on an empty entry removes the line. Whole units only (the menu is sold by piece).
+     */
+    fun keypadDigit(d: Char) {
+        val s = _sell.value
+        val uuid = s.selectedLine ?: return
+        val entry = (s.keypad + d).trimStart('0').take(3)
+        _sell.update { it.copy(keypad = entry) }
+        val qty = entry.toIntOrNull() ?: return
+        editCart { lines -> lines.map { if (it.uuid == uuid) it.copy(qty = qty, totalIncl = null, totalExcl = null) else it } }
+    }
+
+    fun keypadBackspace() {
+        val s = _sell.value
+        val uuid = s.selectedLine ?: return
+        if (s.keypad.isEmpty()) {
+            remove(uuid)
+            _sell.update { it.copy(selectedLine = it.lines.lastOrNull()?.uuid) }
+            return
+        }
+        val entry = s.keypad.dropLast(1)
+        _sell.update { it.copy(keypad = entry) }
+        val qty = entry.toIntOrNull() ?: 1
+        editCart { lines -> lines.map { if (it.uuid == uuid) it.copy(qty = qty, totalIncl = null, totalExcl = null) else it } }
+    }
+
+    /** Note tags and free text on the selected line, stored as Odoo's pos.order.line.note JSON. */
+    fun setLineNote(uuid: String, tags: List<LineNote>) {
+        if (_sell.value.pay is PayUi.Working) return
+        _sell.update { s -> s.copy(lines = s.lines.map { if (it.uuid == uuid) it.copy(note = tags) else it }) }
     }
 
     fun changeQty(uuid: String, delta: Int) = editCart { lines ->
@@ -552,16 +638,17 @@ class PosViewModel(private val c: AppContainer) : ViewModel() {
      */
     private fun searchCustomerByPhone(digits: String) {
         val clean = digits.filter { it.isDigit() }
+        phoneSearchJob?.cancel() // any edit cancels the search in flight
         if (clean.length < 4) {
             _sell.update { it.copy(customerMatches = emptyList()) }
             return
         }
-        phoneSearchJob?.cancel()
         phoneSearchJob = viewModelScope.launch {
             kotlinx.coroutines.delay(300) // debounce keystrokes
             try {
                 val matches = c.customers.searchByPhoneSuffix(clean)
-                _sell.update { it.copy(customerMatches = matches) }
+                // Only for what is typed now: a slow answer for older digits is dropped.
+                _sell.update { if (it.phone.filter { ch -> ch.isDigit() } == clean) it.copy(customerMatches = matches) else it }
             } catch (_: Exception) {
                 // search failure is silent — the cashier can still type the full number
             }
@@ -586,7 +673,7 @@ class PosViewModel(private val c: AppContainer) : ViewModel() {
                 // Ignore if the cart changed while we were pricing.
                 if (s.lines.map { it.uuid to it.qty } != priced.map { it.uuid to it.qty }) s
                 else s.copy(
-                    lines = priced,
+                    lines = priced.map { p -> p.copy(note = s.lines.firstOrNull { it.uuid == p.uuid }?.note ?: p.note) },
                     zzRedemption = pricedRedemption,
                     totals = totalsWith(priced, pricedRedemption),
                     pricing = false,
@@ -793,7 +880,7 @@ class PosViewModel(private val c: AppContainer) : ViewModel() {
         it.copy(
             orderUuid = UUID.randomUUID().toString(), lines = emptyList(), totals = null,
             phone = "", customerName = "", customer = null, customerMatches = emptyList(), zzCash = null,
-            zzRewards = emptyList(), zzRedemption = null,
+            zzRewards = emptyList(), zzRedemption = null, selectedLine = null, keypad = "",
             fiscalPosition = fiscalPositionsById[it.config?.defaultFiscalPositionId],
             pay = PayUi.Idle, error = null,
         )

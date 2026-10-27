@@ -46,6 +46,8 @@ data class PaidSale(
     val loyaltyEarned: Paise = Paise.ZERO,
     /** The customer's ZZ Cash card, or null when they have none yet (Odoo creates it). */
     val loyaltyCardId: Int? = null,
+    /** pos.preset of the order (the config default, e.g. Pickup); null when presets are off. */
+    val presetId: Int? = null,
 ) {
     val amountPaid: Paise get() = payments.fold(Paise.ZERO) { a, p -> a + p.amount }
 }
@@ -199,6 +201,7 @@ class OrderSyncService(
                     "tax_ids" to listOf(listOf(6, 0, l.product.taxIds)),
                     "price_subtotal" to l.totalExcl!!.toRupees(),
                     "price_subtotal_incl" to l.totalIncl!!.toRupees(),
+                    "note" to LineNotes.toOdoo(l.note),
                 ))
             } + (s.redemption?.let { rewardLines(it) } ?: emptyList())
             val order = mapOf(
@@ -215,6 +218,7 @@ class OrderSyncService(
                 "amount_tax" to s.totals.tax.toRupees(),
                 "amount_paid" to s.amountPaid.toRupees(),
                 "amount_return" to 0,
+                "preset_id" to (s.presetId ?: false),
                 "lines" to lines,
                 "payment_ids" to s.payments.map { p ->
                     listOf(0, 0, buildMap<String, Any?> {

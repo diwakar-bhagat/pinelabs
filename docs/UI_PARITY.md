@@ -19,18 +19,18 @@ Screens in the live till (screenshots from the browser POS, config 1 ZenZebra, 2
 | Order tab (+ and `4014`) | New order; the number is the order tab | `control_buttons` | Partly (one order at a time) |
 | Search products | Filters the grid; "Search more" widens it | `product_screen.js` | Built (search) |
 | Barcode icon | Scanner input | `barcode` service | Built (wedge input) |
-| Category tiles | Filter grid by POS category (Chai & Coffee, Bites, WhatsApp Menu, WA HO, WA KLJ) | `product_screen` categories | Not built |
-| Product grid | Image, name; coloured bar = category | `product_screen.xml` | Built (no images) |
+| Category tiles | Filter grid by POS category (Chai & Coffee, Bites, WhatsApp Menu, WA HO, WA KLJ) | `product_screen` categories | Built: `pos.category` tree with Odoo colours, child row under the selected tab, tap again clears (`MenuTree`, `CategoryBar`) |
+| Product grid | Image, name; coloured bar = category | `product_screen.xml` | Built: `image_256` photos cached per `write_date` (`ProductImages`), category colour bar, qty badge |
 | Order panel: lines | Name, qty, price | `order_summary/` | Built |
 | Taxes / Total | GST shown inside the price | `order_summary/` | Built |
-| Points | Loyalty balance `24.6 +149.93 = 174.53` (before · earned · after) | `pos_loyalty` | Balance only (Phase 3a) |
+| Points | Loyalty balance `24.6 +149.93 = 174.53` (before · earned · after) | `pos_loyalty` | Built: balance + earned (`LoyaltyPoints`) − spent = after |
 | Customer button (`Diwakar`) | Pick or change the customer | `partner_list/` | Built |
-| Note | Order note | `control_buttons` | Not built |
-| Pickup | Order type | `control_buttons` | Not built |
+| Note | Line note tags (`pos.note`: Wait, To Serve, Emergency, No Dressing) + free text | `control_buttons` | Built: sent as `pos.order.line.note` JSON |
+| Pickup | Order preset (`pos.preset`) | `control_buttons` | Built: config default preset sent as `preset_id`; read-only while only one preset exists |
 | Send icon | Send order to kitchen / print | `control_buttons` | Not built |
-| ⋮ Actions menu | Note, Customer Note, Enter Code, Reward, Reset Programs, Quotation/Order, Default (INR), Refund, Cancel Order | `action_pad/` | Reward only (Phase 3b) |
-| Numpad 1–9, 0, +/−, `.` , backspace | Edits qty or price of the selected line | `numpad` | Not built (needs line selection) |
-| Qty / % / Price | Mode of the numpad | `numpad` | Not built |
+| ⋮ Actions menu | Note, Customer Note, Enter Code, Reward, Reset Programs, Quotation/Order, Default (INR), Refund, Cancel Order | `action_pad/` | Reward (full "Available rewards" dialog) |
+| Numpad 1–9, 0, +/−, `.` , backspace | Edits qty or price of the selected line | `numpad` | Built for Qty on the selected line; ⌫ on an empty entry removes the line |
+| Qty / % / Price | Mode of the numpad | `numpad` | Qty built. % and Price shown disabled: config 1 has `manual_discount=false`, and a typed price needs Odoo's permission checks |
 | Payment | Opens the payment screen | `action_pad/` | Built |
 | UPI (quick pay) | Opens payment with UPI preselected | `action_pad/` | Not built |
 
@@ -80,9 +80,8 @@ Status: **not built.** Printing on the E700 printer is a separate step (see `doc
 
 ## 5. Open items before this matches the browser
 
-- Category tiles and product images.
-- Numpad with line selection (qty, price, %).
 - Payment screen (method tiles, line list, numpad, Invoice toggle, Validate).
-- Full rewards dialog.
+- Customer create / edit form (Edit Partner).
+- % and Price keys (needs `manual_discount` and Odoo's price-change rights).
 - Receipt screen and ticket content (HSN, SGST/CGST split, code, company block).
 - E700 terminal line inside the split.
