@@ -491,6 +491,41 @@ and the version shows on the top bar and on Setup.
   Product search lists names starting with the query first.
 - **Crash reports** open in full on Setup and record the build that crashed.
 
+### Decisions 2026-10-28 (every store, 0.5.0)
+
+The till now works at any store as it is set up in Odoo, with no Odoo change and no app change per
+store. Checked live against every POS config (read-only).
+- **Payment methods per store** (`odoo/PaymentRoles.kt`): card, UPI and cash each have their own Odoo
+  method.
+  - **Card and UPI:** the store's E700 method when it has one, else its own "Cards" and "UPI" methods
+    (what its web POS books card and UPI on).
+  - **Cash:** its cash-count method, else its Bank-type "Cash".
+  - **Live picks:**
+
+    | Store | Card | UPI | Cash |
+    |---|---|---|---|
+    | ZenZebra | 22 E700 | 22 E700 | 2 Cash |
+    | KLJ, SWN, HQ27GGN, Club 125 | 5 Cards | 7 UPI | 4 Cash (Bank type) |
+
+    The two ZZ Café configs (web payments only) get none, and Setup asks.
+  - **Excluded:** methods Odoo drives itself (the web POS's Pine Labs link, Razorpay), QR, online and
+    customer account. Their refunds would call a device the E700 did not use.
+  - **Setup:** shows three steps (Card, UPI, Cash). Tapping a chosen method again turns that tender
+    off, and Setup needs at least one.
+  - **Existing terminals** keep their single E700 method for both card and UPI, with no Setup needed
+    (`DeviceSettings` falls back to `terminal_pm_id`).
+  - **Booking:** each terminal payment goes on its mode's method (`SaleFinalizer.terminalMethodFor`), and
+    void refunds go on the card method.
+  - **Cash on a Bank-type method:** the till books the bill amount and the change is handed back from
+    the drawer, as before (Odoo never gets change). So no Cash-type method is needed.
+- **Pricelists** (`odoo/PricelistService.kt`): the web POS prices every order with the config's
+  pricelist, while the till charges list prices.
+  - **The guard:** the till reads the pricelist's rules, asks Odoo which POS products each covers
+    (category trees by `child_of`), and refuses those products, on adding and again before the charge.
+    A global rule holds back every product.
+  - **Live:** watched in the minute loop (`product.pricelist.item`, and products).
+  - **Today:** pricelist 1's 8 rules are on shelf rentals, which are not in POS, so nothing is held.
+
 ---
 
 ## 6. Odoo integration (verified against live DB, 2026-09-21)
@@ -517,8 +552,14 @@ Private (`_x`) methods are not callable.
   paid ≠ total. Send `state: "paid"` only after Pine confirms.
 - **Sessions:** `pos.session.create({config_id})` → `set_opening_control(cashbox_value, notes)`;
   `close_session_from_ui()` closes. Check via `pos.config.current_session_id/state`.
-- **Payment methods:** Dedicated "Pine Labs E700 (A2A)" method (type bank,
-  `use_payment_terminal` empty — app drives terminal). Cash = config's `is_cash_count` method.
+- **Payment methods** (`odoo/PaymentRoles.kt`, 0.5.0): card, UPI and cash each have their own method,
+  picked from what the store has in Odoo and shown in Setup.
+  - **Card and UPI:** the store's "… E700 …" method (type bank, `use_payment_terminal` empty, the app
+    drives the terminal); without one, its own "Cards" and "UPI".
+  - **Cash:** its `is_cash_count` method; without one, its method named Cash (a Bank-type "Cash" at
+    four stores).
+  - **Never offered:** methods Odoo drives itself (`use_payment_terminal`, QR), online and customer
+    account.
 - **ZZ Cash:** `loyalty.program` id 4 (30 rules, 10 rewards) on the live DB, but the app never
   hard-codes it: `ZzCashService.program(config)` finds the one `pos_ok` + `program_type=loyalty`
   program open to the till's config (none or 2+ → ZZ Cash hidden), and the sale snapshot keeps
@@ -659,7 +700,7 @@ company password manager + encrypted drive.
 | 20 | SPLIT ₹500: UPI ₹300, then Cash ₹200 (tendered ₹500) | UPI charged for ₹300 only; Validate; change ₹300 shown; Odoo order has 2 payment lines = ₹500; bill shows both |
 | 21 | SPLIT: UPI ₹200, then Card for the rest; close the screen after UPI | Red bar "partly paid"; cart and New bill locked; FINISH reopens it; Card charges only the rest |
 | 22 | SETUP with 1234, change the PIN, wrong PIN 5 × | Setup opens; new PIN works, 1234 no longer; locked 60 s after 5 wrong tries |
-| 23 | Top bar badge | Shows "PROD · 0.4.0", so the installed build is never a guess |
+| 23 | Top bar badge | Shows "PROD · 0.5.0", so the installed build is never a guess |
 | 24 | ⋮ → Enter Code: a ZZ Note on a bill below its minimum, then add items past it | "Code accepted"; the ₹N off line appears by itself once the bill qualifies; paid; Odoo order has the reward line and the WhatsApp PDF shows it |
 | 25 | Sampling code on a 2-item bill | One unit of the cheaper item comes off |
 | 26 | At a store with a combo / Fugeno / free item (HQ27, KLJ, Club 125): the combo's two items; a free item tapped last | Discount line appears by itself; the free item comes off; ✕ takes an offer off and it stays off for this bill |
@@ -667,6 +708,9 @@ company password manager + encrypted drive.
 | 28 | Change a product's price (or a tax) in Odoo, wait a minute with the till open | Tile shows the new price; an open cart is repriced with "Prices updated from Odoo at …" |
 | 29 | SALES in the top bar | Today from 6 AM: total, bills, first bill, payment methods, hour by hour; equals Odoo's Orders Analysis for the store |
 | 30 | Customer: type 2+ letters of a name, scroll | Every match A→Z, more load while scrolling |
+| 31 | Setup on a terminal for KLJ (or SWN, HQ27GGN, Club 125) | Card "Cards", UPI "UPI", Cash "Cash" picked by themselves, with the two notes; Start selling works |
+| 32 | At that store: one card, one UPI and one cash sale (tender more than the bill) | Change shown and handed back; Odoo orders have Cards / UPI / Cash lines equal to the bills; SALES "Paid by" shows them |
+| 33 | ZenZebra terminal updated from 0.4.0 to 0.5.0, without Setup | Card and UPI still on "Pine Labs E700 (A2A)"; Setup shows it on both |
 
 ---
 
@@ -730,13 +774,13 @@ company password manager + encrypted drive.
 - [ ] Under the POS-User key, confirm `pos.session.load_data`, `product.product.search` on reward domains, `use_coupon_code` and `formatted_read_group` on `pos.order` / `pos.payment` are allowed
 - [ ] First live sale with an offer from the till (UAT 24–27), then read `loyalty.history` and the order's reward lines back
 - [ ] A code whose program has several rewards waits for the cashier's pick under Reward; Odoo applies the only claimable one at once (no live program has several)
-- [ ] "Cash" at KLJ, SWN, HQ27GGN and Club 125 is payment method 4, type Bank (`is_cash_count` false): Setup lists no Cash method there, so an E700 refuses every cash sale ("No cash method configured"), and method 4 shows up as a Card / UPI choice in Setup. Owner / accountant to decide on a Cash-type method per store before rollout (`docs/CASE_2026-10-28_PINE_OVERPAY.md`)
+- [x] Cash at KLJ, SWN, HQ27GGN and Club 125 (method 4, Bank type): the till books cash on it since 0.5.0, as their web POS does, and hands change back. A Cash-type method per store stays an accounting choice (`docs/CASE_2026-10-28_PINE_OVERPAY.md`)
 - [ ] Odoo's shared "Pine labs" method 10 is still on ZenZebra (config 1) and Club 125 (config 8): a web POS payment there rings HQ27GGN's terminal
 - [ ] Multi-store rollout checklist: `docs/ROLLOUT_STORES.md` (live check, 2026-10-28). Items still open:
-  - "Pine Labs E700 (A2A)" (method 22) is only on ZenZebra (config 1). Add it to KLJ, SWN, HQ27GGN and Club 125 (configs 2, 3, 4, 8) before their terminals are set up
+  - Optional since 0.5.0: "Pine Labs E700 (A2A)" (method 22) is only on ZenZebra. Elsewhere card and UPI are booked on the store's "Cards" / "UPI". Add method 22 to a store only if the accountant wants E700 payments apart; the web POS there then shows it too
   - Web POS and E700 on one store's POS share one session, and I9 sees only the E700's own pending work: one device closes the day
   - Change the Setup PIN from 1234 on every terminal
-  - The till ignores pricelists: today pricelist 1 only touches shelf-rental products, which are not in POS
+  - The till charges list prices: products a store's pricelist prices differently are refused (0.5.0 guard); a store that needs pricelist prices on the E700 needs pricelist pricing ported from the web POS first
   - KLJ, SWN and Club 125 (Noida) and HQ27 (Gurugram) sell under company 1 (Delhi GSTIN); "ZenZebra Noida" / "ZenZebra Haryana" exist with archived POS configs. Moving a store to its state company needs a till change first (company context on every call)
 
 ---

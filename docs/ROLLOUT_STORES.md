@@ -1,19 +1,25 @@
 # Rolling the E700 till out to every store
 
-Checked read-only against the live Odoo DB on 2026-10-28, against till 0.4.0 (code 4). Nothing in
-Odoo was changed. The till needs no code change to run at several stores: each terminal keeps its
-own Odoo key, store, payment methods and PIN (`data/DeviceSettings.kt`). Odoo has to be set up
-first, though.
+Checked read-only against the live Odoo DB on 2026-10-28. Nothing in Odoo was changed.
+
+**Since 0.5.0 (code 5) the till runs at any store as Odoo has it today: no code change and no Odoo
+payment-method change per store.**
+- **Own settings per terminal:** each terminal keeps its own Odoo key, store, payment methods and PIN
+  (`data/DeviceSettings.kt`).
+- **Payment methods:** Setup picks the store's own methods by itself (`odoo/PaymentRoles.kt`). Card
+  and UPI go on the store's E700 method, else its "Cards" / "UPI"; cash goes on its cash-count method,
+  else its Bank-type "Cash".
+- **Still needed per store:** what is left below is about access, the session and the terminal.
 
 ## The stores in Odoo today
 
-| Config | Store | Company | E700 Card/UPI method | Cash-type method (`is_cash_count`) | Web POS Pine method |
+| Config | Store | Company | Till books card / UPI on (0.5.0) | Till books cash on | Web POS Pine method (never used by the till) |
 |---|---|---|---|---|---|
-| 1 | ZenZebra | ZenZebra (Delhi) | 22 "Pine Labs E700 (A2A)" | 2 "Cash" | 10 "Pine labs" |
-| 2 | KLJ | ZenZebra (Delhi) | **none** | **none** (4 "Cash" is type Bank) | 20 "Pine Labs KLJ" |
-| 3 | SWN | ZenZebra (Delhi) | **none** | **none** (4) | 19 "Pine Labs SWN" |
-| 4 | HQ27GGN | ZenZebra (Delhi) | **none** | **none** (4) | 10 "Pine labs" |
-| 8 | Club 125 | ZenZebra (Delhi) | **none** | **none** (4) | 10 and 18 "Pine Labs Club 125" |
+| 1 | ZenZebra | ZenZebra (Delhi) | 22 "Pine Labs E700 (A2A)" | 2 "Cash" (cash count) | 10 "Pine labs" |
+| 2 | KLJ | ZenZebra (Delhi) | 5 "Cards" / 7 "UPI" | 4 "Cash" (Bank type) | 20 "Pine Labs KLJ" |
+| 3 | SWN | ZenZebra (Delhi) | 5 / 7 | 4 | 19 "Pine Labs SWN" |
+| 4 | HQ27GGN | ZenZebra (Delhi) | 5 / 7 | 4 | 10 "Pine labs" |
+| 8 | Club 125 | ZenZebra (Delhi) | 5 / 7 | 4 | 10 and 18 "Pine Labs Club 125" |
 
 - Configs 9 and 10 (ZZ Café HO / KLJ) take only Razorpay and are not E700 stores.
 - Configs 5, 6 and 7 are archived copies of KLJ, SWN and HQ27 under the "ZenZebra Noida" and
@@ -34,20 +40,18 @@ first, though.
      only, issue its API key, and enter it in that terminal's Setup.
    - **Don't** reuse the store logins of SWN (res.users 13) or HQ27GGN (res.users 21). They are also
      Accounting and Inventory administrators.
-2. **Put the E700 method on the store's POS.** Add method 22 "Pine Labs E700 (A2A)" to the store's
-   payment methods in Odoo. A separate E700 method per store also works if the accountant wants one.
-   - **Why:** Setup step 3 pre-selects only a method named "E700". Without one, it lists every other
-     non-cash method of the store, so a wrong pick is easy.
-   - **Wrong picks:**
-     - "Pine Labs <store>": the web POS's own Pine terminal link (`use_payment_terminal = pine_labs`).
-     - Razorpay.
-     - "Cash" (method 4): it is type Bank, so it shows up as a Card / UPI choice.
-3. **Give the store a real Cash method.**
-   - **The gap:** Setup step 4 lists only methods with `is_cash_count`. KLJ, SWN, HQ27GGN and Club
-     125 have none, so the E700 there refuses every cash sale and the cash part of a split bill
-     ("No cash method configured").
-   - **Who decides:** the owner and the accountant. A Cash-type method changes cash accounting and
-     lets Odoo hand back change (`docs/CASE_2026-10-28_PINE_OVERPAY.md`).
+2. **Payment methods: nothing to do (0.5.0).**
+   - **What Setup picks:** the store's own methods, shown in Setup steps 3–5 and changeable there.
+   - **Never offered:** "Pine Labs <store>" (the web POS's own Pine link), Razorpay, online payments
+     and customer accounts.
+   - **Optional:** add "Pine Labs E700 (A2A)" (method 22) to a store's POS only if the accountant wants
+     E700 payments kept apart from "Cards" / "UPI". The web POS there then shows it as a button too.
+3. **Cash: nothing to do (0.5.0).**
+   - **How it books:** where the store's "Cash" is a Bank-type method, the till books the bill amount on
+     it and the change is handed back from the drawer. Odoo never gets change, so it does not need a
+     Cash-type method.
+   - **Still a choice:** a Cash-type method per store remains an accounting decision
+     (`docs/CASE_2026-10-28_PINE_OVERPAY.md`).
 4. **Decide who closes the day.**
    - **Shared session:** the web POS and the E700 (or two E700s) on one store's POS share one Odoo
      session.
@@ -66,15 +70,15 @@ first, though.
 6. **Setup on the terminal.**
    1. Enter the store user's key.
    2. Choose the store's POS.
-   3. Choose "Pine Labs E700 (A2A)".
-   4. Choose the store's Cash method.
-   5. Set the printer width.
-   6. **Change the Setup PIN from 1234**: anyone who knows it can change the key and the store.
+   3. Check the Card, UPI and Cash methods Setup picked (step 2 above).
+   4. Set the printer width.
+   5. **Change the Setup PIN from 1234**: anyone who knows it can change the key and the store.
 7. **Test under the store user's key, before the first customer.** These calls have only ever run
    under an admin key:
    - catalogue load;
    - `pos.session.load_data` (offers);
    - `product.product.search` on reward domains;
+   - `product.pricelist.item` reads and `product.product.search` on their products (pricelist guard);
    - `pos.config.use_coupon_code`;
    - `loyalty.card` reads;
    - `res.partner.create` (Save customer);
@@ -104,8 +108,13 @@ first, though.
 
 ## Limits to know
 
-- **Pricelists:** the till charges the product's list price and ignores pricelists. A store-specific
-  price set through a pricelist would not reach the till. Today there are none on POS products.
+- **Pricelists:**
+  - **What the till does:** it charges the product's list price.
+  - **The guard (0.5.0):** a product the store's pricelist prices differently is refused on the till
+    with a message to sell it on the web POS. A global rule refuses every product.
+  - **Today:** no rule touches a POS product.
+  - **Before relying on it:** a store that needs pricelist prices on the E700 needs the web POS's
+    pricelist pricing ported first.
 - **Companies:** KLJ, SWN and Club 125 are in Noida (UP) and HQ27 is in Gurugram (Haryana), yet all
   sell under company 1 (Delhi GSTIN).
   - **What exists:** "ZenZebra Noida" and "ZenZebra Haryana" have their own GSTINs, but their POS
