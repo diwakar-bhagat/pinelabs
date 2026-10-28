@@ -1,6 +1,7 @@
 package com.bohemian.odoo.pos.odoo
 
 import com.bohemian.odoo.pos.core.Paise
+import com.bohemian.odoo.pos.core.PosLog
 import kotlinx.serialization.json.JsonObject
 
 /**
@@ -63,8 +64,10 @@ class ZzCashService(private val odoo: OdooJson2Client) {
                 listOf("program_id", "=", programId),
             ),
             "fields" to listOf("points", "code"),
-            "limit" to 1,
+            "order" to "id", // the same card every time, should a customer ever have two
+            "limit" to 2,
         )).objects()
+        if (rows.size > 1) PosLog.w("ZZ_CASH_TWO_CARDS", "partner" to partnerId, "program" to programId)
         return fromRows(partnerId, rows)
     }
 
@@ -96,13 +99,15 @@ class ZzCashService(private val odoo: OdooJson2Client) {
     /**
      * Odoo's pre-payment check, as the web POS calls it before validating an order
      * (`pos.order.validate_coupon_programs(point_changes, new_codes)`, pos_loyalty 19.0):
-     * the card still exists, is active and still holds the points. Returns Odoo's message
-     * when it refuses, or null when the reward can be charged.
+     * the card still exists, is active and still covers the order. The change is the net one,
+     * points [earned] by this order minus the reward's [spent] points, as the web POS sends it;
+     * Odoo refuses when the card holds less than `−change`. Returns Odoo's message when it
+     * refuses, or null when the reward can be charged.
      */
-    suspend fun validateRedemption(cardId: Int, points: Paise): String? {
+    suspend fun validateRedemption(cardId: Int, earned: Paise, spent: Paise): String? {
         val res = odoo.call("pos.order", "validate_coupon_programs", jsonOf(
             "ids" to emptyList<Int>(),
-            "point_changes" to mapOf(cardId.toString() to Paise(-points.value).toRupees()),
+            "point_changes" to pointChanges(cardId, earned, spent),
             "new_codes" to emptyList<String>(),
         )) as? JsonObject ?: return "unexpected answer from Odoo"
         if (res.bool("successful")) return null
@@ -123,6 +128,10 @@ class ZzCashService(private val odoo: OdooJson2Client) {
             val points = row.money("points").let { if (it.isPositive) it else Paise.ZERO }
             return ZzCashBalance(partnerId = partnerId, cardId = cardId, points = points)
         }
+
+        /** `point_changes` of validate_coupon_programs: card id → earned − spent, in points (rupees). */
+        internal fun pointChanges(cardId: Int, earned: Paise, spent: Paise): Map<String, Any> =
+            mapOf(cardId.toString() to (earned - spent).toRupees())
 
         internal fun fromRewardRows(rows: List<JsonObject>): List<ZzCashReward> = rows.mapNotNull { r ->
             val id = r.int("id") ?: return@mapNotNull null

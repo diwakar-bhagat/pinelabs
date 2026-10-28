@@ -33,7 +33,7 @@ class ZReportFormatter(private val width: Int) {
         fun rule(c: Char = '-') = add(PrintLine(c.toString().repeat(width)))
 
         center("Z-REPORT", bold = true)
-        center(z.storeName.uppercase(), bold = true)
+        center(z.storeName, bold = true) // "ZenZebra" as written
         center(z.configName)
         rule('=')
         left("Session: ${z.sessionName}")

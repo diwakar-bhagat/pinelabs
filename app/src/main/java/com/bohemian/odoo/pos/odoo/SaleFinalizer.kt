@@ -6,6 +6,7 @@ import com.bohemian.odoo.pos.data.SaleSnapshotDao
 import com.bohemian.odoo.pos.data.SaleSnapshotEntity
 import com.bohemian.odoo.pos.payment.PaymentAttempt
 import kotlinx.serialization.Serializable
+import java.math.BigDecimal
 import kotlinx.serialization.decodeFromString
 import kotlinx.serialization.encodeToString
 import kotlinx.serialization.json.Json
@@ -25,6 +26,60 @@ data class SnapshotRedemption(
     val totalInclPaise: Long = 0, val totalExclPaise: Long = 0,
     val parts: List<SnapshotRewardPart> = emptyList(),
 )
+
+/** An offer reward line as stored with the sale, priced, with its code (I4: a retry sends the same). */
+@Serializable
+data class SnapshotOfferLine(
+    val rewardId: Int, val programId: Int, val couponKey: Int, val code: String, val productId: Int, val name: String,
+    val unitPaise: Long, val qty: Int, val taxIds: List<Int>, val pointsCost: String, val rewardProductId: Int? = null,
+    val totalInclPaise: Long, val totalExclPaise: Long,
+)
+
+@Serializable
+data class SnapshotCoupon(val programId: Int, val couponKey: Int, val points: String, val correction: String = "0")
+
+@Serializable
+data class SnapshotScanned(val cardId: Int, val programId: Int, val points: String, val code: String)
+
+@Serializable
+data class SnapshotProgramInfo(val id: Int, val type: String, val appliesOn: String, val nominative: Boolean, val dateTo: String? = null)
+
+/** The offers on a sale (promotions, codes, free items), ZZ Cash aside, and the codes and coupons entered. */
+@Serializable
+data class SnapshotOffers(
+    val lines: List<SnapshotOfferLine>, val coupons: List<SnapshotCoupon>, val programs: List<SnapshotProgramInfo>,
+    val codes: List<Int> = emptyList(), val scanned: List<SnapshotScanned> = emptyList(),
+) {
+    /** What the cashier entered on the bill, so a bill brought back (a split part voided) keeps its codes. */
+    fun state() = OfferState(
+        codes = codes.toSet(),
+        claims = lines.map { Claim(it.rewardId, it.couponKey, it.rewardProductId, it.code) }.distinctBy { it.code },
+        scanned = scanned.map { ScannedCoupon(it.cardId, it.programId, BigDecimal(it.points), it.code) },
+    )
+
+    fun applied() = AppliedOffers(
+        lines = lines.map {
+            PricedOffer(OfferLine(it.rewardId, it.programId, it.couponKey, it.code, it.productId, it.name, Paise(it.unitPaise), it.qty,
+                it.taxIds, BigDecimal(it.pointsCost), it.rewardProductId), Paise(it.totalInclPaise), Paise(it.totalExclPaise))
+        },
+        coupons = coupons.map { CouponChange(it.programId, it.couponKey, BigDecimal(it.points), BigDecimal(it.correction)) },
+        programs = programs.map { OfferProgramInfo(it.id, it.type, it.appliesOn, it.nominative, it.dateTo) },
+    )
+
+    companion object {
+        fun of(o: AppliedOffers, state: OfferState = OfferState()) = SnapshotOffers(
+            lines = o.lines.map { p ->
+                val l = p.line
+                SnapshotOfferLine(l.rewardId, l.programId, l.couponKey, l.code, l.productId, l.name, l.unitPrice.value, l.qty, l.taxIds,
+                    l.pointsCost.toPlainString(), l.rewardProductId, p.totalIncl.value, p.totalExcl.value)
+            },
+            coupons = o.coupons.map { SnapshotCoupon(it.programId, it.couponKey, it.points.toPlainString(), it.correction.toPlainString()) },
+            programs = o.programs.map { SnapshotProgramInfo(it.id, it.type, it.appliesOn, it.nominative, it.dateTo) },
+            codes = state.codes.toList(),
+            scanned = state.scanned.map { SnapshotScanned(it.cardId, it.programId, it.points.toPlainString(), it.code) },
+        )
+    }
+}
 
 @Serializable
 data class SnapshotLine(
@@ -62,7 +117,16 @@ data class SaleSnapshot(
     val loyaltyProgramId: Int? = null,
     /** pos.config.default_preset_id at payment time (Pickup). */
     val presetId: Int? = null,
+    /**
+     * Paid in several parts from the split screen. Such an order is finalized only from that screen
+     * (cash is counted at Validate) or, after a crash, once its terminal parts alone cover the total.
+     */
+    val split: Boolean = false,
+    /** Offers other than ZZ Cash. Absent in snapshots written before the offers engine (0.4.0). */
+    val offers: SnapshotOffers? = null,
 ) {
+    fun appliedOffers(): AppliedOffers? = offers?.applied()
+
     fun zzRedemption(): ZzCashRedemption? = redemption?.let {
         ZzCashRedemption(
             cardId = it.cardId,
@@ -99,6 +163,9 @@ data class SaleSnapshot(
             loyaltyEarned: Paise = Paise.ZERO,
             loyaltyCardId: Int? = null,
             loyaltyProgramId: Int? = null,
+            split: Boolean = false,
+            offers: AppliedOffers? = null,
+            offerState: OfferState = OfferState(),
         ) = SaleSnapshot(
             orderUuid = orderUuid,
             sessionId = cfg.currentSessionId ?: error("no open session"),
@@ -130,8 +197,17 @@ data class SaleSnapshot(
             loyaltyCardId = loyaltyCardId,
             loyaltyProgramId = loyaltyProgramId,
             presetId = cfg.defaultPresetId,
+            split = split,
+            offers = (offers ?: AppliedOffers(emptyList(), emptyList(), emptyList()))
+                .takeIf { it.lines.isNotEmpty() || it.coupons.isNotEmpty() || offerState.codes.isNotEmpty() || offerState.scanned.isNotEmpty() }
+                ?.let { SnapshotOffers.of(it, offerState) },
         )
     }
+}
+
+/** A split bill with terminal parts paid but not yet the whole total: it must be finished or voided. */
+data class PartlyPaid(val orderUuid: String, val paid: Paise, val total: Paise) {
+    val due: Paise get() = total - paid
 }
 
 /**
@@ -144,6 +220,9 @@ class SaleFinalizer(
     private val orderSync: OrderSyncService,
     private val terminalPaymentMethodId: () -> Int,
     private val clock: () -> Long = System::currentTimeMillis,
+    /** Paid terminal attempts of an order (the payment journal); a split bill has several. */
+    private val paidAttempts: suspend (orderUuid: String) -> List<PaymentAttempt> = { emptyList() },
+    private val cashPaymentMethodId: () -> Int = { 0 },
 ) {
     private val json = Json { ignoreUnknownKeys = true }
 
@@ -151,25 +230,81 @@ class SaleFinalizer(
 
     suspend fun load(orderUuid: String): SaleSnapshot? = snapshots.get(orderUuid)?.let { json.decodeFromString<SaleSnapshot>(it.json) }
 
-    /** Card/UPI/BQR success (live or reconciled). Returns the sale for printing, or null if no snapshot. */
+    /**
+     * Card/UPI success (live or reconciled). Returns the sale for printing, or null if no snapshot.
+     * A split bill is finalized here only when its terminal parts cover the whole total; while it is
+     * partly paid this returns null and the split screen (or the red bar) finishes it.
+     */
     suspend fun finalizeTerminal(a: PaymentAttempt): PaidSale? {
         val snap = load(a.orderUuid) ?: run {
             PosLog.e("FINALIZE_NO_SNAPSHOT", null, "order" to a.orderUuid, "ref" to a.billingRef)
             return null
         }
-        return finalize(snap, PaymentLineData(terminalPaymentMethodId(), a.amount, a.mode, a.billingRef, a.details))
+        if (snap.split) {
+            val parts = paidAttempts(a.orderUuid)
+            val paid = parts.fold(Paise.ZERO) { acc, p -> acc + p.amount }
+            if (paid != snap.totals().totalIncl) {
+                PosLog.i("SPLIT_PARTLY_PAID", "order" to a.orderUuid, "paid" to paid, "total" to snap.totals().totalIncl)
+                return null
+            }
+            return finalize(snap, parts.map { it.paymentLine() })
+        }
+        return finalize(snap, a.paymentLine())
     }
 
-    suspend fun finalize(snap: SaleSnapshot, payment: PaymentLineData): PaidSale {
+    /**
+     * Validate on the split screen: every paid terminal part, plus the cash that makes up the rest.
+     * Cash is only what is still due (the change is handed back, not booked), so the payments add
+     * up to Odoo's total exactly (the server refuses anything else).
+     */
+    suspend fun finalizeSplit(snap: SaleSnapshot): PaidSale {
+        val parts = paidAttempts(snap.orderUuid)
+        val terminal = parts.fold(Paise.ZERO) { acc, p -> acc + p.amount }
+        val cash = snap.totals().totalIncl - terminal
+        require(cash.value >= 0) { "terminal parts exceed the bill" }
+        val cashLine = if (cash.isPositive) listOf(PaymentLineData(cashPaymentMethodId(), cash, null, null, null)) else emptyList()
+        return finalize(snap, parts.map { it.paymentLine() } + cashLine)
+    }
+
+    /** Split bills with some terminal parts paid but not the total (red bar; they block session close, I9). */
+    suspend fun partlyPaid(): List<PartlyPaid> = snapshots.all().mapNotNull { e ->
+        val snap = runCatching { json.decodeFromString<SaleSnapshot>(e.json) }.getOrNull() ?: return@mapNotNull null
+        val paid = paidAttempts(snap.orderUuid).fold(Paise.ZERO) { acc, p -> acc + p.amount }
+        if (paid.isPositive && paid < snap.totals().totalIncl) PartlyPaid(snap.orderUuid, paid, snap.totals().totalIncl) else null
+    }
+
+    /**
+     * App start: a sale the terminal fully paid whose order never reached the outbox (the app died
+     * in between) is finalized now, so a payment taken is never lost (HARD RULE 7).
+     */
+    suspend fun recoverPaid(): Int {
+        var recovered = 0
+        for (e in snapshots.all()) {
+            val snap = runCatching { json.decodeFromString<SaleSnapshot>(e.json) }.getOrNull() ?: continue
+            val parts = paidAttempts(snap.orderUuid)
+            if (parts.isEmpty() || parts.fold(Paise.ZERO) { acc, p -> acc + p.amount } != snap.totals().totalIncl) continue
+            PosLog.w("RECOVER_PAID_ORDER", "order" to snap.orderUuid, "parts" to parts.size)
+            finalize(snap, parts.map { it.paymentLine() })
+            recovered++
+        }
+        return recovered
+    }
+
+    private fun PaymentAttempt.paymentLine() = PaymentLineData(terminalPaymentMethodId(), amount, mode, billingRef, details)
+
+    suspend fun finalize(snap: SaleSnapshot, payment: PaymentLineData): PaidSale = finalize(snap, listOf(payment))
+
+    suspend fun finalize(snap: SaleSnapshot, payments: List<PaymentLineData>): PaidSale {
         val sale = PaidSale(
             orderUuid = snap.orderUuid, sessionId = snap.sessionId, lines = snap.cartLines(),
-            totals = snap.totals(), customer = snap.customer(), payments = listOf(payment),
+            totals = snap.totals(), customer = snap.customer(), payments = payments,
             paidAtMillis = clock(), fiscalPositionId = snap.fiscalPositionId,
             redemption = snap.zzRedemption(),
             loyaltyEarned = Paise(snap.loyaltyEarnedPaise),
             loyaltyCardId = snap.loyaltyCardId,
             loyaltyProgramId = snap.loyaltyProgramId,
             presetId = snap.presetId,
+            offers = snap.appliedOffers(),
         )
         orderSync.submit(sale)          // outbox row written first inside submit()
         snapshots.delete(snap.orderUuid)

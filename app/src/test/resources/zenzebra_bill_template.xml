@@ -1,0 +1,67 @@
+<t t-name="x_zenzebra.pos_bill">
+  <t t-call="web.html_container">
+    <t t-foreach="docs" t-as="o">
+      <t t-call="web.basic_layout">
+        <div class="page" style="font-family: Helvetica, Arial, sans-serif; font-size: 11px; color:#111;">
+          <div style="text-align:center; margin-bottom:6px;">
+            <img t-if="o.company_id.logo" t-att-src="image_data_uri(o.company_id.logo)" style="max-height:48px; max-width:160px;"/>
+            <div style="font-size:16px; font-weight:bold; letter-spacing:1px; margin-top:4px;">ZENZEBRA</div>
+            <div style="font-size:9px; color:#555;">Bohemian Curations Private Limited</div>
+            <div style="font-size:9px; color:#555;"><span t-field="o.company_id.street"/>, <span t-field="o.company_id.street2"/>, <span t-field="o.company_id.city"/> <span t-field="o.company_id.zip"/></div>
+            <div style="font-size:10px; font-weight:bold; margin-top:4px;">Store: <span t-field="o.config_id.name"/></div>
+          </div>
+          <div style="border-top:1px dashed #999; border-bottom:1px dashed #999; padding:4px 0; margin:6px 0;">
+            <table style="border:none; width:100%; font-size:10px;">
+              <tr><td style="border:none;">Bill No.</td><td style="border:none; text-align:right; font-weight:bold;"><span t-field="o.name"/></td></tr>
+              <tr><td style="border:none;">Date</td><td style="border:none; text-align:right;"><span t-field="o.date_order" t-options="{&quot;widget&quot;: &quot;datetime&quot;, &quot;format&quot;: &quot;dd MMM yyyy, hh:mm a&quot;}"/></td></tr>
+              <tr t-if="o.partner_id"><td style="border:none;">Customer</td><td style="border:none; text-align:right;"><span t-field="o.partner_id.name"/> <t t-if="o.partner_id.phone">(<span t-field="o.partner_id.phone"/>)</t></td></tr>
+              <tr><td style="border:none;">Served by</td><td style="border:none; text-align:right;"><span t-field="o.cashier"/></td></tr>
+            </table>
+          </div>
+          <table style="border:none; width:100%; border-collapse:collapse; font-size:10px;">
+            <thead>
+              <tr style="border-bottom:1px solid #333;">
+                <th style="border:none; text-align:left; padding:3px 0;">Item</th>
+                <th style="border:none; text-align:right; padding:3px 0;">Qty</th>
+                <th style="border:none; text-align:right; padding:3px 0;">Rate</th>
+                <th style="border:none; text-align:right; padding:3px 0;">Amount</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr t-foreach="o.lines" t-as="l" style="border-bottom:1px solid #eee;">
+                <td style="border:none; padding:3px 0; max-width:220px;"><span t-esc="l.full_product_name or l.product_id.display_name"/>
+                  <div t-if="l.discount" style="font-size:8px; color:#777;">Discount <t t-esc="l.discount"/>%</div>
+                  <div t-if="l.tax_ids" style="font-size:8px; color:#777;"><t t-esc="', '.join(l.tax_ids.mapped('name'))"/></div>
+                </td>
+                <td style="border:none; text-align:right; padding:3px 0; vertical-align:top;"><t t-esc="int(l.qty) if l.qty == int(l.qty) else l.qty"/></td>
+                <td style="border:none; text-align:right; padding:3px 0; vertical-align:top;"><t t-esc="'%.2f' % (l.price_subtotal_incl / l.qty if l.qty else 0)"/></td>
+                <td style="border:none; text-align:right; padding:3px 0; vertical-align:top;"><t t-esc="'%.2f' % l.price_subtotal_incl"/></td>
+              </tr>
+            </tbody>
+          </table>
+          <table style="border:none; width:100%; font-size:10px; margin-top:6px;">
+            <tr><td style="border:none; text-align:right; color:#555;">Taxable value</td><td style="border:none; text-align:right; width:80px;">Rs <t t-esc="'%.2f' % (o.amount_total - o.amount_tax)"/></td></tr>
+            <tr><td style="border:none; text-align:right; color:#555;">GST</td><td style="border:none; text-align:right;">Rs <t t-esc="'%.2f' % o.amount_tax"/></td></tr>
+            <tr style="font-size:13px; font-weight:bold; border-top:1px solid #333;"><td style="border:none; text-align:right; padding-top:4px;">TOTAL</td><td style="border:none; text-align:right; padding-top:4px;">Rs <t t-esc="'%.2f' % o.amount_total"/></td></tr>
+            <tr t-foreach="o.payment_ids" t-as="p"><td style="border:none; text-align:right; color:#555;">Paid via <t t-esc="p.payment_method_id.name"/></td><td style="border:none; text-align:right;">Rs <t t-esc="'%.2f' % p.amount"/></td></tr>
+          </table>
+          <div t-if="o.x_zz_show" style="border:1.5px solid #111; border-radius:6px; padding:8px 10px; margin:10px 0 4px 0;">
+            <div style="font-size:12px; font-weight:bold; margin-bottom:3px;">ZZ Cash</div>
+            <table style="border:none; width:100%; font-size:10px;">
+              <tr><td style="border:none;">Earned on this bill</td><td style="border:none; text-align:right;">+ Rs <t t-esc="o.x_zz_earned_txt"/></td></tr>
+              <tr t-if="o.x_zz_used"><td style="border:none;">Used on this bill</td><td style="border:none; text-align:right;">- Rs <t t-esc="o.x_zz_used_txt"/></td></tr>
+              <tr style="font-weight:bold; font-size:11px;"><td style="border:none;">Balance</td><td style="border:none; text-align:right;">Rs <t t-esc="o.x_zz_balance_txt"/></td></tr>
+              <tr t-if="o.x_zz_expiry"><td style="border:none; color:#555;">Valid till</td><td style="border:none; text-align:right; color:#555;"><t t-esc="o.x_zz_expiry"/></td></tr>
+            </table>
+            <div style="font-size:8.5px; color:#555; margin-top:5px; border-top:1px dashed #999; padding-top:4px;">You earn 6% on drinks &amp; cafe, 8% on ZenZebra own-label &amp; jewellery, 5% on beauty, fragrance, bags &amp; clothing, 2% on snacks. Bills of Rs 150+ earn 1.25x, Rs 500+ earn 1.5x.<br/>Use your balance in Rs 50 chunks on any bill of Rs 100 or more. It lasts 30 days from your last purchase; every purchase keeps it alive for 30 more.</div>
+          </div>
+          <div style="text-align:center; margin-top:8px; font-size:8px; color:#555; border-top:1px dashed #999; padding-top:6px;">
+            <div>Prices inclusive of GST. ZZ Cash: Rs 1 = Rs 1 off, not transferable or encashable, programme terms may change.</div><div>Exchange within 7 days with this bill: clothing unworn with tags, other items sealed and unused. No cash refunds. No exchange on food, beverages, cosmetics, fragrance, jewellery, innerwear or discounted items. Cashback earned on an exchanged item is reversed; cashback used on it is re-credited.</div>
+            <div style="font-weight:bold; color:#111; margin-top:4px;">Thanks for stopping by. See you at the breakspot.</div>
+            <div style="font-size:8px; margin-top:4px;">Bill ref: <span t-field="o.pos_reference"/></div>
+          </div>
+        </div>
+      </t>
+    </t>
+  </t>
+</t>

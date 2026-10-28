@@ -28,7 +28,7 @@ class CrashLogTest {
 
     @Test fun `report is written redacted and only the newest ten are kept`() {
         var now = 1_000L
-        val log = CrashLog(tmp.root) { now++ }
+        val log = CrashLog(tmp.root, build = "0.4.0 (4) PROD") { now++ }
         repeat(12) { log.write("main", IllegalStateException("phone 9876543210")) }
 
         val reports = log.reports()
@@ -36,6 +36,7 @@ class CrashLogTest {
         assertTrue(reports.first().name.endsWith("1011.txt")) // newest first
         val text = reports.first().readText()
         assertTrue(text.contains("IllegalStateException"))
+        assertTrue(text.contains("app: 0.4.0 (4) PROD")) // which build crashed
         assertTrue(text.contains("******3210"))
         assertFalse(text.contains("9876543210"))
 

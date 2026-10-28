@@ -109,19 +109,17 @@ class TicketQrTest {
 
     private fun receipt(qr: String?) = ReceiptData(
         storeName = "ZenZebra",
-        storeLines = listOf("ZenZebra - Okhla"),
-        orderRef = "ZenZebra - 000012",
-        dateTime = "23-Oct-2026 12:48",
-        items = listOf(ReceiptItem("Monster Energy drink ultra can 350ml", 1, Paise.ofRupees(125), Paise.ofRupees(125))),
-        subtotalExcl = Paise(5356),
+        companyAddress = null,
+        billNo = "ZenZebra - 000012",
+        dateTime = "23 Oct 2026, 12:48 pm",
+        customerName = "Diwakar",
+        customerPhone = null,
+        servedBy = "Ankur",
+        items = listOf(ReceiptItem("Monster Energy drink ultra can 350ml", "1", Paise.ofRupees(75), Paise.ofRupees(75))),
+        taxable = Paise(5356),
         tax = Paise(2144),
         total = Paise.ofRupees(75),
-        paymentLabel = "CASH",
-        paymentRef = null,
-        authCode = null,
-        cardLast4 = null,
-        customerName = "Diwakar",
-        footer = listOf("Thank you for shopping!"),
+        payments = listOf(ReceiptPayment("Cash", Paise.ofRupees(75))),
         eBillUrl = qr,
     )
 }

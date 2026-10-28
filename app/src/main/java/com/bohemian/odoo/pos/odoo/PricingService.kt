@@ -2,6 +2,11 @@ package com.bohemian.odoo.pos.odoo
 
 import com.bohemian.odoo.pos.core.Paise
 import com.bohemian.odoo.pos.core.sum
+import kotlinx.coroutines.async
+import kotlinx.coroutines.awaitAll
+import kotlinx.coroutines.coroutineScope
+import kotlinx.coroutines.sync.Semaphore
+import kotlinx.coroutines.sync.withPermit
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.doubleOrNull
 import kotlinx.serialization.json.jsonObject
@@ -40,16 +45,29 @@ class PricingService(
         return line.copy(totalIncl = incl, totalExcl = excl, appliedTaxIds = applied)
     }
 
-    /** Re-price a whole cart; call this whenever the customer (hence the position) changes. */
-    suspend fun priceAll(lines: List<CartLine>, position: FiscalPosition? = null): List<CartLine> =
-        lines.map { price(it, position) }
+    /**
+     * Re-price a whole cart; call this whenever the customer (hence the position) changes. Lines not
+     * in the cache are priced in parallel (at most [PARALLEL] calls at once), not one after another.
+     */
+    suspend fun priceAll(lines: List<CartLine>, position: FiscalPosition? = null): List<CartLine> = coroutineScope {
+        val gate = Semaphore(PARALLEL)
+        lines.map { line -> async { gate.withPermit { price(line, position) } } }.awaitAll()
+    }
 
     fun totals(lines: List<CartLine>): CartTotals? =
         if (lines.isEmpty() || lines.any { !it.isPriced }) null
         else CartTotals(lines.mapNotNull { it.totalIncl }.sum(), lines.mapNotNull { it.totalExcl }.sum())
 
-    /** Dropped when the fiscal position changes mid-cart is not needed — the key covers it. */
+    /**
+     * Not needed when the fiscal position changes (the key covers it). Called on every catalogue
+     * load, so a price or tax changed in Odoo is picked up without restarting the till.
+     */
     fun clearCache() = cache.clear()
+
+    private companion object {
+        /** Odoo calls in flight at once for one cart. */
+        const val PARALLEL = 4
+    }
 
     private suspend fun compute(k: Key): Pair<Paise, Paise> {
         val unit = Paise(k.unit)

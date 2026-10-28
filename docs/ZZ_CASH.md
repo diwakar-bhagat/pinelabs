@@ -113,9 +113,29 @@ What the till does now:
   (`_remove_duplicate_coupon_data`).
 - Before charging a sale with a reward, the till calls `validate_coupon_programs` (verified over JSON-2,
   read-only: `{"successful": true}` for card 535 with 34.6 points; "not enough points" for −99999).
+- **0.1.1 fix — points earned on this cart count.** Odoo's `_getRealCouponPoints` adds the points the
+  current order earns to the card balance when the program is not `applies_on='future'` (ZZ Cash is
+  `both`), and the web POS sends `validate_coupon_programs` the **net** change (earned − points_cost).
+  The till used the stored balance only and sent `−cost`, so a card under the reward could never redeem
+  (median card: 51 points). Now `ZzCashRules.available(balance, earned)` decides what is offered, a
+  reprice drops a reward the smaller cart no longer earns, and the check sends `earned − cost`.
+  Live (2026-10-27, read-only): card 535 at 34.7 points, ₹100 → `−100` refused, `66.3 − 100` accepted.
 - **Mixed tax rates** are no longer refused: the reward is split per tax group exactly like
   `_getRewardLineValuesDiscount` (₹400 on the recorded ₹4,945 cart → −164.77 at 5 % and −235.23 at 18 %),
   one line per group with the same `reward_identifier_code`; only the first carries `points_cost`.
 
 Open: a **voided** E700 sale keeps the points it earned (Odoo's refund books negative points). Fix with
 the settled-sale refund work.
+
+## 0.4.0: ZZ Cash among the store's offers (2026-10-28)
+
+- **Which stores:** ZZ Cash is the store's nominative loyalty program from Odoo's POS loader
+  (`pos.session.load_data`). A store Odoo does not give it to has no ZZ Cash on the till. Without the
+  loader (an old key, an error), the till finds the program the old way.
+- **The offers engine** (`odoo/Offers.kt`) computes the ZZ Cash reward line with the other offers:
+  - It takes off what is left after them.
+  - A ₹N off reward and a ZZ Note never stack: both are whole-bill discounts, and the larger wins, as
+    in the web POS.
+  - Earning and booking stay as before (`LoyaltyPoints`, `confirm_coupon_programs`), in one call
+    with the offers' coupons.
+

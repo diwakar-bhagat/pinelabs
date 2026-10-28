@@ -7,7 +7,13 @@ import androidx.compose.ui.graphics.ImageBitmap
 import androidx.compose.ui.graphics.asImageBitmap
 import com.bohemian.odoo.pos.core.PosLog
 import com.bohemian.odoo.pos.odoo.Product
+import kotlinx.coroutines.CompletableDeferred
+import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.sync.Semaphore
 import kotlinx.coroutines.sync.withPermit
 import kotlinx.coroutines.withContext
@@ -21,10 +27,20 @@ import java.io.File
  */
 class ProductImages(
     private val dir: File,
+    /** Runs the batched downloads, so a tile scrolled away does not cancel its neighbours' photos. */
+    private val scope: CoroutineScope,
     private val fetch: suspend (ids: List<Int>) -> Map<Int, String>,
 ) {
-    private val memory = LruCache<Int, ImageBitmap>(160)
+    /** Decoded photos, capped by memory used (not by count: a 256 px photo is ~256 KB decoded). */
+    private val memory = object : LruCache<Int, ImageBitmap>(MEMORY_BYTES) {
+        override fun sizeOf(key: Int, value: ImageBitmap) = value.width * value.height * 4
+    }
     private val network = Semaphore(3)
+
+    /** Tiles waiting for a photo; collected for [BATCH_WINDOW_MS], then fetched [BATCH] at a time. */
+    private val waiting = LinkedHashMap<Int, Pair<Product, CompletableDeferred<Unit>>>()
+    private val waitingLock = Mutex()
+    private var flushScheduled = false
 
     /** Already decoded, for the first frame of a tile. */
     fun cached(p: Product): ImageBitmap? = memory.get(p.id)
@@ -34,9 +50,7 @@ class ProductImages(
         memory.get(p.id)?.let { return it }
         return withContext(Dispatchers.IO) {
             val file = photoFile(p)
-            if (!file.exists() && !noneFile(p).exists()) {
-                network.withPermit { download(listOf(p)) }
-            }
+            if (!file.exists() && !noneFile(p).exists()) downloadBatched(p)
             if (file.exists()) decode(file)?.also { memory.put(p.id, it) } else null
         }
     }
@@ -49,6 +63,27 @@ class ProductImages(
         menu.filter { !photoFile(it).exists() && !noneFile(it).exists() }
             .chunked(BATCH).forEach { batch -> network.withPermit { download(batch) } }
         prune(catalogue)
+    }
+
+    /**
+     * Scrolling shows many tiles at once: their photos are asked for in one read of up to [BATCH]
+     * ids instead of one call per tile.
+     */
+    private suspend fun downloadBatched(p: Product) {
+        var startFlush = false
+        val done = waitingLock.withLock {
+            if (!flushScheduled) { flushScheduled = true; startFlush = true }
+            (waiting[p.id] ?: (p to CompletableDeferred<Unit>()).also { waiting[p.id] = it }).second
+        }
+        if (startFlush) scope.launch(Dispatchers.IO) { delay(BATCH_WINDOW_MS); flush() }
+        done.await()
+    }
+
+    private suspend fun flush() {
+        val batch = waitingLock.withLock { waiting.values.toList().also { waiting.clear(); flushScheduled = false } }
+        batch.chunked(BATCH).forEach { chunk ->
+            try { network.withPermit { download(chunk.map { it.first }) } } finally { chunk.forEach { it.second.complete(Unit) } }
+        }
     }
 
     private suspend fun download(batch: List<Product>) {
@@ -80,6 +115,8 @@ class ProductImages(
 
     companion object {
         private const val BATCH = 40
+        private const val BATCH_WINDOW_MS = 50L
+        private const val MEMORY_BYTES = 24 * 1024 * 1024
 
         /** `<id>-<write_date digits>.<ext>`: a new write_date in Odoo means a new file. */
         fun fileName(p: Product, ext: String): String =

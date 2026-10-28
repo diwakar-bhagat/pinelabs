@@ -112,6 +112,10 @@ interface SaleSnapshotDao {
 
     @Query("DELETE FROM sale_snapshot WHERE orderUuid = :uuid")
     suspend fun delete(uuid: String)
+
+    /** Carts saved before payment and not finalized yet (crash recovery, partly paid split bills). */
+    @Query("SELECT * FROM sale_snapshot")
+    suspend fun all(): List<SaleSnapshotEntity>
 }
 
 @Dao
@@ -159,6 +163,10 @@ interface OutboxDao {
 
     @Query("SELECT COUNT(*) FROM order_outbox")
     suspend fun count(): Int
+
+    /** The order is still waiting to reach Odoo. */
+    @Query("SELECT EXISTS(SELECT 1 FROM order_outbox WHERE orderUuid = :uuid)")
+    suspend fun contains(uuid: String): Boolean
 
     @Query("DELETE FROM order_outbox WHERE orderUuid = :uuid")
     suspend fun delete(uuid: String)

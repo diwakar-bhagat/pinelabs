@@ -11,7 +11,9 @@ import com.bohemian.odoo.pos.pine.SaleRequest
 import com.bohemian.odoo.pos.pine.TxnDetails
 import com.bohemian.odoo.pos.pine.VoidRequest
 import kotlinx.coroutines.ExperimentalCoroutinesApi
+import kotlinx.coroutines.async
 import kotlinx.coroutines.test.TestScope
+import kotlinx.coroutines.test.advanceTimeBy
 import kotlinx.coroutines.test.runTest
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertTrue
@@ -186,6 +188,86 @@ class PaymentCoordinatorTest {
         assertTrue(c.resolveManually(ref, paid = false, note = "not on terminal report") is PaymentOutcome.NotPaid)
         gw.saleResults += ok
         assertTrue(c.pay("o1", amt, PayMode.CARD) is PaymentOutcome.Paid)
+    }
+
+    // ------------------------------------------------------------------ field report 2026-10-27:
+    // restart → "Supervisor: NOT paid" did nothing, then "ZenZebra has stopped".
+
+    @Test fun `supervisor decision on an attempt already settled returns its outcome and never throws`() = runTest {
+        gw.saleResults += GatewayResult.Ambiguous("Timeout", null)
+        gw.statusResults += GatewayResult.Declined("U30", "EXPIRED") // the status check settles it first
+        val c = coordinator()
+        assertTrue(c.pay("o1", amt, PayMode.UPI) is PaymentOutcome.NotPaid)
+        val ref = journal.rows.keys.single()
+        // The supervisor's tap was queued behind the check: it must not crash, and not overwrite.
+        assertTrue(c.resolveManually(ref, paid = true, note = "late tap") is PaymentOutcome.NotPaid)
+        assertTrue(c.resolveManually(ref, paid = false, note = "double tap") is PaymentOutcome.NotPaid)
+        assertEquals(AttemptState.DECLINED, journal.rows[ref]!!.state)
+    }
+
+    @Test fun `unknown payment ref gives no outcome instead of an exception`() = runTest {
+        val c = coordinator()
+        assertEquals(null, c.resolveManually("NOPE", paid = false, note = ""))
+        assertEquals(null, c.checkAgain("NOPE"))
+    }
+
+    @Test fun `supervisor decision during a running status check wins at once and stops the check`() = runTest {
+        val c = coordinator()
+        journal.insert(PaymentAttempt("R1", "o1", amt, PayMode.UPI, AttemptState.IN_FLIGHT, "evt", createdAt = 0, updatedAt = 0))
+        val reconcile = async { c.reconcile(journal.rows["R1"]!!) }
+        advanceTimeBy(5_001) // first GetStatus done (no answer); the loop now waits, without the lock
+        assertEquals(1, gw.statusCalls)
+        assertTrue(c.resolveManually("R1", paid = false, note = "not on terminal report") is PaymentOutcome.NotPaid)
+        assertTrue(reconcile.await() is PaymentOutcome.NotPaid)
+        assertEquals(1, gw.statusCalls) // the check stopped instead of asking the terminal again
+        assertEquals(AttemptState.RESOLVED_NOT_PAID, journal.rows["R1"]!!.state)
+    }
+
+    @Test fun `a second Check status while one runs does not start another loop`() = runTest {
+        val c = coordinator()
+        journal.insert(PaymentAttempt("R1", "o1", amt, PayMode.UPI, AttemptState.UNKNOWN, "evt", createdAt = 0, updatedAt = 0))
+        val first = async { c.checkAgain("R1") }
+        advanceTimeBy(1_000)
+        assertEquals(setOf("R1"), c.checking.value)
+        assertTrue(c.checkAgain("R1") is PaymentOutcome.Unresolved) // returns at once
+        gw.statusResults += ok
+        assertTrue(first.await() is PaymentOutcome.Paid)
+        assertEquals(1, gw.statusCalls)
+        assertEquals(emptySet<String>(), c.checking.value)
+    }
+
+    // ------------------------------------------------------------------ split bills
+
+    @Test fun `split bill - a second part is charged up to the total, never beyond`() = runTest {
+        val total = Paise(50000)
+        gw.saleResults += GatewayResult.Approved(TxnDetails(rrn = "1", amountPaise = 30000))
+        gw.saleResults += GatewayResult.Approved(TxnDetails(rrn = "2", amountPaise = 20000))
+        val c = coordinator()
+        assertTrue(c.pay("o1", Paise(30000), PayMode.UPI, orderTotal = total) is PaymentOutcome.Paid)
+        assertTrue(c.pay("o1", Paise(20000), PayMode.CARD, orderTotal = total) is PaymentOutcome.Paid)
+        // Fully paid: a third charge is refused before the terminal is called.
+        assertTrue(c.pay("o1", Paise(100), PayMode.CARD, orderTotal = total) is PaymentOutcome.AlreadyPaid)
+        assertEquals(2, gw.saleCalls)
+        assertEquals(2, journal.rows.size)
+        assertEquals(2, journal.rows.keys.toSet().size) // a new billing ref per part (HARD RULE 8)
+    }
+
+    @Test fun `split bill - an unresolved part blocks the next one`() = runTest {
+        val total = Paise(50000)
+        gw.saleResults += GatewayResult.Ambiguous("Timeout", null) // card part outcome unknown
+        val c = coordinator()
+        assertTrue(c.pay("o1", Paise(30000), PayMode.CARD, orderTotal = total) is PaymentOutcome.Unresolved)
+        assertTrue(c.pay("o1", Paise(20000), PayMode.UPI, orderTotal = total) is PaymentOutcome.Blocked)
+        assertEquals(1, gw.saleCalls)
+    }
+
+    @Test fun `split bill - a part bigger than what is still due is refused`() = runTest {
+        val total = Paise(50000)
+        gw.saleResults += GatewayResult.Approved(TxnDetails(rrn = "1", amountPaise = 30000))
+        val c = coordinator()
+        c.pay("o1", Paise(30000), PayMode.UPI, orderTotal = total)
+        assertTrue(c.pay("o1", Paise(30000), PayMode.CARD, orderTotal = total) is PaymentOutcome.AlreadyPaid)
+        assertEquals(1, gw.saleCalls)
     }
 
     // ------------------------------------------------------------------ void (Phase 4b)

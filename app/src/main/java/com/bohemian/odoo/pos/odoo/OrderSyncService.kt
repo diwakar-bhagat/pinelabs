@@ -13,6 +13,7 @@ import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.jsonObject
 import java.text.SimpleDateFormat
 import java.util.Date
+import java.util.concurrent.ConcurrentHashMap
 import java.util.Locale
 import java.util.TimeZone
 import java.util.UUID
@@ -50,6 +51,8 @@ data class PaidSale(
     val loyaltyProgramId: Int? = null,
     /** pos.preset of the order (the config default, e.g. Pickup); null when presets are off. */
     val presetId: Int? = null,
+    /** Promotions, codes and free items on this sale (ZZ Cash aside). Their lines are inside [totals]. */
+    val offers: AppliedOffers? = null,
 ) {
     val amountPaid: Paise get() = payments.fold(Paise.ZERO) { a, p -> a + p.amount }
 }
@@ -115,24 +118,11 @@ class OrderSyncService(
         false
     }
 
-    /** Loyalty rows whose order is already in Odoo (its outbox row is gone). */
+    /** Loyalty rows whose order is already in Odoo (its outbox row is gone), and not being sent now. */
     private suspend fun flushLoyalty(now: Long) {
         val dao = loyalty ?: return
         val waitingOrders = outbox.due(Long.MAX_VALUE).map { it.orderUuid }.toSet()
-        for (row in dao.due(now)) if (row.orderUuid !in waitingOrders) confirmLoyalty(row)
-    }
-
-    /**
-     * The pos.order.access_token Odoo generated for this sale, used for the e-bill QR.
-     * Null when the order is not in Odoo yet (the outbox will deliver it later).
-     */
-    suspend fun accessTokenFor(uuid: String): String? {
-        val rows = odoo.call("pos.order", "search_read", jsonOf(
-            "domain" to listOf(listOf("uuid", "=", uuid)),
-            "fields" to listOf("access_token"),
-            "limit" to 1,
-        )).objects()
-        return rows.firstOrNull()?.str("access_token")?.takeIf { it.isNotBlank() }
+        for (row in dao.due(now)) if (row.orderUuid !in waitingOrders && row.orderUuid !in sending) confirmLoyalty(row)
     }
 
     /** Called by the background loop (every 30 s) and after each sale. */
@@ -159,33 +149,51 @@ class OrderSyncService(
 
     private fun backoff(attempts: Int) = minOf(15 * 60_000L, 30_000L shl minOf(attempts, 5)) // 30s → 16 min cap
 
-    private suspend fun trySend(uuid: String, payload: JsonObject, attempts: Int = 0): Boolean = try {
-        odoo.call("pos.order", "sync_from_ui", payload)
-        outbox.delete(uuid)
-        PosLog.i("ORDER_SYNCED", "uuid" to uuid)
-        loyalty?.get(uuid)?.let { confirmLoyalty(it) }
-        true
-    } catch (e: OdooException) {
-        outbox.markFailed(uuid, e.message ?: e::class.simpleName ?: "error", clock() + backoff(attempts))
-        PosLog.w("ORDER_SYNC_FAILED", "uuid" to uuid, "attempt" to (attempts + 1), "err" to e.message)
-        false
+    /**
+     * Orders being sent right now. The 30 s background loop and the live sale can reach the same
+     * order at once; only one of them sends it (and books its ZZ Cash), the other skips it.
+     */
+    private val sending: MutableSet<String> = ConcurrentHashMap.newKeySet()
+
+    private suspend fun trySend(uuid: String, payload: JsonObject, attempts: Int = 0): Boolean {
+        if (!sending.add(uuid)) return false
+        return try {
+            odoo.call("pos.order", "sync_from_ui", payload)
+            outbox.delete(uuid)
+            PosLog.i("ORDER_SYNCED", "uuid" to uuid)
+            loyalty?.get(uuid)?.let { confirmLoyalty(it) }
+            true
+        } catch (e: OdooException) {
+            outbox.markFailed(uuid, e.message ?: e::class.simpleName ?: "error", clock() + backoff(attempts))
+            PosLog.w("ORDER_SYNC_FAILED", "uuid" to uuid, "attempt" to (attempts + 1), "err" to e.message)
+            false
+        } finally {
+            sending.remove(uuid)
+        }
     }
 
     companion object {
         private fun odooUtc(millis: Long): String =
             SimpleDateFormat("yyyy-MM-dd HH:mm:ss", Locale.ROOT).apply { timeZone = TimeZone.getTimeZone("UTC") }.format(Date(millis))
 
-        /** Pure: the ZZ Cash change of this sale, or null when there is none (or no program to book it on). */
+        /**
+         * Pure: the loyalty changes of this sale for `confirm_coupon_programs`: the ZZ Cash card's, and
+         * each offer's coupon. Null when there is nothing to book.
+         */
         fun couponData(s: PaidSale): JsonObject? {
-            val programId = s.loyaltyProgramId ?: return null
-            return LoyaltyPoints.couponData(
-                programId = programId,
-                partnerId = s.customer?.id,
-                cardId = s.redemption?.cardId ?: s.loyaltyCardId,
-                earned = s.loyaltyEarned,
-                spent = s.redemption?.reward?.points ?: Paise.ZERO,
-                rewardCodes = listOfNotNull(s.redemption?.rewardCode),
-            )
+            val zz = s.loyaltyProgramId?.let { programId ->
+                LoyaltyPoints.couponData(
+                    programId = programId,
+                    partnerId = s.customer?.id,
+                    cardId = s.redemption?.cardId ?: s.loyaltyCardId,
+                    earned = s.loyaltyEarned,
+                    spent = s.redemption?.reward?.points ?: Paise.ZERO,
+                    rewardCodes = listOfNotNull(s.redemption?.rewardCode),
+                )
+            }
+            val offers = s.offers?.couponData(s.customer?.id).orEmpty()
+            if (zz == null && offers.isEmpty()) return null
+            return JsonObject(zz.orEmpty() + offers.mapValues { (_, v) -> toJson(v) })
         }
 
         /** Pure: unit-tested in OrderPayloadTest. */
@@ -208,7 +216,7 @@ class OrderSyncService(
                     "price_subtotal_incl" to l.totalIncl!!.toRupees(),
                     "note" to LineNotes.toOdoo(l.note),
                 ))
-            } + (s.redemption?.let { rewardLines(it) } ?: emptyList())
+            } + (s.redemption?.let { rewardLines(it) } ?: emptyList()) + (s.offers?.let { offerLines(it) } ?: emptyList())
             val order = mapOf(
                 "uuid" to s.orderUuid,
                 "session_id" to s.sessionId,
@@ -244,6 +252,32 @@ class OrderSyncService(
                 },
             )
             return jsonOf("orders" to listOf(order))
+        }
+
+        /**
+         * Offer reward lines as the web POS sends them (pos_order.js `_getRewardLineValues*`): on the
+         * reward's product at a negative price, flagged, with `reward_id`, `reward_identifier_code` and
+         * `points_cost`. A coupon the bill creates has no id yet: Odoo links the lines to it through
+         * their codes in `confirm_coupon_programs`; a scanned coupon keeps its own id.
+         */
+        private fun offerLines(o: AppliedOffers): List<List<Any>> = o.lines.map { p ->
+            val l = p.line
+            listOf(0, 0, mapOf(
+                "uuid" to UUID.randomUUID().toString(),
+                "product_id" to l.productId,
+                "full_product_name" to l.name,
+                "qty" to l.qty,
+                "price_unit" to l.unitPrice.toRupees(),
+                "discount" to 0,
+                "tax_ids" to listOf(listOf(6, 0, l.taxIds)),
+                "price_subtotal" to p.totalExcl.toRupees(),
+                "price_subtotal_incl" to p.totalIncl.toRupees(),
+                "is_reward_line" to true,
+                "reward_id" to l.rewardId,
+                "coupon_id" to (l.couponKey.takeIf { it > 0 } ?: false),
+                "reward_identifier_code" to l.code,
+                "points_cost" to l.pointsCost,
+            ))
         }
 
         /**

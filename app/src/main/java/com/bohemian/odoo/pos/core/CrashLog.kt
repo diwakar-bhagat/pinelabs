@@ -14,7 +14,12 @@ import java.util.Locale
  * newest [KEEP] are kept. Payment safety does not depend on this: the Reconciler and the
  * journal already recover any payment interrupted by a crash.
  */
-class CrashLog(private val dir: File, private val clock: () -> Long = System::currentTimeMillis) {
+class CrashLog(
+    private val dir: File,
+    /** "0.4.0 (4) PROD": which build crashed, so a photo of the report is enough. */
+    private val build: String = "",
+    private val clock: () -> Long = System::currentTimeMillis,
+) {
 
     /** Chains to the platform handler so Android still restarts / reports as usual. */
     fun install() {
@@ -31,7 +36,7 @@ class CrashLog(private val dir: File, private val clock: () -> Long = System::cu
         val trace = StringWriter().also { error.printStackTrace(PrintWriter(it)) }.toString()
         val stamp = SimpleDateFormat("yyyy-MM-dd HH:mm:ss Z", Locale.ROOT).format(Date(now))
         val file = File(dir, "crash-$now.txt")
-        file.writeText(redact("time: $stamp\nthread: $threadName\n\n$trace"))
+        file.writeText(redact("time: $stamp\napp: $build\nthread: $threadName\n\n$trace"))
         reports().drop(KEEP).forEach { it.delete() }
         return file
     }

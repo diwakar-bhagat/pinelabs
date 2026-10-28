@@ -14,6 +14,7 @@ import androidx.compose.ui.unit.sp
  * rich black #0A0A0A (+ #1A1A1A surfaces), cream white #F5F2EC (+ #DDD8D0 / #CFCBC4),
  * blood red #E0000F, gold #E6A525. Headings there are Montserrat 900, all caps; the E700 has
  * no Montserrat, so the till uses the system sans at Black weight with letter spacing.
+ * The brand name itself is always written "ZenZebra", never upper-cased (2026-10-27).
  */
 object Zz {
     val Black = Color(0xFF0A0A0A)
@@ -98,7 +99,7 @@ private val ZzType = Typography().let { t ->
     )
 }
 
-/** Heading style used for section titles and the top bar: heavy, all caps, tracked. */
+/** Heading style used for section titles and the top bar: heavy and tracked (caps come from the text, not the style). */
 val ZzHeading = TextStyle(fontWeight = FontWeight.Black, letterSpacing = 1.sp)
 
 @Composable

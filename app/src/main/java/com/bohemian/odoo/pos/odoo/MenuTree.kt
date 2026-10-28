@@ -53,4 +53,12 @@ class MenuTree(categories: List<PosCategory>) {
 
     /** Colour index of the product's first tab, for the bar under its tile (0 = none). */
     fun colorOf(p: Product): Int = p.categIds.firstNotNullOfOrNull { byId[it]?.color?.takeIf { c -> c != 0 } } ?: 0
+
+    companion object {
+        @Volatile private var last: Pair<List<PosCategory>, MenuTree>? = null
+
+        /** The tree for [categories], reused while the same list is passed (one list per catalogue load). */
+        fun of(categories: List<PosCategory>): MenuTree =
+            last?.takeIf { it.first === categories }?.second ?: MenuTree(categories).also { last = categories to it }
+    }
 }

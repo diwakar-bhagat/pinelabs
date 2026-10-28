@@ -131,7 +131,7 @@ class RefundService(
         internal fun eligibility(o: OdooOrder, voidAmount: Paise): String? = when {
             o.isRefund -> "This Odoo order is itself a refund"
             o.lines.isEmpty() -> "The Odoo order has no lines"
-            o.lines.any { it.isRewardLine } -> "ZZ Cash was redeemed on this bill — refund it in Odoo so the points are restored"
+            o.lines.any { it.isRewardLine } -> "A reward (ZZ Cash, an offer or a code) is on this bill — refund it in Odoo so points and coupons are restored"
             o.lines.any { it.refundedQty != 0 } -> "Part of this bill was already refunded in Odoo — finish the refund there"
             o.lines.any { it.qty <= 0 || it.discount < 0 || it.productId == 0 } -> "This bill has lines the till cannot refund — refund it in Odoo"
             o.lines.map { it.subtotalIncl }.sum() != o.amountTotal -> "Odoo line totals do not add up to the bill — refund it in Odoo"

@@ -9,7 +9,7 @@ class PosApp : Application() {
     lateinit var container: AppContainer
         private set
 
-    val crashLog by lazy { CrashLog(java.io.File(filesDir, "crash")) }
+    val crashLog by lazy { CrashLog(java.io.File(filesDir, "crash"), build = BuildInfo.label) }
 
     override fun onCreate() {
         super.onCreate()

@@ -15,6 +15,15 @@ class ZzCashServiceTest {
         "code" to JsonPrimitive("0445-91a9-4581"),
     ))
 
+    /** validate_coupon_programs gets the net change, as the web POS sends it: Odoo refuses if card < −change. */
+    @Test fun `point changes are earned minus spent`() {
+        val got = ZzCashService.pointChanges(535, earned = Paise(40144), spent = Paise.ofRupees(400))
+        assertEquals(setOf("535"), got.keys)
+        assertEquals(0, (got["535"] as java.math.BigDecimal).compareTo(java.math.BigDecimal("1.44")))
+        val noEarn = ZzCashService.pointChanges(535, earned = Paise.ZERO, spent = Paise.ofRupees(50))
+        assertEquals(0, (noEarn["535"] as java.math.BigDecimal).compareTo(java.math.BigDecimal("-50")))
+    }
+
     @Test fun `no card means no balance`() {
         assertNull(ZzCashService.fromRows(partnerId = 83, rows = emptyList()))
     }

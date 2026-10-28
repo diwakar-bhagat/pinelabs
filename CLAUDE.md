@@ -39,7 +39,7 @@ uses **Odoo 19 (Odoo Online, `zenzebra1.odoo.com`) as the system of record**.
 
 | Item | Value |
 |---|---|
-| App name | Bohemian Odoo POS |
+| App name | ZenZebra (launcher label since 0.1.1; written "ZenZebra" in the app, never upper-cased) |
 | Package (applicationId) | `com.bohemian.odoo.pos` — **never change** (registered with Pine Labs) |
 | Company | Bohemian Curations Pvt Ltd (brand: ZenZebra) |
 | Device | PAX E700 ("Aries6"), PayDroid **Android 7.1.2 (API 25)**, firmware Scorpio V10.1.32 |
@@ -63,7 +63,7 @@ uses **Odoo 19 (Odoo Online, `zenzebra1.odoo.com`) as the system of record**.
 
 Replace the existing Odoo web POS at ZenZebra's physical store with this native till app
 running on Pine Labs E700 terminals. The app handles the full sale lifecycle — catalogue
-browse/search, cart, payment via card/UPI/BQR/Cash, receipt print, customer lookup, and
+browse/search, cart, payment via card/UPI/Cash, receipt print, customer lookup, and
 ZZ Cash loyalty — while Odoo remains the single system of record. WhatsApp bill delivery
 and loyalty automations fire server-side when `pos.order` is synced.
 
@@ -321,9 +321,11 @@ components, data at rest, logging policy, kiosk requirement, money-safety summar
   side for the terminal; `SaleRequest` never carried a VPA, so the till's UPI ID fields were cosmetic.
   Removed the Setup fields, the cart toggle, `UpiPayee`/`UpiUri` and the `upi.properties` pre-fill.
 - **Brand UI:** `ui/Theme.kt`, palette read from zenzebra.in. Rich black #0A0A0A (top bar, total
-  bar, CASH), cream #F5F2EC (working areas), blood red #E0000F (CARD/UPI/BQR, alerts), gold
+  bar, CASH), cream #F5F2EC (working areas), blood red #E0000F (CARD/UPI, alerts), gold
   #E6A525 (warnings, non-PROD badge). Headings heavy, all caps (site: Montserrat 900; the E700 has
   no Montserrat, so system sans at Black weight). No hard-coded colours outside `Theme.kt`.
+  **In the app the brand name is always "ZenZebra"** (header, Setup, launcher, Z-report), never upper-cased.
+  The paper bill is the exception: it follows Odoo's "ZenZebra Bill" template, whose wordmark is "ZENZEBRA".
 - **Logo:** the ZenZebra pixel-zebra on its rich-black square (official artwork, 2026-10-27) is the
   launcher icon (rounded tile, mipmap mdpi→xxxhdpi) and sits in the header and Setup title.
 - **Security:** debug builds are no longer signed with the release key, since a debuggable build
@@ -331,6 +333,163 @@ components, data at rest, logging policy, kiosk requirement, money-safety summar
   (`res/xml/data_extraction_rules.xml`). Android lint (`lintProdRelease`): 0 errors; remaining
   warnings are accepted (targetSdk 34, fixed landscape, no x86_64, package
   visibility in `PineCheck` on Android 11+, which doesn't affect the E700's Android 7.1).
+
+### Decisions 2026-10-27 (production review, 0.1.1)
+
+Reviewed against the web POS (config 1 "ZenZebra") and the live DB.
+- **Every SKU on the till.** Odoo has 2,421 POS products; only 59 have a `pos_categ_ids`. The till
+  opened on one café tab, hid untagged products and capped every view at 200 tiles. Now:
+  `CatalogService.products(cfg)` uses the Odoo 19 POS domain (available in POS, sellable, company or
+  none, `child_of` the config's categories only when `limit_categories`), checks the result against
+  `search_count`, pages by `id`, merges by id, re-runs once if short and otherwise throws
+  `CatalogIncomplete`, so a partial catalogue is never shown or cached. The grid (`odoo/ProductGrid.kt`)
+  opens on **All**, filters the full list per tab and searches name / barcode / internal ref across
+  everything, with no caps. Logs: `CATALOG_START/PAGE/DONE/INCOMPLETE`, `CATALOG_SHOWN`, `GRID_FILTER`.
+- **ZZ Cash counts the points this cart earns** (`ZzCashRules.available`), as Odoo's
+  `_getRealCouponPoints` does for an `applies_on='both'` program, and `validate_coupon_programs` gets the
+  **net** change (earned − spent). The old `−cost` was refused by Odoo for any card under the reward
+  (live: card 535, 34.7 points, ₹100 → "not enough points"; net → accepted). "Use reward" sits on the
+  points row; loading / no card / failed + Retry are shown.
+- **Customers are saved explicitly**: Find (exact phone) or Save (name + mobile → `res.partner.create`,
+  looked up first so nobody is created twice). Payment never creates a customer; an unsaved typed
+  number blocks the charge with a message.
+- **BQR removed from the till** (CARD · UPI · CASH). `PayMode.BHARAT_QR` stays for old journal rows and
+  the Reconciler.
+- **The paper bill is Odoo's bill.** The customer's PDF on WhatsApp is the QWeb report "ZenZebra Bill"
+  (`x_zenzebra.pos_bill`, ir.ui.view 3800). After sync the till reads the order back
+  (`odoo/BillService.kt`: name, pos_reference, date, partner + phone, cashier, lines with
+  `full_product_name` / qty / `price_subtotal_incl` / discount / tax names, payments, `access_token`,
+  and the custom `x_zz_*` ZZ Cash texts, which are readable but not searchable) and prints it in the
+  template's order (`receipt/ReceiptFormatter.kt`; fixed words in `ZenZebraBill`, so they must change
+  when the template changes). The header wordmark is "ZENZEBRA" because the template prints it that way.
+  The date is local time: Odoo's PDF prints UTC (12:04 pm for a 17:34 sale), which is an Odoo user
+  time zone setting. While an order waits in the outbox the till prints its own copy, marked "Odoo bill
+  follows on WhatsApp.". The E700 card or UPI details print under "Paid via". The company logo is
+  behind a Setup switch (off), because Pine image printing is unproven; if the printer refuses it, the
+  bill prints again without the logo.
+- **Keypad is resizable**: drag the grip (snaps 0 / 36 / 48 dp per key), tap to fold; kept in
+  `DeviceSettings.keypadKeyDp`. The cart scrolls to the selected line.
+
+### Decisions 2026-10-27 (field test, 0.3.0)
+
+The terminal turned out to run an older build: the BQR tile and the balance-only reward rule were in
+0.1.0, `main` and `release-rc1`, and three builds shared versionCode 2. So the build is now **0.3.0 (3)**,
+and the version shows on the top bar and on Setup.
+- **No more "ZenZebra has stopped" after a restart.**
+  - **The crash:** the Reconciler held the payment mutex through a whole UPI status loop (3 × 5 s plus
+    GetStatus with no app timeout). "Supervisor: NOT paid" queued behind it, then hit
+    `check(!isFinal)` in an uncaught `viewModelScope.launch`.
+  - **Mutex only per call:** the status loop now takes the mutex per GetStatus only. A supervisor
+    decision wins at once and stops the loop. `resolveManually` / `checkAgain` are idempotent and
+    never throw.
+  - **No crash on a bug:** every ViewModel coroutine runs through `launchSafe` (a
+    `CoroutineExceptionHandler`), giving a local crash report plus a message, never a process kill.
+    The app scope has the same handler.
+  - **Bar and Back:** the bar shows "Checking with the terminal…" and accepts one tap per ref. Back is
+    swallowed during a payment.
+- **PENDING is not declined.** SDK 2.0.0 `TransactionStatus` is SUCCESS / FAILED / PENDING. PENDING
+  is `Ambiguous` (checked again, then review), never DECLINED, so a QR that is still payable is never
+  charged twice.
+- **Time limits.** GetStatus is limited to 45 s, then counted as unknown; print to 30 s. The sale keeps
+  the SDK's own timeout. Odoo calls are cancellable (`enqueue` + cancel) with a 40 s `callTimeout`,
+  and a non-JSON reply becomes `OdooException.Server("BadResponse")`.
+- **Latency:**
+  - pricing waits 150 ms after the last tap, cancels the old pass and drops stale results by a
+    generation counter (no stale reward or totals), and prices lines in parallel (4 at a time); its
+    cache is cleared per catalogue load;
+  - catalogue reads after `config` run together (live: 1.42 s → 0.42 s for 7 reads), the saved
+    catalogue shows first (browse only, no selling until refreshed), and mapping, sorting and the cache
+    write run off Main;
+  - "Paid" shows as soon as Odoo has the order and the bill prints behind it, with "Print again" if it
+    fails;
+  - bill reads run in parallel, with tax names cached and the phone taken from the customer;
+  - the outbox never sends one order twice at once;
+  - search waits for a pause in typing;
+  - photos are fetched 40 per read, and the photo cache is capped at 24 MB;
+  - settings are read into memory once.
+  - Product pages are still fetched one after another, which keeps the completeness check
+    deterministic.
+- **Rewards** load the earning rules with the customer, so this bill's points count before payment.
+  The ⋮ Reward is lit when a reward fits, and a missing rule set says so with a Retry.
+- **Split payment (Odoo's payment screen).** SPLIT is the 4th tile and opens `ui/PaymentScreen.kt`
+  (`PaymentSplit` rules).
+  - **Charging:** each Card / UPI line is its own attempt, capped at what is still due
+    (`pay(…, orderTotal)`). An unresolved part blocks the next.
+  - **Validate:** sends terminal parts plus cash for the rest; the change is handed back, not booked.
+  - **Part-paid bills:** the cart is locked (new bill, edits, customer, reward) and a red bar offers
+    FINISH. Session close counts them (I9).
+  - **Odoo side:** a part-paid order is never sent to Odoo. `recoverPaid` on start finalizes a fully
+    paid sale whose order never reached the outbox.
+- **Setup PIN** `core/SetupPin.kt`: 1234 until changed in Setup. Only a salted SHA-256 is stored in the
+  encrypted settings. 5 wrong tries lock it for 60 s, and the lock survives a restart. A till without
+  an Odoo key / POS opens Setup without the PIN.
+
+### Decisions 2026-10-28 (round 3, 0.4.0)
+
+- **Offers per store, as Odoo gives them** (`odoo/Offers.kt`, `odoo/OffersService.kt`).
+  - **Where they come from:** programs, rules and rewards come from Odoo's own POS loader for the till's
+    session (`pos.session.load_data`). A program limited to other stores, or out of its dates, never
+    reaches this one, and ZZ Cash is used only where Odoo gives it to the store.
+  - **Live lists, 28 Oct:**
+    - ZenZebra: ZZ Cash, ZZ Notes, Sampling, "test" coupons;
+    - KLJ: + Fugeno, its combo, the KLJ coffee code, Artiscents;
+    - HQ27GGN: + its two combos, Artiscents;
+    - Club 125: + Amity, its combo, the free Peping can, Artiscents.
+
+    A program with no Point of Sale set in Odoo reaches every store (the ZZ Notes do). Restrict it in
+    Odoo and the till follows.
+  - **The engine** is a pure port of Odoo 19 pos_loyalty (`pos_order.js` / `pos_store.js`):
+    - **Points:** order / money / unit rules with minimums.
+    - **Claimable rewards** and Odoo's auto-apply: a program with one reward applies by itself; a
+      free item that offers several is the line the cashier is on, or is picked under Reward.
+    - **Discounts:** on the order, specific products or the cheapest unit; percent / per order /
+      per point; split per tax group, each part priced by `compute_all` (I2).
+    - **Free items** come off at their own price.
+    - **Global discounts:** one whole-bill discount per bill, and the larger wins (ZZ Cash vs a ZZ
+      Note, exactly as the web POS).
+    - **Products a cheapest / specific discount covers:** the web POS works them out from the
+      reward's `reward_product_domain` itself; the till asks Odoo (`product.product.search`).
+      `[[1,"=",1]]` means every product.
+  - **Enter Code** (⋮, or a scanned code that is no product):
+    - A program code is matched exactly, then in any case, with Odoo's refusals (not yet valid,
+      expired, already activated).
+    - Other codes go to `pos.config.use_coupon_code`.
+    - Gift cards and eWallets stay with the web POS.
+  - **Booking:** reward lines go to Odoo as the web POS sends them. `confirm_coupon_programs` books
+    each program's coupon (issued 1 / used 1, linked by `line_codes`) in the same call as ZZ Cash.
+  - **Saved with the sale:** offers are stored with the sale before the charge (I4). A bill with a
+    paid part is never repriced.
+  - **Verified:** the HQ27GGN-000601 (ZZ Note ₹200) and -000613 (₹89 combo) lines come out exactly as
+    Odoo stored them from the live load.
+  - **Deliberate deviation:** a program's own free item does not count in its own minimum. Odoo's
+    does, so "free can on bills over ₹199" flips on and off with each tap.
+- **There are no ZZCASH200 / ZZCASH400 codes.** "₹200 / ₹400 off" are ZZ Cash point rewards (Reward,
+  with a customer). The codes are the ZZ Notes, the sampling code and the store codes, all in Odoo.
+- **Live Odoo data, nothing to reload** (`odoo/LiveSync.kt`). Every minute, never during a payment or
+  a split bill, the till reads:
+  - its `pos.config`;
+  - the newest `write_date` of each model it uses (products, menu, taxes and fiscal positions,
+    loyalty, note tags, company, bill template; archived records count).
+
+  Then:
+  - **Products:** only changed products are merged, and the id list drops archived ones.
+  - **Taxes:** a tax change clears the price cache.
+  - **Offers:** reload on a loyalty change, a session change, or a new day (daily combos).
+  - **Session or offline:** a session opened elsewhere updates the session only. Being back online
+    runs the full load.
+  - **Open cart:** repriced, with "Prices updated from Odoo at …".
+  - **Bill text:** the fixed words come from Odoo's "ZenZebra Bill" template by their place in it.
+  - **Header:** shows the company name from Odoo.
+- **Today's sales** (SALES in the top bar, `odoo/SalesService.kt`, `ui/SalesScreen.kt`):
+  - **What it shows:** the store's total, bills, average, first and last bill, payment methods, and
+    hour by hour.
+  - **Source:** Odoo's own grouping (`formatted_read_group` on `pos.order` / `pos.payment`), net of
+    refunds.
+  - **The day:** runs 06:00–24:00 in the Odoo user's time zone and resets by itself (hours on Setup).
+  - **Refresh:** every minute while open.
+- **Customer search by name** (2+ letters) or mobile (4+ digits), A→Z, 20 at a time, scroll for more.
+  Product search lists names starting with the query first.
+- **Crash reports** open in full on Setup and record the build that crashed.
 
 ---
 
@@ -368,7 +527,8 @@ Private (`_x`) methods are not callable.
   points (earned − spent) are booked right after with `pos.order.confirm_coupon_programs` —
   `sync_from_ui` alone never moves them (`docs/ZZ_CASH.md`, 2026-10-27).
 - **Automations:** WhatsApp bill, ZZ Cash expiry, dashboard webhook fire server-side on
-  `sync_from_ui` orders. E700 `pos.config` id must be added to their filters.
+  `sync_from_ui` orders. They have no store filter (checked 2026-10-28): the WhatsApp bill covers every
+  POS order except self-order (`source not in (mobile, kiosk)`), so E700 orders from any store get it.
 
 ---
 
@@ -481,14 +641,32 @@ company password manager + encrypted drive.
 | 3 | UPI sale, pay in time | SUCCESS |
 | 4 | UPI sale, let QR expire | GetStatus → DECLINED/expired, order open |
 | 5 | UPI sale, pay, kill app before result | Reconciler → GetStatus → SUCCESS, order synced |
-| 6 | Bharat QR sale | SUCCESS |
+| 6 | ~~Bharat QR sale~~ | Removed from the till 2026-10-27 (CARD · UPI · CASH only) |
 | 7 | Wi-Fi off after payment success | Outbox, red badge, syncs when Wi-Fi returns |
 | 8 | Void a card sale (same day) | Void accepted with `bank_code` "01" and `original_transaction_id` = sale txn id; Odoo shows a "… REFUND" order linked to the sale, stock returned, no red bar |
 | 9 | Printer out of paper | Payment still SUCCESS; "reprint" offered |
+| 9b | Cash sale with a customer; compare the paper bill with the WhatsApp PDF | Same bill no., lines, taxes, totals, payment, ZZ Cash block and bill ref; date in local time. Then switch "Print the company logo" on in Setup and sell again: logo prints, or the bill prints without it |
 | 10 | Two taps on Pay | Second tap ignored (single in-flight) |
 | 11 | Close session with an unconfirmed payment, then resolve it and close | First close blocked (I9, nothing sent to Odoo); second closes, Z-report matches Odoo's session report |
 | 12 | Kiosk on, reboot the E700, then take a card payment | Till starts by itself and is pinned; MasterApp payment screen opens normally; payment SUCCESS |
 | 13 | Wi-Fi off, restart the app | Cached catalogue shown with the yellow offline bar; pricing/payment refused with a friendly error; Retry recovers when Wi-Fi is back |
+| 14 | Open the till; scan or search a retail SKU (e.g. "Sea Breeze") | "All · 2421" tab selected; the SKU is found and added; café tabs filter the same list |
+| 15 | Customer with < ₹50 ZZ Cash buys enough to earn ≥ 50 | "Use reward" offered; ₹50 off applied; paid; Odoo shows the reward lines and the card ends at balance + earned − 50 |
+| 16 | New customer: type a new mobile, Find, enter a name, Save | "Saved: Name · ••••1234"; customer attached; partner exists once in Odoo; WhatsApp bill on payment |
+| 17 | Long cart: drag the keypad grip down, then tap it | Keypad shrinks, then folds; every cart line reachable; size kept after restart |
+| 18 | UPI sale, kill the app on the Pine screen, restart; tap "Supervisor: NOT paid" (twice) | Bar shows "Checking with the terminal…"; the tap works at once; no "has stopped"; cart can be charged again |
+| 19 | UPI, then Back on the Pine screen without paying | No hang; outcome or the bar within about a minute; the till keeps working |
+| 20 | SPLIT ₹500: UPI ₹300, then Cash ₹200 (tendered ₹500) | UPI charged for ₹300 only; Validate; change ₹300 shown; Odoo order has 2 payment lines = ₹500; bill shows both |
+| 21 | SPLIT: UPI ₹200, then Card for the rest; close the screen after UPI | Red bar "partly paid"; cart and New bill locked; FINISH reopens it; Card charges only the rest |
+| 22 | SETUP with 1234, change the PIN, wrong PIN 5 × | Setup opens; new PIN works, 1234 no longer; locked 60 s after 5 wrong tries |
+| 23 | Top bar badge | Shows "PROD · 0.4.0", so the installed build is never a guess |
+| 24 | ⋮ → Enter Code: a ZZ Note on a bill below its minimum, then add items past it | "Code accepted"; the ₹N off line appears by itself once the bill qualifies; paid; Odoo order has the reward line and the WhatsApp PDF shows it |
+| 25 | Sampling code on a 2-item bill | One unit of the cheaper item comes off |
+| 26 | At a store with a combo / Fugeno / free item (HQ27, KLJ, Club 125): the combo's two items; a free item tapped last | Discount line appears by itself; the free item comes off; ✕ takes an offer off and it stays off for this bill |
+| 27 | ZZ Cash reward and a ZZ Note on one bill | Only the larger whole-bill discount stays; the cashier is told |
+| 28 | Change a product's price (or a tax) in Odoo, wait a minute with the till open | Tile shows the new price; an open cart is repriced with "Prices updated from Odoo at …" |
+| 29 | SALES in the top bar | Today from 6 AM: total, bills, first bill, payment methods, hour by hour; equals Odoo's Orders Analysis for the store |
+| 30 | Customer: type 2+ letters of a name, scroll | Every match A→Z, more load while scrolling |
 
 ---
 
@@ -509,7 +687,8 @@ company password manager + encrypted drive.
 - **Release keystore** password was exposed in an earlier agent session. Rotate with
   `keytool -storepasswd`. The SHA-256 fingerprint is safe to share.
 - API keys stored encrypted on device (Setup screen). One key per terminal.
-- Odoo user for E700 has POS User rights only — minimal privilege.
+- Odoo user for E700: one per store, POS User rights only — minimal privilege. Not yet true: the key
+  in use is an administrator's (§13, `docs/ROLLOUT_STORES.md`).
 - `.gitignore` excludes all secrets. **The repo is public** by the owner's choice.
 - Never log: API keys, keystore passwords, card PAN, customer phone numbers.
 - Release builds strip debug-level logs.
@@ -525,7 +704,7 @@ company password manager + encrypted drive.
 - [x] Upgrade Pine SDK 1.0.0 → 2.0.0 (2026-10-24, from the Pine POS MCP; `currency` string, `invoice_number`)
 - [ ] Capture a web POS refund `sync_from_ui` payload on the UAT config and diff it against `RefundService.buildPayload` (`tools/payload_diff.py`) — 4c was built from Odoo 19 source, not a capture
 - [x] Confirm SDK 1.0.0 `init` arity and `amount` type against `classes.jar` in AAR (2026-10-23)
-- [ ] Add E700 `pos.config` id to WhatsApp / ZZ Cash automation filters in Odoo
+- [x] WhatsApp / ZZ Cash automations: no store filter to extend; E700 orders from every store are covered (checked 2026-10-28)
 - [ ] E700 printer width in dots and chars per line (measure on device)
 - [ ] Confirm `GetStatus` relevance for card sales (vs UPI/BQR only)
 - [ ] Confirm `charge_slip_print_data` vs what MasterApp auto-prints
@@ -534,10 +713,31 @@ company password manager + encrypted drive.
 - [ ] Rotate exposed release keystore password
 - [ ] Build and `apksigner`-verify the signed PROD APK at versionCode 2 / 0.1.1 (`docs/REVIEW.md` §6)
 - [ ] PAXSTORE: lock-task whitelist for `com.bohemian.odoo.pos` **and** `com.pinelabs.masterapp` (kiosk mode, UAT case 12)
-- [ ] Setup screen (kiosk switch, API key) has no supervisor PIN — any cashier can open it
+- [x] Setup screen behind a supervisor PIN (1234 by default, changeable; 0.3.0)
+- [ ] On device: which callback MasterApp sends when Back is pressed on its payment screen (logcat `PINE_RESULT` / `PINE_FAILURE`)
+- [ ] The SDK's own timeout for a sale is undocumented; the till does not cut a live payment short
+- [ ] Abandoning a split bill after a UPI part: UPI cannot be voided from the till; a supervisor refunds it in Odoo
 - [ ] A voided E700 sale keeps its earned ZZ Cash (Odoo's refund books negative points) — fix with the settled-sale refund
 - [ ] Live check of `confirm_coupon_programs` from the till: one approved cash sale, then `loyalty.history` read back
-- [ ] Odoo API key in use belongs to Ankur (internal user, res.users 28) — create a POS-User-only user for the E700 and issue its own key
+- [ ] Odoo API key in use belongs to Ankur (internal user, res.users 28), Administrator in Accounting, Inventory, POS and Sales; every E700 bill records him as cashier. Before rollout: one POS-User-only user and key per store, never one shared key (`docs/ROLLOUT_STORES.md`, "Before a store goes live" item 1)
+- [ ] Under that POS-User key, confirm `res.partner.create` (Save customer) and `loyalty.card` reads are allowed
+- [ ] Odoo's "ZenZebra Bill" PDF prints the order time in UTC (12:04 pm for a 17:34 sale): set Asia/Kolkata as the time zone of the user the WhatsApp automation runs as
+- [ ] Pine image print type for the bill logo (Setup switch, UAT 9b)
+- [ ] 2,362 of 2,421 POS products have no POS category: they show under All / search / barcode only. Tagging them into tabs is Odoo data work
+- [ ] On device: first full catalogue load time and memory with 2,421 tiles on the E700 (UAT case 14)
+- [ ] ZZ Note codes have no usage limit in Odoo (`limit_usage` off): anyone who learns one can reuse it. Odoo setting, not the app
+- [ ] Offers not supported on the till: gift cards, eWallets, coupons for a next order, pricelist-limited programs (none in use)
+- [ ] Under the POS-User key, confirm `pos.session.load_data`, `product.product.search` on reward domains, `use_coupon_code` and `formatted_read_group` on `pos.order` / `pos.payment` are allowed
+- [ ] First live sale with an offer from the till (UAT 24–27), then read `loyalty.history` and the order's reward lines back
+- [ ] A code whose program has several rewards waits for the cashier's pick under Reward; Odoo applies the only claimable one at once (no live program has several)
+- [ ] "Cash" at KLJ, SWN, HQ27GGN and Club 125 is payment method 4, type Bank (`is_cash_count` false): Setup lists no Cash method there, so an E700 refuses every cash sale ("No cash method configured"), and method 4 shows up as a Card / UPI choice in Setup. Owner / accountant to decide on a Cash-type method per store before rollout (`docs/CASE_2026-10-28_PINE_OVERPAY.md`)
+- [ ] Odoo's shared "Pine labs" method 10 is still on ZenZebra (config 1) and Club 125 (config 8): a web POS payment there rings HQ27GGN's terminal
+- [ ] Multi-store rollout checklist: `docs/ROLLOUT_STORES.md` (live check, 2026-10-28). Items still open:
+  - "Pine Labs E700 (A2A)" (method 22) is only on ZenZebra (config 1). Add it to KLJ, SWN, HQ27GGN and Club 125 (configs 2, 3, 4, 8) before their terminals are set up
+  - Web POS and E700 on one store's POS share one session, and I9 sees only the E700's own pending work: one device closes the day
+  - Change the Setup PIN from 1234 on every terminal
+  - The till ignores pricelists: today pricelist 1 only touches shelf-rental products, which are not in POS
+  - KLJ, SWN and Club 125 (Noida) and HQ27 (Gurugram) sell under company 1 (Delhi GSTIN); "ZenZebra Noida" / "ZenZebra Haryana" exist with archived POS configs. Moving a store to its state company needs a till change first (company context on every call)
 
 ---
 
@@ -562,3 +762,5 @@ in the repo root (`ODOO_URL`, `ODOO_DB`, `ODOO_USER`, `ODOO_API_KEY`). Writes ne
 | `PINE_CASE_2026-10-24.md` | Integration case for Pine: routes (AppToApp / Cloud / PadController), what works vs blocked, questions |
 | `REVIEW.md` | External review checklist (2026-10-27): findings F1–F6 with fixes, endpoint map, identity/signing, commands run, blockers |
 | `AGENT_PROMPT_E700_A2A.md` | Prompt for an on-device AI agent (adb) to run and report the App-to-App flow safely |
+| `ROLLOUT_STORES.md` | Multi-store rollout checklist: per-store Odoo user and key, E700 and Cash methods, who closes the day, terminal Setup, checks under the store key |
+| `CASE_2026-10-28_PINE_OVERPAY.md` | Case study: Odoo web POS took ₹42 by Pine on a ₹20 bill at HQ27GGN; why, the fix, and how the E700 till prevents it |
