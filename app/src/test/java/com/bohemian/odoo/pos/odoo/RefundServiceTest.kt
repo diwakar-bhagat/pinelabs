@@ -133,7 +133,7 @@ class RefundServiceTest {
 
     private fun service(): RefundService {
         val odoo = OdooJson2Client(server.url("/").toString().trimEnd('/'), "test", apiKey = { "k" })
-        return RefundService(odoo, OrderSyncService(odoo, outbox, clock = { 0 }), terminalPaymentMethodId = { 8 }, clock = { 0 })
+        return RefundService(odoo, OrderSyncService(odoo, outbox, clock = { 0 }), cardPaymentMethodId = { 8 }, clock = { 0 })
     }
 
     @Test fun `refund is read from Odoo, sent once, and leaves nothing in the outbox`() = runTest {

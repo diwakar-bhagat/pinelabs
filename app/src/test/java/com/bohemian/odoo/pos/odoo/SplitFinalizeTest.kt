@@ -63,11 +63,11 @@ class SplitFinalizeTest {
     }
     @After fun stop() { server.shutdown() }
 
-    private fun finalizer(): SaleFinalizer {
+    private fun finalizer(roles: PaymentRoles = PaymentRoles(card = 22, upi = 22, cash = 2)): SaleFinalizer {
         val sync = OrderSyncService(OdooJson2Client(server.url("/").toString().trimEnd('/'), "test", apiKey = { "k" }), outbox,
             onPayloadGenerated = { _, payload -> sent += payload })
-        return SaleFinalizer(snapshots, sync, terminalPaymentMethodId = { 22 },
-            paidAttempts = { uuid -> attempts.filter { it.orderUuid == uuid && it.state.isPaid } }, cashPaymentMethodId = { 2 })
+        return SaleFinalizer(snapshots, sync, terminalMethodFor = roles::forMode,
+            paidAttempts = { uuid -> attempts.filter { it.orderUuid == uuid && it.state.isPaid } }, cashPaymentMethodId = { roles.cash })
     }
 
     private val cfg = PosConfig(id = 1, name = "ZenZebra", currentSessionId = 391, sessionOpen = true, paymentMethodIds = listOf(2, 22),
@@ -95,6 +95,15 @@ class SplitFinalizeTest {
         f.finalizeSplit(snap)
         assertEquals(listOf(22 to 300.0, 22 to 150.0, 2 to 50.0), payments(sent.single()))
         assertNull(snapshots.rows["o1"]) // finalized: the saved cart is gone, the order is in the outbox / Odoo
+    }
+
+    @Test fun `at a store without an E700 method, card, UPI and cash go on its own Cards, UPI and Cash`() = runTest {
+        // KLJ in Odoo: Cards 5, UPI 7, a Bank-type Cash 4 (PaymentRoles.defaults).
+        val f = finalizer(PaymentRoles(card = 5, upi = 7, cash = 4))
+        val snap = saveBill(f)
+        paid("U1", 300, PayMode.UPI); paid("C1", 150, PayMode.CARD)
+        f.finalizeSplit(snap)
+        assertEquals(listOf(7 to 300.0, 5 to 150.0, 4 to 50.0), payments(sent.single()))
     }
 
     @Test fun `a partly paid split bill is never sent to Odoo from a terminal result`() = runTest {

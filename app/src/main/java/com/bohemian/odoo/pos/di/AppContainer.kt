@@ -67,6 +67,10 @@ class AppContainer(context: Context) {
     val liveSync = com.bohemian.odoo.pos.odoo.LiveSync(odoo)
     val billText = com.bohemian.odoo.pos.odoo.BillTextService(odoo)
     val offers = com.bohemian.odoo.pos.odoo.OffersService(odoo)
+    val pricelists = com.bohemian.odoo.pos.odoo.PricelistService(odoo)
+
+    /** The Odoo methods this terminal books card, UPI and cash on (Setup; `PaymentRoles.defaults`). */
+    fun paymentRoles() = com.bohemian.odoo.pos.odoo.PaymentRoles(settings.cardPaymentMethodId, settings.upiPaymentMethodId, settings.cashPaymentMethodId)
     val zzCash = com.bohemian.odoo.pos.odoo.ZzCashService(odoo)
     val orderSync = OrderSyncService(
         odoo = odoo,
@@ -85,10 +89,10 @@ class AppContainer(context: Context) {
             }
         }
     )
-    val refunds = RefundService(odoo, orderSync, terminalPaymentMethodId = { settings.terminalPaymentMethodId })
+    val refunds = RefundService(odoo, orderSync, cardPaymentMethodId = { settings.cardPaymentMethodId })
     val finalizer = SaleFinalizer(
         db.snapshots(), orderSync,
-        terminalPaymentMethodId = { settings.terminalPaymentMethodId },
+        terminalMethodFor = { mode -> paymentRoles().forMode(mode) },
         paidAttempts = { uuid -> journal.forOrder(uuid).filter { it.state.isPaid } },
         cashPaymentMethodId = { settings.cashPaymentMethodId },
     )

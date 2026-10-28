@@ -59,7 +59,8 @@ sealed interface RefundResult {
 class RefundService(
     private val odoo: OdooJson2Client,
     private val orderSync: OrderSyncService,
-    private val terminalPaymentMethodId: () -> Int,
+    /** The till's card method: voids are card only, and the refund pays back on the method the sale was booked on. */
+    private val cardPaymentMethodId: () -> Int,
     private val clock: () -> Long = System::currentTimeMillis,
 ) {
     suspend fun refundVoidedSale(void: VoidAttempt, sessionId: Int?, cardLast4: String?): RefundResult {
@@ -67,7 +68,7 @@ class RefundService(
         val order = loadOrder(void.orderUuid)
             ?: return RefundResult.NotEligible("Sale ${void.orderUuid.take(8)} is not in Odoo yet — wait for it to sync, then retry")
         eligibility(order, void.amount)?.let { return RefundResult.NotEligible(it) }
-        val payload = buildPayload(order, void, sessionId, terminalPaymentMethodId(), cardLast4, clock())
+        val payload = buildPayload(order, void, sessionId, cardPaymentMethodId(), cardLast4, clock())
         val uuid = refundUuid(void.billingRef)
         val synced = orderSync.submitPayload(uuid, payload, -void.amount.value)
         return RefundResult.Recorded(uuid, synced)

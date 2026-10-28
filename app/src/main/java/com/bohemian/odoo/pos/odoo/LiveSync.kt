@@ -5,7 +5,7 @@ import kotlinx.coroutines.awaitAll
 import kotlinx.coroutines.coroutineScope
 
 /** The parts of the till a change in Odoo can touch; each is refreshed on its own. */
-enum class LiveArea { PRODUCTS, MENU, TAXES, LOYALTY, NOTES, COMPANY, BILL_TEXT }
+enum class LiveArea { PRODUCTS, MENU, TAXES, LOYALTY, NOTES, COMPANY, BILL_TEXT, PRICELIST }
 
 /**
  * The newest `write_date` of each watched model, Odoo's own clock (the device clock never
@@ -54,6 +54,7 @@ class LiveSync(private val odoo: OdooJson2Client) {
             "pos.note" to LiveArea.NOTES,
             "res.company" to LiveArea.COMPANY,
             "ir.ui.view" to LiveArea.BILL_TEXT,
+            "product.pricelist.item" to LiveArea.PRICELIST,
         )
     }
 }

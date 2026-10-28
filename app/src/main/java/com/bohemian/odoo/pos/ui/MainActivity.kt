@@ -41,6 +41,8 @@ import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.bohemian.odoo.pos.BuildConfig
 import com.bohemian.odoo.pos.PosApp
 import com.bohemian.odoo.pos.core.Paise
+import com.bohemian.odoo.pos.odoo.PaymentRoles
+import com.bohemian.odoo.pos.odoo.PaymentMethod
 import com.bohemian.odoo.pos.odoo.ZzCashRules
 import com.bohemian.odoo.pos.payment.PaymentOutcome
 import com.bohemian.odoo.pos.payment.VoidState
@@ -116,19 +118,25 @@ fun SetupScreen(vm: PosViewModel) {
             }
         }
         if (s.methods.isNotEmpty()) {
-            Text("3. Odoo payment method for Card / UPI on this E700")
-            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                s.methods.filter { !it.isCash }.forEach { m ->
-                    FilterChip(s.terminalMethodId == m.id, { vm.setTerminalMethod(m.id) }, label = { Text(m.name) })
-                }
+            // Picked from what this store has in Odoo (PaymentRoles.defaults); tap a chosen one again to turn that tender off.
+            val terminalChoices = PaymentRoles.terminalChoices(s.methods)
+            val cashChoices = PaymentRoles.cashChoices(s.methods)
+            Text("3. Odoo payment method for Card on this E700")
+            MethodChips(terminalChoices, s.cardMethodId, vm::setCardMethod)
+            Text("4. Odoo payment method for UPI on this E700")
+            MethodChips(terminalChoices, s.upiMethodId, vm::setUpiMethod)
+            Text("5. Cash method")
+            MethodChips(cashChoices, s.cashMethodId, vm::setCashMethod)
+            val byName = s.methods.associateBy { it.id }
+            if (listOf(s.cardMethodId, s.upiMethodId).any { id -> id != 0 && byName[id]?.name?.contains("E700", true) == false }) {
+                Text("No E700 method on this POS in Odoo: card and UPI are booked on the store's own methods, as its web POS books them.",
+                    style = MaterialTheme.typography.bodySmall)
             }
-            Text("4. Cash method")
-            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                s.methods.filter { it.isCash }.forEach { m ->
-                    FilterChip(s.cashMethodId == m.id, { vm.setCashMethod(m.id) }, label = { Text(m.name) })
-                }
+            if (byName[s.cashMethodId]?.isCash == false) {
+                Text("This store's Cash is a bank-type method in Odoo: the till books the bill amount and hands the change back from the drawer.",
+                    style = MaterialTheme.typography.bodySmall)
             }
-            Text("5. Printer line width (characters)")
+            Text("6. Printer line width (characters)")
             Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                 listOf(24, 32, 48).forEach { w -> FilterChip(s.printerWidth == w, { vm.setPrinterWidth(w) }, label = { Text("$w") }) }
             }
@@ -535,3 +543,11 @@ private fun PaymentDialog(pay: PayUi, vm: PosViewModel) {
 private fun ZzLogo(size: Dp) =
     Image(painterResource(R.mipmap.ic_launcher), contentDescription = "ZenZebra", modifier = Modifier.size(size))
 
+/** One Setup step's payment method chips; says so when Odoo has none for it on this POS. */
+@Composable
+private fun MethodChips(methods: List<PaymentMethod>, selected: Int, onPick: (Int) -> Unit) {
+    if (methods.isEmpty()) { Text("None on this POS in Odoo", style = MaterialTheme.typography.bodySmall); return }
+    Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+        methods.forEach { m -> FilterChip(selected == m.id, { onPick(m.id) }, label = { Text(m.name) }) }
+    }
+}

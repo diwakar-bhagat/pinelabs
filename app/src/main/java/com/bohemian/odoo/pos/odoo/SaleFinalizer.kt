@@ -5,6 +5,7 @@ import com.bohemian.odoo.pos.core.PosLog
 import com.bohemian.odoo.pos.data.SaleSnapshotDao
 import com.bohemian.odoo.pos.data.SaleSnapshotEntity
 import com.bohemian.odoo.pos.payment.PaymentAttempt
+import com.bohemian.odoo.pos.pine.PayMode
 import kotlinx.serialization.Serializable
 import java.math.BigDecimal
 import kotlinx.serialization.decodeFromString
@@ -218,7 +219,8 @@ data class PartlyPaid(val orderUuid: String, val paid: Paise, val total: Paise) 
 class SaleFinalizer(
     private val snapshots: SaleSnapshotDao,
     private val orderSync: OrderSyncService,
-    private val terminalPaymentMethodId: () -> Int,
+    /** The Odoo payment method a terminal payment of each mode is booked on (`PaymentRoles.forMode`). */
+    private val terminalMethodFor: (PayMode) -> Int,
     private val clock: () -> Long = System::currentTimeMillis,
     /** Paid terminal attempts of an order (the payment journal); a split bill has several. */
     private val paidAttempts: suspend (orderUuid: String) -> List<PaymentAttempt> = { emptyList() },
@@ -290,7 +292,7 @@ class SaleFinalizer(
         return recovered
     }
 
-    private fun PaymentAttempt.paymentLine() = PaymentLineData(terminalPaymentMethodId(), amount, mode, billingRef, details)
+    private fun PaymentAttempt.paymentLine() = PaymentLineData(terminalMethodFor(mode), amount, mode, billingRef, details)
 
     suspend fun finalize(snap: SaleSnapshot, payment: PaymentLineData): PaidSale = finalize(snap, listOf(payment))
 

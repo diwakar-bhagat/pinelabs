@@ -27,9 +27,10 @@ class CatalogService(private val odoo: OdooJson2Client) {
 
     suspend fun paymentMethods(ids: List<Int>): List<PaymentMethod> =
         odoo.call("pos.payment.method", "read", jsonOf(
-            "ids" to ids, "fields" to listOf("name", "is_cash_count", "use_payment_terminal"),
+            "ids" to ids, "fields" to listOf("name", "is_cash_count", "use_payment_terminal", "type", "payment_method_type"),
         )).objects().map {
-            PaymentMethod(it.int("id")!!, it.str("name") ?: "?", it.bool("is_cash_count"), it.str("use_payment_terminal"))
+            PaymentMethod(it.int("id")!!, it.str("name") ?: "?", it.bool("is_cash_count"), it.str("use_payment_terminal"),
+                type = it.str("type") ?: "bank", kind = it.str("payment_method_type") ?: "none")
         }
 
     /**
@@ -132,6 +133,7 @@ class CatalogService(private val odoo: OdooJson2Client) {
         noteIds = ids("note_ids"),
         limitCategories = bool("limit_categories"),
         availableCategIds = ids("iface_available_categ_ids"),
+        pricelistId = m2oId("pricelist_id"),
     )
 
     private fun JsonObject.toProduct() = Product(
@@ -224,7 +226,7 @@ class CatalogService(private val odoo: OdooJson2Client) {
             "name", "current_session_id", "current_session_state", "payment_method_ids",
             "company_id", "invoice_journal_id", "default_fiscal_position_id", "fiscal_position_ids",
             "cash_control", "manual_discount", "default_preset_id", "note_ids",
-            "limit_categories", "iface_available_categ_ids",
+            "limit_categories", "iface_available_categ_ids", "pricelist_id",
         )
 
         /**

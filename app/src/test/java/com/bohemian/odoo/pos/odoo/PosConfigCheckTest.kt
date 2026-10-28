@@ -24,23 +24,35 @@ class PosConfigCheckTest {
         paymentMethodIds = listOf(1, 5), companyName = "ZenZebra")
 
     @Test fun `saved methods still on the config pass`() {
-        assertNull(cfg.paymentMethodProblem(terminalMethodId = 5, cashMethodId = 1))
+        assertNull(cfg.paymentMethodProblem(PaymentRoles(card = 5, upi = 5, cash = 1)))
     }
 
-    @Test fun `no cash method set is allowed`() {
-        assertNull(cfg.paymentMethodProblem(terminalMethodId = 5, cashMethodId = 0))
+    @Test fun `a tender left off is allowed`() {
+        assertNull(cfg.paymentMethodProblem(PaymentRoles(card = 5, upi = 5)))
+        assertNull(cfg.paymentMethodProblem(PaymentRoles(cash = 1)))
     }
 
-    @Test fun `terminal method removed from the config is refused`() {
-        assertNotNull(cfg.paymentMethodProblem(terminalMethodId = 7, cashMethodId = 1))
+    @Test fun `card method removed from the config is refused`() {
+        assertNotNull(cfg.paymentMethodProblem(PaymentRoles(card = 7, upi = 5, cash = 1)))
     }
 
-    @Test fun `terminal method never set is refused`() {
-        assertNotNull(cfg.paymentMethodProblem(terminalMethodId = 0, cashMethodId = 1))
+    @Test fun `UPI method removed from the config is refused`() {
+        assertNotNull(cfg.paymentMethodProblem(PaymentRoles(card = 5, upi = 7, cash = 1)))
+    }
+
+    @Test fun `no method at all is refused`() {
+        assertNotNull(cfg.paymentMethodProblem(PaymentRoles()))
     }
 
     @Test fun `cash method removed from the config is refused`() {
-        assertNotNull(cfg.paymentMethodProblem(terminalMethodId = 5, cashMethodId = 8))
+        assertNotNull(cfg.paymentMethodProblem(PaymentRoles(card = 5, upi = 5, cash = 8)))
+    }
+
+    @Test fun `the store's pricelist is read with the config`() = runTest {
+        server.enqueue(MockResponse().setBody(
+            """[{"id": 2, "name": "KLJ", "current_session_id": false, "current_session_state": false,
+               "payment_method_ids": [1, 4, 5, 6, 7, 20], "company_id": [1, "ZenZebra"], "pricelist_id": [1, "Default (INR)"]}]"""))
+        assertEquals(1, catalog().config(2)!!.pricelistId)
     }
 
     @Test fun `archived or deleted config reads as null`() = runTest {

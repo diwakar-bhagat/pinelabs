@@ -48,6 +48,8 @@ import com.bohemian.odoo.pos.odoo.OdooException
 import com.bohemian.odoo.pos.odoo.PaidSale
 import com.bohemian.odoo.pos.odoo.PaymentLineData
 import com.bohemian.odoo.pos.odoo.PaymentMethod
+import com.bohemian.odoo.pos.odoo.PaymentRoles
+import com.bohemian.odoo.pos.odoo.PricelistHold
 import com.bohemian.odoo.pos.odoo.PosConfig
 import com.bohemian.odoo.pos.odoo.Product
 import com.bohemian.odoo.pos.odoo.SaleSnapshot
@@ -115,7 +117,9 @@ data class SetupState(
     val configs: List<PosConfig> = emptyList(),
     val selectedConfig: PosConfig? = null,
     val methods: List<PaymentMethod> = emptyList(),
-    val terminalMethodId: Int = 0,
+    /** Odoo methods for card, UPI and cash on this terminal (0 = off); picked by `PaymentRoles.defaults`. */
+    val cardMethodId: Int = 0,
+    val upiMethodId: Int = 0,
     val cashMethodId: Int = 0,
     val printerWidth: Int = 24,
     val useFake: Boolean = false,
@@ -390,27 +394,33 @@ class PosViewModel(private val c: AppContainer) : ViewModel() {
 
     fun selectConfig(cfg: PosConfig) = launchSetup {
         val methods = c.catalog.paymentMethods(cfg.paymentMethodIds)
+        // The same store as before keeps the methods chosen for it; another store starts from Odoo's.
+        val saved = c.paymentRoles().takeIf { cfg.id == c.settings.posConfigId && it.any && it.ids.all { id -> id in cfg.paymentMethodIds } }
+        val roles = saved ?: PaymentRoles.defaults(methods)
         _setup.update {
-            it.copy(
-                selectedConfig = cfg, methods = methods,
-                cashMethodId = methods.firstOrNull { m -> m.isCash }?.id ?: 0,
-                terminalMethodId = methods.firstOrNull { m -> !m.isCash && m.name.contains("E700", true) }?.id ?: 0,
-            )
+            it.copy(selectedConfig = cfg, methods = methods, cardMethodId = roles.card, upiMethodId = roles.upi, cashMethodId = roles.cash)
         }
     }
 
-    fun setTerminalMethod(id: Int) = _setup.update { it.copy(terminalMethodId = id) }
-    fun setCashMethod(id: Int) = _setup.update { it.copy(cashMethodId = id) }
+    /** Tap a method chip: choose it, or tap the chosen one again to take that tender off this till. */
+    fun setCardMethod(id: Int) = _setup.update { it.copy(cardMethodId = if (it.cardMethodId == id) 0 else id) }
+    fun setUpiMethod(id: Int) = _setup.update { it.copy(upiMethodId = if (it.upiMethodId == id) 0 else id) }
+    fun setCashMethod(id: Int) = _setup.update { it.copy(cashMethodId = if (it.cashMethodId == id) 0 else id) }
     fun setPrinterWidth(w: Int) = _setup.update { it.copy(printerWidth = w) }
     fun setUseFake(v: Boolean) = _setup.update { it.copy(useFake = v) }
 
     fun finishSetup() {
         val s = _setup.value
         val cfg = s.selectedConfig ?: return _setup.update { it.copy(error = "Choose a POS") }
-        if (s.terminalMethodId == 0) return _setup.update { it.copy(error = "Choose the Odoo payment method for E700 card/UPI") }
+        if (s.cardMethodId == 0 && s.upiMethodId == 0 && s.cashMethodId == 0) {
+            return _setup.update { it.copy(error = "Choose at least one Odoo payment method: card, UPI or cash") }
+        }
         c.settings.posConfigId = cfg.id
         c.settings.posConfigName = cfg.name
-        c.settings.terminalPaymentMethodId = s.terminalMethodId
+        c.settings.cardPaymentMethodId = s.cardMethodId
+        c.settings.upiPaymentMethodId = s.upiMethodId
+        // Read by builds before 0.5.0, should this terminal ever go back to one.
+        c.settings.terminalPaymentMethodId = if (s.cardMethodId != 0) s.cardMethodId else s.upiMethodId
         c.settings.cashPaymentMethodId = s.cashMethodId
         c.settings.printerWidth = s.printerWidth
         c.settings.useFakeGateway = BuildConfig.DEBUG && s.useFake
@@ -521,7 +531,7 @@ class PosViewModel(private val c: AppContainer) : ViewModel() {
                 return@launchSafe
             }
             // No config in the state = no selling (prepareSnapshot), until Setup fixes it.
-            cfg.paymentMethodProblem(c.settings.terminalPaymentMethodId, c.settings.cashPaymentMethodId)?.let { problem ->
+            cfg.paymentMethodProblem(c.paymentRoles())?.let { problem ->
                 _sell.update { it.copy(config = null, loading = false, error = problem) }
                 return@launchSafe
             }
@@ -556,6 +566,9 @@ class PosViewModel(private val c: AppContainer) : ViewModel() {
                     cfg.companyId?.let { id -> runCatching { c.bills.companyAddress(id) }.onFailure { PosLog.w("BILL_ADDRESS_FAILED", "err" to it.message) }.getOrNull() }
                 }
                 val billTextJob = async { runCatching { c.billText.load() }.onFailure { PosLog.w("BILL_TEXT_FAILED", "err" to it.message) }.getOrNull() }
+                // Products the store's pricelist prices differently from the list price: not sold here.
+                // Like the products, a failed read fails the load (never sell without knowing).
+                val pricelistJob = async { c.pricelists.hold(cfg, SalesService.utc(System.currentTimeMillis())) }
                 val products = productsJob.await()
                 val taxIds = products.flatMap { it.taxIds }.toSet()
                 val primeJob = async { c.fiscalPositions.primeTaxFiscalPositions(taxIds.toList()) }
@@ -563,12 +576,13 @@ class PosViewModel(private val c: AppContainer) : ViewModel() {
                 val positions = fposJob.await()
                 primeJob.await()
                 Loaded(products, positions, zzJob.await(), categoriesJob.await(), notesJob.await(), addressJob.await(), taxNamesJob.await(),
-                    stampsJob.await(), billTextJob.await(), offersJob.await())
+                    stampsJob.await(), billTextJob.await(), offersJob.await(), pricelistJob.await())
             }
             if (generation != catalogGeneration) return@launchSafe // a newer load owns the screen
             val (products, positions, zz, categories, notes, address, names) = loaded
             liveStamps = loaded.stamps
             loaded.billText?.let { billText = it }
+            usePricelistHold(loaded.pricelist)
             useOffers(loaded.offers)
             fiscalPositionsById = positions
             zzProgram = zz.first
@@ -647,6 +661,7 @@ class PosViewModel(private val c: AppContainer) : ViewModel() {
         val billText: BillText?,
         /** Null when Odoo's loader could not be read: no offers, ZZ Cash found the old way. */
         val offers: List<OfferProgram>?,
+        val pricelist: PricelistHold,
     )
 
     // ------------------------------------------------------------------ live Odoo data
@@ -693,7 +708,7 @@ class PosViewModel(private val c: AppContainer) : ViewModel() {
         val old = liveStamps ?: return run { liveStamps = c.liveSync.read() }
         val current = s.config ?: return reloadAll()
         val cfg = c.catalog.config(c.settings.posConfigId)
-        if (cfg == null || cfg.paymentMethodProblem(c.settings.terminalPaymentMethodId, c.settings.cashPaymentMethodId) != null) {
+        if (cfg == null || cfg.paymentMethodProblem(c.paymentRoles()) != null) {
             return reloadAll() // shows why selling stopped
         }
         if (cfg != current) {
@@ -782,6 +797,10 @@ class PosViewModel(private val c: AppContainer) : ViewModel() {
             cartChanged = true // any offer may now apply, or stop applying, to the open cart
         }
         if (LiveArea.BILL_TEXT in changed) c.billText.load()?.let { billText = it }
+        // A new rule, or a new product in a category a rule covers.
+        if (LiveArea.PRICELIST in changed || LiveArea.PRODUCTS in changed) {
+            usePricelistHold(c.pricelists.hold(cfg, SalesService.utc(System.currentTimeMillis())))
+        }
         return cartChanged
     }
 
@@ -804,6 +823,18 @@ class PosViewModel(private val c: AppContainer) : ViewModel() {
     // ------------------------------------------------------------------ offers (Odoo pos_loyalty)
 
     /** The store's offer programs for this session, from Odoo's own POS loader. */
+    /** Products whose price the store's Odoo pricelist sets: the till charges list prices only (`PricelistService`). */
+    private var pricelistHold = PricelistHold.NONE
+
+    private fun usePricelistHold(hold: PricelistHold) {
+        if (hold != pricelistHold) PosLog.i("PRICELIST_HOLD", "pricelist" to hold.pricelistId, "all" to hold.everything, "products" to hold.productIds.size)
+        pricelistHold = hold
+    }
+
+    private fun pricelistRefusal(p: Product): String? =
+        if (!pricelistHold.holds(p.id)) null
+        else "${p.name}: Odoo's pricelist for this store sets its price, which this till cannot charge yet. Sell it on the web POS."
+
     private var offerPrograms: List<OfferProgram> = emptyList()
 
     /** Odoo's loader answered for this session (an empty list is a store without offers). */
@@ -1195,6 +1226,7 @@ class PosViewModel(private val c: AppContainer) : ViewModel() {
     }
 
     fun add(p: Product) {
+        pricelistRefusal(p)?.let { msg -> _sell.update { it.copy(error = msg) }; return }
         var selected: String? = null
         editCart { lines ->
             val i = lines.indexOfFirst { it.product.id == p.id }
@@ -1630,6 +1662,7 @@ class PosViewModel(private val c: AppContainer) : ViewModel() {
 
     fun payWithTerminal(mode: PayMode) = launchPay {
         if (lockedByPartPayment()) return@launchPay
+        if (c.paymentRoles().forMode(mode) == 0) { _sell.update { it.copy(error = "${mode.label()} is not set up on this till (Setup)") }; return@launchPay }
         val snap = prepareSnapshot() ?: return@launchPay
         _sell.update { it.copy(pay = PayUi.Working(mode.label(), "Complete the payment on the terminal…")) }
         val outcome = c.payments.pay(snap.orderUuid, snap.totals().totalIncl, mode, snap.customerPhone?.takeLast(10))
@@ -1673,7 +1706,7 @@ class PosViewModel(private val c: AppContainer) : ViewModel() {
     }
 
     private fun cashMethod() = PaymentMethod(c.settings.cashPaymentMethodId, "Cash", isCash = true, terminal = null)
-    private fun terminalMethod(mode: PayMode) = PaymentMethod(c.settings.terminalPaymentMethodId, mode.label(), isCash = false, terminal = null)
+    private fun terminalMethod(mode: PayMode) = PaymentMethod(c.paymentRoles().forMode(mode), mode.label(), isCash = false, terminal = null)
 
     /** SPLIT on the pay row: save the cart (HARD RULE 4) and open Odoo's payment screen for it. */
     fun openSplit() = launchPay {
@@ -1718,6 +1751,9 @@ class PosViewModel(private val c: AppContainer) : ViewModel() {
             _split.value = ui.copy(message = "No cash method is set up for this till (Setup)."); return
         }
         val mode = when (kind) { SplitKind.CASH -> null; SplitKind.CARD -> PayMode.CARD; SplitKind.UPI -> PayMode.UPI }
+        if (mode != null && c.paymentRoles().forMode(mode) == 0) {
+            _split.value = ui.copy(message = "${mode.label()} is not set up for this till (Setup)."); return
+        }
         val method = mode?.let { terminalMethod(it) } ?: cashMethod()
         _split.value = ui.split.add(UUID.randomUUID().toString(), method, mode = mode)
             .fold({ ui.copy(split = it, entry = "", message = null) }, { ui.copy(message = it.message) })
@@ -1839,6 +1875,8 @@ class PosViewModel(private val c: AppContainer) : ViewModel() {
         if (earlier) return c.finalizer.load(s.orderUuid)?.let { snap ->
             if (split && !snap.split) snap.copy(split = true).also { c.finalizer.save(it) } else snap
         }
+        // A pricelist rule may have reached a product after it was added to the cart.
+        s.lines.firstNotNullOfOrNull { pricelistRefusal(it.product) }?.let { msg -> _sell.update { it.copy(error = msg) }; return null }
         val customer = s.customer ?: run {
             if (s.phone.isBlank()) return@run null
             if (!CustomerService.isPhoneQuery(s.phone)) return null.also {

@@ -32,6 +32,8 @@ data class PosConfig(
      */
     val limitCategories: Boolean = false,
     val availableCategIds: List<Int> = emptyList(),
+    /** pos.config.pricelist_id: the store's default pricelist, which the web POS prices every order with. */
+    val pricelistId: Int? = null,
 ) {
     /**
      * Why the payment methods saved on this terminal no longer fit this config, or null.
@@ -39,10 +41,13 @@ data class PosConfig(
      * charged on the terminal would sit in the outbox forever (HARD RULE 7). Checked on
      * every catalogue load; 0 = not set.
      */
-    fun paymentMethodProblem(terminalMethodId: Int, cashMethodId: Int): String? = when {
-        terminalMethodId !in paymentMethodIds ->
-            "The E700 payment method is no longer on $name in Odoo. Open Setup and choose it again."
-        cashMethodId != 0 && cashMethodId !in paymentMethodIds ->
+    fun paymentMethodProblem(roles: PaymentRoles): String? = when {
+        !roles.any -> "No payment method is set up for $name on this till. Open Setup and choose them."
+        roles.card != 0 && roles.card !in paymentMethodIds ->
+            "The card method is no longer on $name in Odoo. Open Setup and choose it again."
+        roles.upi != 0 && roles.upi !in paymentMethodIds ->
+            "The UPI method is no longer on $name in Odoo. Open Setup and choose it again."
+        roles.cash != 0 && roles.cash !in paymentMethodIds ->
             "The cash method is no longer on $name in Odoo. Open Setup and choose it again."
         else -> null
     }
@@ -88,7 +93,19 @@ data class FiscalPosition(
     val taxIds: List<Int>,
 )
 
-data class PaymentMethod(val id: Int, val name: String, val isCash: Boolean, val terminal: String?)
+/**
+ * pos.payment.method. [isCash] is `is_cash_count`; [terminal] is `use_payment_terminal` (a device Odoo
+ * drives itself); [type] is cash / bank / online / pay_later; [kind] is `payment_method_type` (none /
+ * terminal / qr_code).
+ */
+data class PaymentMethod(
+    val id: Int,
+    val name: String,
+    val isCash: Boolean,
+    val terminal: String?,
+    val type: String = "bank",
+    val kind: String = "none",
+)
 
 data class Product(
     val id: Int,

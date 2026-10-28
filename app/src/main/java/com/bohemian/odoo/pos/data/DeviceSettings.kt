@@ -45,10 +45,20 @@ class DeviceSettings(context: Context) : PinStore {
         get() = read("pos_config_name") { prefs.getString("pos_config_name", "") ?: "" }
         set(v) = write("pos_config_name", v) { putString("pos_config_name", v) }
 
-    /** Odoo pos.payment.method used for Card/UPI taken on the E700. */
+    /** Before 0.5.0: the one Odoo pos.payment.method for Card and UPI. Card and UPI fall back to it. */
     var terminalPaymentMethodId: Int
         get() = read("terminal_pm_id") { prefs.getInt("terminal_pm_id", 0) }
         set(v) = write("terminal_pm_id", v) { putInt("terminal_pm_id", v) }
+
+    /** Odoo pos.payment.method for card taken on the E700 (0 = no card on this till). */
+    var cardPaymentMethodId: Int
+        get() = read("card_pm_id") { prefs.getInt("card_pm_id", terminalPaymentMethodId) }
+        set(v) = write("card_pm_id", v) { putInt("card_pm_id", v) }
+
+    /** Odoo pos.payment.method for UPI taken on the E700 (0 = no UPI on this till). */
+    var upiPaymentMethodId: Int
+        get() = read("upi_pm_id") { prefs.getInt("upi_pm_id", terminalPaymentMethodId) }
+        set(v) = write("upi_pm_id", v) { putInt("upi_pm_id", v) }
 
     var cashPaymentMethodId: Int
         get() = read("cash_pm_id") { prefs.getInt("cash_pm_id", 0) }
@@ -114,5 +124,6 @@ class DeviceSettings(context: Context) : PinStore {
         set(v) = write("sales_day_end", v) { putInt("sales_day_end", v) }
 
     val isConfigured: Boolean
-        get() = !odooApiKey.isNullOrBlank() && posConfigId > 0 && terminalPaymentMethodId > 0
+        get() = !odooApiKey.isNullOrBlank() && posConfigId > 0 &&
+            (cardPaymentMethodId > 0 || upiPaymentMethodId > 0 || cashPaymentMethodId > 0)
 }
