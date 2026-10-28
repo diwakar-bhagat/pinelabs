@@ -104,9 +104,8 @@ data class SetupState(
     val kioskMode: Boolean = false,
     /** Company logo at the top of the bill (Pine image printing still to be proven on the E700). */
     val printLogo: Boolean = false,
-    /** Local crash reports (newest first): count and the first lines of the latest. */
-    val crashCount: Int = 0,
-    val latestCrash: String? = null,
+    /** Local crash reports, newest first, full redacted text (at most CrashLog.KEEP). */
+    val crashReports: List<String> = emptyList(),
     val busy: Boolean = false,
     val error: String? = null,
     /** Result of "Change PIN" on the Setup screen. */
@@ -292,7 +291,7 @@ class PosViewModel(private val c: AppContainer) : ViewModel() {
 
     private fun SetupState.withCrashes(): SetupState {
         val reports = c.crashLog.reports()
-        return copy(crashCount = reports.size, latestCrash = reports.firstOrNull()?.readLines()?.take(12)?.joinToString("\n"))
+        return copy(crashReports = reports.mapNotNull { f -> runCatching { f.readText() }.getOrNull() })
     }
 
     /** Takes effect at once; MainActivity applies lock task on resume, Setup applies it on toggle. */
@@ -418,7 +417,7 @@ class PosViewModel(private val c: AppContainer) : ViewModel() {
     }
 
     /** "0.3.0 (3)": shown on Setup and the top bar, so the installed build is never a guess. */
-    val versionLabel = "${BuildConfig.VERSION_NAME} (${BuildConfig.VERSION_CODE})"
+    val versionLabel = com.bohemian.odoo.pos.BuildInfo.version
 
     private fun launchSetup(block: suspend () -> Unit) = launchSafe {
         _setup.update { it.copy(busy = true, error = null) }

@@ -43,7 +43,7 @@ class AppContainer(context: Context) {
 
     val settings = DeviceSettings(context)
     /** Reads the reports PosApp's installed handler writes (same private dir). */
-    val crashLog = com.bohemian.odoo.pos.core.CrashLog(java.io.File(context.filesDir, "crash"))
+    val crashLog = com.bohemian.odoo.pos.core.CrashLog(java.io.File(context.filesDir, "crash"), build = com.bohemian.odoo.pos.BuildInfo.label)
     val db = AppDatabase.create(context)
 
     val odoo = OdooJson2Client(BuildConfig.ODOO_BASE_URL, BuildConfig.ODOO_DB, apiKey = { settings.odooApiKey })

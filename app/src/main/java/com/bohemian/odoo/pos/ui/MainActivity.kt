@@ -29,7 +29,6 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.ImeAction
 import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.text.input.PasswordVisualTransformation
-import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import com.bohemian.odoo.pos.R
@@ -155,11 +154,7 @@ fun SetupScreen(vm: PosViewModel) {
             Switch(s.printLogo, { vm.setPrintLogo(it) }); Spacer(Modifier.width(8.dp))
             Text("Print the company logo on bills, as on Odoo's PDF (if the printer refuses it, the bill prints without it)")
         }
-        Row(verticalAlignment = Alignment.CenterVertically) {
-            Text(if (s.crashCount == 0) "No crash reports." else "${s.crashCount} crash report(s) on this terminal.", Modifier.weight(1f))
-            if (s.crashCount > 0) OutlinedButton({ vm.clearCrashReports() }) { Text("Clear") }
-        }
-        s.latestCrash?.let { Text(it, fontSize = 11.sp, maxLines = 12, overflow = TextOverflow.Ellipsis) }
+        CrashReportsRow(s.crashReports, vm)
         var pineReport by remember { mutableStateOf<String?>(null) }
         OutlinedButton({ pineReport = PineCheck.report(activity, BuildConfig.PINE_APPLICATION_ID, BuildConfig.PINE_SDK_PRESENT) }) {
             Text("Check Pine payment app")
@@ -189,6 +184,40 @@ private fun ChangePinRow(s: SetupState, vm: PosViewModel) {
             enabled = current.isNotEmpty() && new.isNotEmpty() && confirm.isNotEmpty()) { Text("Change PIN") }
     }
     s.pinMessage?.let { Text(it, color = if (s.pinChanged) Zz.Green else MaterialTheme.colorScheme.error, fontSize = 13.sp) }
+}
+
+/**
+ * Crash reports kept on this terminal (redacted, newest first). "Show" opens the whole text with
+ * the build that crashed, so a photo of the screen is enough to find the cause.
+ */
+@Composable
+private fun CrashReportsRow(reports: List<String>, vm: PosViewModel) {
+    var shown by remember { mutableStateOf<Int?>(null) }
+    Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+        Text(if (reports.isEmpty()) "No crash reports." else "${reports.size} crash report(s) on this terminal. Latest: " +
+            reports.first().lineSequence().firstOrNull { it.startsWith("time:") }?.removePrefix("time:")?.trim().orEmpty(),
+            Modifier.weight(1f))
+        if (reports.isNotEmpty()) {
+            OutlinedButton({ shown = 0 }) { Text("Show") }
+            OutlinedButton({ vm.clearCrashReports(); shown = null }) { Text("Clear") }
+        }
+    }
+    val i = shown?.takeIf { it in reports.indices } ?: return
+    AlertDialog(
+        onDismissRequest = { shown = null },
+        title = { Text("Crash report ${i + 1} of ${reports.size} · this till ${vm.versionLabel}", fontWeight = FontWeight.Bold) },
+        text = {
+            Text(reports[i], Modifier.heightIn(max = 420.dp).verticalScroll(rememberScrollState()),
+                fontFamily = androidx.compose.ui.text.font.FontFamily.Monospace, fontSize = 11.sp, lineHeight = 14.sp)
+        },
+        confirmButton = { Button({ shown = null }) { Text("Close") } },
+        dismissButton = {
+            Row {
+                TextButton({ shown = i - 1 }, enabled = i > 0) { Text("Newer") }
+                TextButton({ shown = i + 1 }, enabled = i < reports.lastIndex) { Text("Older") }
+            }
+        },
+    )
 }
 
 /** The hours of the sales day on SALES (default 6:00 AM to midnight). */
