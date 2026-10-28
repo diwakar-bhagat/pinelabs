@@ -3,6 +3,8 @@ package com.bohemian.odoo.pos.odoo
 import com.bohemian.odoo.pos.core.PosLog
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.int
+import kotlinx.serialization.json.intOrNull
+import kotlinx.serialization.json.jsonArray
 import kotlinx.serialization.json.jsonPrimitive
 
 class CatalogService(private val odoo: OdooJson2Client) {
@@ -63,8 +65,7 @@ class CatalogService(private val odoo: OdooJson2Client) {
         while (true) {
             val page = odoo.call("product.product", "search_read", jsonOf(
                 "domain" to domain,
-                "fields" to listOf("display_name", "lst_price", "barcode", "default_code", "taxes_id", "l10n_in_hsn_code",
-                    "pos_categ_ids", "write_date"),
+                "fields" to PRODUCT_FIELDS,
                 "order" to "id", // stable while paging; the grid is sorted by name afterwards
                 "limit" to pageSize,
                 "offset" to offset,
@@ -87,6 +88,31 @@ class CatalogService(private val odoo: OdooJson2Client) {
             "duplicates" to duplicates, "uncategorised" to byId.values.count { it.categIds.isEmpty() }, "end" to end)
         return ProductPass(expected, byId.values.toList())
     }
+
+    /**
+     * Live sync: the products of [cfg] whose product or template (price, taxes, name, POS flags)
+     * changed at or after [sinceUtc], Odoo's own write_date. Null when more changed than one page
+     * holds (a bulk import): then the full load is the right tool.
+     */
+    suspend fun productsChangedSince(cfg: PosConfig, sinceUtc: String): List<Product>? {
+        val rows = odoo.call("product.product", "search_read", jsonOf(
+            "domain" to productDomain(cfg) + listOf("|", listOf("write_date", ">=", sinceUtc), listOf("product_tmpl_id.write_date", ">=", sinceUtc)),
+            "fields" to PRODUCT_FIELDS,
+            "order" to "id",
+            "limit" to PAGE_SIZE,
+        )).objects()
+        return if (rows.size >= PAGE_SIZE) null else rows.map { it.toProduct() }
+    }
+
+    /** Ids of every product [cfg] may sell now (2,421 ids in 0.3 s): archived ones drop out, new ones show. */
+    suspend fun productIds(cfg: PosConfig): List<Int> =
+        odoo.call("product.product", "search", jsonOf("domain" to productDomain(cfg)))
+            .jsonArray.mapNotNull { it.jsonPrimitive.intOrNull }
+
+    /** The products with these ids, for the few the delta did not bring (re-added to the POS, unarchived). */
+    suspend fun productsById(ids: List<Int>): List<Product> =
+        if (ids.isEmpty()) emptyList()
+        else odoo.call("product.product", "read", jsonOf("ids" to ids, "fields" to PRODUCT_FIELDS)).objects().map { it.toProduct() }
 
     private fun JsonObject.toConfig() = PosConfig(
         id = int("id")!!,
@@ -174,6 +200,26 @@ class CatalogService(private val odoo: OdooJson2Client) {
     companion object {
         const val PAGE_SIZE = 500
 
+        private val PRODUCT_FIELDS = listOf(
+            "display_name", "lst_price", "barcode", "default_code", "taxes_id", "l10n_in_hsn_code", "pos_categ_ids", "write_date",
+        )
+
+        /**
+         * The catalogue after a live sync: [changed] replace their old version, anything not in [ids]
+         * (Odoo's list of what this POS may sell now) is dropped. [CatalogMerge.missing] lists ids
+         * Odoo sells that are in neither, to be read before the merge counts as complete.
+         */
+        fun merge(current: List<Product>, changed: List<Product>, ids: List<Int>): CatalogMerge {
+            val byId = LinkedHashMap<Int, Product>()
+            current.forEach { byId[it.id] = it }
+            changed.forEach { byId[it.id] = it }
+            val wanted = ids.toSet()
+            val kept = byId.values.filter { it.id in wanted }
+            val missing = ids.filter { it !in byId }
+            return CatalogMerge(kept.sortedWith(compareBy({ it.name.lowercase() }, { it.id })), missing,
+                removed = byId.size - kept.size)
+        }
+
         private val CONFIG_FIELDS = listOf(
             "name", "current_session_id", "current_session_state", "payment_method_ids",
             "company_id", "invoice_journal_id", "default_fiscal_position_id", "fiscal_position_ids",
@@ -196,6 +242,9 @@ class CatalogService(private val odoo: OdooJson2Client) {
         }
     }
 }
+
+/** [products] sorted as the grid shows them; [missing] still to be read; [removed] archived or taken out of the POS. */
+data class CatalogMerge(val products: List<Product>, val missing: List<Int>, val removed: Int)
 
 /** Odoo has more products for this POS than the till could fetch; the last complete catalogue stays. */
 class CatalogIncomplete(val expected: Int, val got: Int) :

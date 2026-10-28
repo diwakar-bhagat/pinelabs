@@ -253,8 +253,8 @@ fun SellScreen(vm: PosViewModel) {
             verticalAlignment = Alignment.CenterVertically) {
             ZzLogo(36.dp)
             Spacer(Modifier.width(10.dp))
-            // The brand is always written "ZenZebra", and the POS name as it is in Odoo.
-            Text("ZenZebra", color = Zz.Cream, style = ZzHeading, fontSize = 20.sp)
+            // The company and the POS name as they are in Odoo ("ZenZebra · KLJ").
+            Text(s.config?.companyName?.ifBlank { null } ?: "ZenZebra", color = Zz.Cream, style = ZzHeading, fontSize = 20.sp)
             Text("  ·  ${s.config?.name ?: "…"}", color = Zz.Cream, style = ZzHeading, fontSize = 16.sp)
             Spacer(Modifier.width(12.dp))
             // PROD is the normal state; anything else (UAT, NO PINE SDK) is flagged in gold.
@@ -271,6 +271,7 @@ fun SellScreen(vm: PosViewModel) {
             TextButton({ vm.requestSetup() }) { Text("SETUP", color = Zz.MutedOnBlack, style = ZzHeading) }
         }
         s.error?.let { Text(it, color = MaterialTheme.colorScheme.error, modifier = Modifier.padding(8.dp)) }
+        s.notice?.let { Text(it, Modifier.fillMaxWidth().background(Zz.GoldSoft).padding(8.dp)) }
         s.offlineCatalogSavedAt?.let { at ->
             Row(Modifier.fillMaxWidth().background(Zz.GoldSoft).padding(8.dp), verticalAlignment = Alignment.CenterVertically) {
                 Text("Catalogue not refreshed (${s.catalogStaleReason ?: "No connection to Odoo"}) — showing the complete one from " +

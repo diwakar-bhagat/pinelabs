@@ -4,26 +4,38 @@ import com.bohemian.odoo.pos.core.Paise
 import com.bohemian.odoo.pos.pine.PrintLine
 
 /**
- * The fixed words of Odoo's "ZenZebra Bill" report (QWeb `x_zenzebra.pos_bill`, ir.ui.view 3800,
- * last changed 2026-10-09): the PDF sent to customers on WhatsApp. The paper bill prints the same
- * words. When the report's text changes in Odoo, change it here too.
+ * The fixed words of Odoo's "ZenZebra Bill" report (QWeb `x_zenzebra.pos_bill`): the PDF sent to
+ * customers on WhatsApp. The paper bill prints the same words. They are read live from the
+ * template (BillTextService) and follow it when it changes in Odoo; [BUNDLED] is the template's
+ * text of 2026-10-09, used only while it cannot be read.
  */
-object ZenZebraBill {
-    const val BRAND = "ZENZEBRA"
-    const val LEGAL_NAME = "Bohemian Curations Private Limited"
-    val TERMS = listOf(
-        "Prices inclusive of GST. ZZ Cash: Rs 1 = Rs 1 off, not transferable or encashable, programme terms may change.",
-        "Exchange within 7 days with this bill: clothing unworn with tags, other items sealed and unused. " +
-            "No cash refunds. No exchange on food, beverages, cosmetics, fragrance, jewellery, innerwear or discounted items. " +
-            "Cashback earned on an exchanged item is reversed; cashback used on it is re-credited.",
-    )
-    const val THANKS = "Thanks for stopping by. See you at the breakspot."
-    val ZZ_EXPLAINER = listOf(
-        "You earn 6% on drinks & cafe, 8% on ZenZebra own-label & jewellery, 5% on beauty, fragrance, bags & clothing, " +
-            "2% on snacks. Bills of Rs 150+ earn 1.25x, Rs 500+ earn 1.5x.",
-        "Use your balance in Rs 50 chunks on any bill of Rs 100 or more. It lasts 30 days from your last purchase; " +
-            "every purchase keeps it alive for 30 more.",
-    )
+data class BillText(
+    val brand: String,
+    val legalName: String,
+    val terms: List<String>,
+    val thanks: String,
+    /** Under the ZZ Cash box; empty when the template has none. */
+    val zzExplainer: List<String>,
+) {
+    companion object {
+        val BUNDLED = BillText(
+            brand = "ZENZEBRA",
+            legalName = "Bohemian Curations Private Limited",
+            terms = listOf(
+                "Prices inclusive of GST. ZZ Cash: Rs 1 = Rs 1 off, not transferable or encashable, programme terms may change.",
+                "Exchange within 7 days with this bill: clothing unworn with tags, other items sealed and unused. " +
+                    "No cash refunds. No exchange on food, beverages, cosmetics, fragrance, jewellery, innerwear or discounted items. " +
+                    "Cashback earned on an exchanged item is reversed; cashback used on it is re-credited.",
+            ),
+            thanks = "Thanks for stopping by. See you at the breakspot.",
+            zzExplainer = listOf(
+                "You earn 6% on drinks & cafe, 8% on ZenZebra own-label & jewellery, 5% on beauty, fragrance, bags & clothing, " +
+                    "2% on snacks. Bills of Rs 150+ earn 1.25x, Rs 500+ earn 1.5x.",
+                "Use your balance in Rs 50 chunks on any bill of Rs 100 or more. It lasts 30 days from your last purchase; " +
+                    "every purchase keeps it alive for 30 more.",
+            ),
+        )
+    }
 }
 
 /** A row of the bill's item table (Item / Qty / Rate / Amount); [taxes] prints under the name. */
@@ -84,7 +96,7 @@ data class ReceiptData(
  * Pure text layout for the E700 printer, mirroring Odoo's bill. Pine: line width is 24, 32 or 48
  * characters. Guarantees: no line exceeds [width]; long names and values wrap; amounts right-aligned.
  */
-class ReceiptFormatter(private val width: Int) {
+class ReceiptFormatter(private val width: Int, private val text: BillText = BillText.BUNDLED) {
     init { require(width in setOf(24, 32, 48)) { "printer width must be 24, 32 or 48" } }
 
     /** Qty / Rate / Amount column widths for this paper. */
@@ -102,8 +114,8 @@ class ReceiptFormatter(private val width: Int) {
 
         r.logoBase64?.let { add(PrintLine("", center = true, imageBase64 = it)) }
         if (r.reprint) center("** REPRINT **", bold = true)
-        center(ZenZebraBill.BRAND, bold = true)
-        center(ZenZebraBill.LEGAL_NAME)
+        center(text.brand, bold = true)
+        center(text.legalName)
         r.companyAddress?.let { center(it) }
         center("Store: ${r.storeName}", bold = true)
         rule()
@@ -143,11 +155,11 @@ class ReceiptFormatter(private val width: Int) {
             z.used?.let { kv("Used on this bill", "- Rs $it") }
             kv("Balance", "Rs ${z.balance}", bold = true)
             z.expiry?.let { kv("Valid till", it) }
-            ZenZebraBill.ZZ_EXPLAINER.forEach { left(it) }
+            text.zzExplainer.forEach { left(it) }
         }
         rule()
-        ZenZebraBill.TERMS.forEach { center(it) }
-        center(ZenZebraBill.THANKS, bold = true)
+        text.terms.forEach { center(it) }
+        center(text.thanks, bold = true)
         r.billRef?.let { center("Bill ref: $it") }
         if (r.pendingInOdoo) center("Odoo bill follows on WhatsApp.")
         r.eBillUrl?.let {
