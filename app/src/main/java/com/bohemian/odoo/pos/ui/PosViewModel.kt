@@ -111,6 +111,9 @@ data class SetupState(
     /** Result of "Change PIN" on the Setup screen. */
     val pinMessage: String? = null,
     val pinChanged: Boolean = false,
+    /** The sales day shown on SALES: start and end hour (24 = midnight). */
+    val salesDayStart: Int = 6,
+    val salesDayEnd: Int = 24,
 )
 
 /** The payment tiles of the split screen. */
@@ -141,6 +144,17 @@ data class SplitUi(
     val terminalLinesPaid: Boolean get() = split.lines.filter { it.mode != null }.all { parts[it.uuid] is PartState.Paid }
     val canValidate: Boolean get() = !busy && split.isComplete && terminalLinesPaid
 }
+
+/** The SALES screen: the store's figures for its sales day, refreshed every minute while open. */
+data class SalesUi(
+    val storeName: String,
+    val sales: com.bohemian.odoo.pos.odoo.StoreSales? = null,
+    /** When [sales] came from Odoo. */
+    val updatedAt: Long? = null,
+    val loading: Boolean = true,
+    /** The last refresh failed; [sales] are still the figures of [updatedAt]. */
+    val error: String? = null,
+)
 
 /** The PIN prompt in front of Setup: digits typed so far (shown as dots) and the last message. */
 data class PinUi(val entered: String = "", val message: String? = null)
@@ -259,8 +273,18 @@ class PosViewModel(private val c: AppContainer) : ViewModel() {
             useFake = c.settings.useFakeGateway,
             kioskMode = c.settings.kioskMode,
             printLogo = c.settings.printLogo,
+            salesDayStart = c.settings.salesDayStartHour,
+            salesDayEnd = c.settings.salesDayEndHour,
         ).withCrashes()
     )
+
+    /** Setup: the hours of the sales day on SALES (start 0–23, end after it, up to 24 = midnight). */
+    fun setSalesDay(start: Int, end: Int) {
+        if (start !in 0..23 || end !in start + 1..24) return
+        c.settings.salesDayStartHour = start
+        c.settings.salesDayEndHour = end
+        _setup.update { it.copy(salesDayStart = start, salesDayEnd = end) }
+    }
 
     private fun SetupState.withCrashes(): SetupState {
         val reports = c.crashLog.reports()
@@ -659,6 +683,50 @@ class PosViewModel(private val c: AppContainer) : ViewModel() {
         val closed = _closing.value?.closed == true
         _closing.value = null
         if (closed) loadCatalog() // config now shows no open session
+    }
+
+    // ------------------------------------------------------------------ today's sales
+
+    private val _sales = MutableStateFlow<SalesUi?>(null)
+    val sales: StateFlow<SalesUi?> = _sales.asStateFlow()
+    private var salesJob: Job? = null
+
+    /** SALES in the top bar: the store's day so far, refreshed every minute while the screen is open. */
+    fun openSales() {
+        if (_sales.value != null) return
+        _sales.value = SalesUi(storeName = _sell.value.config?.name ?: c.settings.posConfigName)
+        salesJob = launchSafe {
+            while (true) {
+                // Never competes with a payment for the network.
+                if (_sell.value.pay !is PayUi.Working) loadSales()
+                delay(SALES_REFRESH_MS)
+            }
+        }
+    }
+
+    fun refreshSales() { if (_sales.value?.loading == false) launchSafe { loadSales() } }
+
+    fun closeSales() {
+        salesJob?.cancel()
+        salesJob = null
+        _sales.value = null
+    }
+
+    /** A failed refresh keeps the last figures on screen, marked with their time. */
+    private suspend fun loadSales() {
+        _sales.update { it?.copy(loading = true) }
+        val result = try {
+            withTimeoutOrNull(SALES_TIMEOUT_MS) {
+                c.sales.storeSales(c.settings.posConfigId, System.currentTimeMillis(), c.settings.salesDayStartHour, c.settings.salesDayEndHour)
+            } ?: return _sales.update { it?.copy(loading = false, error = "Odoo is slow to answer") }
+        } catch (e: CancellationException) {
+            throw e
+        } catch (e: Exception) {
+            PosLog.w("SALES_LOAD_FAILED", "err" to e.message)
+            return _sales.update { it?.copy(loading = false, error = friendly(e)) }
+        }
+        PosLog.i("SALES_LOADED", "bills" to result.bills, "hours" to result.hours.size)
+        _sales.update { it?.copy(sales = result, updatedAt = System.currentTimeMillis(), loading = false, error = null) }
     }
 
     // ------------------------------------------------------------------ void (Phase 4b)
@@ -1574,5 +1642,11 @@ class PosViewModel(private val c: AppContainer) : ViewModel() {
 
         /** Longest the paid customer waits for Odoo's bill before the till prints its own copy. */
         private const val BILL_READ_TIMEOUT_MS = 8_000L
+
+        /** The SALES screen reloads this often while it is open. */
+        private const val SALES_REFRESH_MS = 60_000L
+
+        /** Longest a sales refresh waits for Odoo before keeping the last figures. */
+        private const val SALES_TIMEOUT_MS = 20_000L
     }
 }

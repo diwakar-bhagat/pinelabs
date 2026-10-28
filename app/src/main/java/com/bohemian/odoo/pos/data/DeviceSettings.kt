@@ -103,6 +103,16 @@ class DeviceSettings(context: Context) : PinStore {
         get() = read("keypad_key_dp") { prefs.getInt("keypad_key_dp", 36) }
         set(v) = write("keypad_key_dp", v) { putInt("keypad_key_dp", v) }
 
+    /** The store's sales day on the SALES screen: from this hour (default 06:00)… */
+    var salesDayStartHour: Int
+        get() = read("sales_day_start") { prefs.getInt("sales_day_start", 6) }
+        set(v) = write("sales_day_start", v) { putInt("sales_day_start", v) }
+
+    /** …to this hour (24 = midnight). */
+    var salesDayEndHour: Int
+        get() = read("sales_day_end") { prefs.getInt("sales_day_end", 24) }
+        set(v) = write("sales_day_end", v) { putInt("sales_day_end", v) }
+
     val isConfigured: Boolean
         get() = !odooApiKey.isNullOrBlank() && posConfigId > 0 && terminalPaymentMethodId > 0
 }

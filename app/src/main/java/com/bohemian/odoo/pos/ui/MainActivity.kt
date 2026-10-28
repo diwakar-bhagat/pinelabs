@@ -150,6 +150,7 @@ fun SetupScreen(vm: PosViewModel) {
             )
         }
         ChangePinRow(s, vm)
+        SalesDayRow(s, vm)
         Row(verticalAlignment = Alignment.CenterVertically) {
             Switch(s.printLogo, { vm.setPrintLogo(it) }); Spacer(Modifier.width(8.dp))
             Text("Print the company logo on bills, as on Odoo's PDF (if the printer refuses it, the bill prints without it)")
@@ -190,6 +191,22 @@ private fun ChangePinRow(s: SetupState, vm: PosViewModel) {
     s.pinMessage?.let { Text(it, color = if (s.pinChanged) Zz.Green else MaterialTheme.colorScheme.error, fontSize = 13.sp) }
 }
 
+/** The hours of the sales day on SALES (default 6:00 AM to midnight). */
+@Composable
+private fun SalesDayRow(s: SetupState, vm: PosViewModel) {
+    fun hour(h: Int) = when (h) { 0, 24 -> "12 midnight"; 12 -> "12 noon"; in 1..11 -> "$h AM"; else -> "${h - 12} PM" }
+    Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+        Text("Sales day on SALES: from", fontWeight = FontWeight.Bold)
+        OutlinedButton({ vm.setSalesDay(s.salesDayStart - 1, s.salesDayEnd) }, enabled = s.salesDayStart > 0) { Text("−") }
+        Text(hour(s.salesDayStart), Modifier.width(96.dp))
+        OutlinedButton({ vm.setSalesDay(s.salesDayStart + 1, s.salesDayEnd) }, enabled = s.salesDayStart + 1 < s.salesDayEnd) { Text("+") }
+        Text("to", fontWeight = FontWeight.Bold)
+        OutlinedButton({ vm.setSalesDay(s.salesDayStart, s.salesDayEnd - 1) }, enabled = s.salesDayEnd - 1 > s.salesDayStart) { Text("−") }
+        Text(hour(s.salesDayEnd), Modifier.width(96.dp))
+        OutlinedButton({ vm.setSalesDay(s.salesDayStart, s.salesDayEnd + 1) }, enabled = s.salesDayEnd < 24) { Text("+") }
+    }
+}
+
 // ============================================================================ Sell
 
 @Composable
@@ -219,6 +236,7 @@ fun SellScreen(vm: PosViewModel) {
             if (unresolved.isNotEmpty()) { Spacer(Modifier.width(8.dp)); Badge(containerColor = Zz.Gold) { Text("${unresolved.size} payment(s) to check", color = Zz.Black) } }
             Spacer(Modifier.width(12.dp))
             IconButton({ vm.loadCatalog() }) { MdiIcon(R.drawable.mdi_refresh, "Reload menu and photos from Odoo", Zz.Cream) }
+            TextButton({ vm.openSales() }) { Text("SALES", color = Zz.Cream, style = ZzHeading) }
             TextButton({ vm.startVoid() }) { Text("VOID", color = Zz.Cream, style = ZzHeading) }
             if (s.config?.sessionOpen == true) TextButton({ vm.startClose() }) { Text("CLOSE SESSION", color = Zz.Cream, style = ZzHeading) }
             TextButton({ vm.requestSetup() }) { Text("SETUP", color = Zz.MutedOnBlack, style = ZzHeading) }
@@ -265,6 +283,8 @@ fun SellScreen(vm: PosViewModel) {
     closing?.let { ClosingDialog(it, cashControl = s.config?.cashControl == true, vm) }
     val voiding by vm.voiding.collectAsStateWithLifecycle()
     voiding?.let { VoidDialog(it, vm) }
+    val sales by vm.sales.collectAsStateWithLifecycle()
+    sales?.let { SalesScreen(it, vm) }
 }
 
 /** A split bill with a card / UPI part paid but not the whole total: it must be finished before a new bill. */
