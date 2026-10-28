@@ -28,7 +28,7 @@ Screens in the live till (screenshots from the browser POS, config 1 ZenZebra, 2
 | Note | Line note tags (`pos.note`: Wait, To Serve, Emergency, No Dressing) + free text | `control_buttons` | Built: sent as `pos.order.line.note` JSON |
 | Pickup | Order preset (`pos.preset`) | `control_buttons` | Built: config default preset sent as `preset_id`; read-only while only one preset exists |
 | Send icon | Send order to kitchen / print | `control_buttons` | Not built |
-| ⋮ Actions menu | Note, Customer Note, Enter Code, Reward, Reset Programs, Quotation/Order, Default (INR), Refund, Cancel Order | `action_pad/` | Reward (full "Available rewards" dialog) |
+| ⋮ Actions menu | Note, Customer Note, Enter Code, Reward, Reset Programs, Quotation/Order, Default (INR), Refund, Cancel Order | `action_pad/` | Enter Code and Reward (0.4.0): the store's offers from Odoo, as `pos_loyalty` runs them (`odoo/Offers.kt`) |
 | Numpad 1–9, 0, +/−, `.` , backspace | Edits qty or price of the selected line | `numpad` | Built for Qty on the selected line; ⌫ on an empty entry removes the line |
 | Qty / % / Price | Mode of the numpad | `numpad` | Qty built. % and Price shown disabled: config 1 has `manual_discount=false`, and a typed price needs Odoo's permission checks |
 | Payment | Opens the payment screen | `action_pad/` | Built |
@@ -39,6 +39,11 @@ Screens in the live till (screenshots from the browser POS, config 1 ZenZebra, 2
 Opens from ⋮ → Reward. Lists each reward the customer can use, as
 `ZZ Cash — Add "₹50 off (50 ZZ Cash)"`, with a chevron. Matches `pos_loyalty`
 `loyalty.reward` rows (the 10 ₹50–₹500 "per order" rewards for program 4).
+
+Status (0.4.0): the list also holds every offer of the store this bill can take: promotions,
+code programs and free items (a reward with several free items lists those in the cart). Offers
+with one reward apply by themselves, as in the web POS. They show as green italic lines with ✕ to
+take them off, and a removed offer stays off for this bill.
 
 Status (0.1.1): built. "Use reward" on the ZZ Cash points row (and ⋮ → Reward) opens the full list.
 As in the web POS, the points this cart earns count with the card balance (34.6 + 401.44 earned →

@@ -424,6 +424,73 @@ and the version shows on the top bar and on Setup.
   encrypted settings. 5 wrong tries lock it for 60 s, and the lock survives a restart. A till without
   an Odoo key / POS opens Setup without the PIN.
 
+### Decisions 2026-10-28 (round 3, 0.4.0)
+
+- **Offers per store, as Odoo gives them** (`odoo/Offers.kt`, `odoo/OffersService.kt`).
+  - **Where they come from:** programs, rules and rewards come from Odoo's own POS loader for the till's
+    session (`pos.session.load_data`). A program limited to other stores, or out of its dates, never
+    reaches this one, and ZZ Cash is used only where Odoo gives it to the store.
+  - **Live lists, 28 Oct:**
+    - ZenZebra: ZZ Cash, ZZ Notes, Sampling, "test" coupons;
+    - KLJ: + Fugeno, its combo, the KLJ coffee code, Artiscents;
+    - HQ27GGN: + its two combos, Artiscents;
+    - Club 125: + Amity, its combo, the free Peping can, Artiscents.
+
+    A program with no Point of Sale set in Odoo reaches every store (the ZZ Notes do). Restrict it in
+    Odoo and the till follows.
+  - **The engine** is a pure port of Odoo 19 pos_loyalty (`pos_order.js` / `pos_store.js`):
+    - **Points:** order / money / unit rules with minimums.
+    - **Claimable rewards** and Odoo's auto-apply: a program with one reward applies by itself; a
+      free item that offers several is the line the cashier is on, or is picked under Reward.
+    - **Discounts:** on the order, specific products or the cheapest unit; percent / per order /
+      per point; split per tax group, each part priced by `compute_all` (I2).
+    - **Free items** come off at their own price.
+    - **Global discounts:** one whole-bill discount per bill, and the larger wins (ZZ Cash vs a ZZ
+      Note, exactly as the web POS).
+    - **Products a cheapest / specific discount covers:** the web POS works them out from the
+      reward's `reward_product_domain` itself; the till asks Odoo (`product.product.search`).
+      `[[1,"=",1]]` means every product.
+  - **Enter Code** (⋮, or a scanned code that is no product):
+    - A program code is matched exactly, then in any case, with Odoo's refusals (not yet valid,
+      expired, already activated).
+    - Other codes go to `pos.config.use_coupon_code`.
+    - Gift cards and eWallets stay with the web POS.
+  - **Booking:** reward lines go to Odoo as the web POS sends them. `confirm_coupon_programs` books
+    each program's coupon (issued 1 / used 1, linked by `line_codes`) in the same call as ZZ Cash.
+  - **Saved with the sale:** offers are stored with the sale before the charge (I4). A bill with a
+    paid part is never repriced.
+  - **Verified:** the HQ27GGN-000601 (ZZ Note ₹200) and -000613 (₹89 combo) lines come out exactly as
+    Odoo stored them from the live load.
+  - **Deliberate deviation:** a program's own free item does not count in its own minimum. Odoo's
+    does, so "free can on bills over ₹199" flips on and off with each tap.
+- **There are no ZZCASH200 / ZZCASH400 codes.** "₹200 / ₹400 off" are ZZ Cash point rewards (Reward,
+  with a customer). The codes are the ZZ Notes, the sampling code and the store codes, all in Odoo.
+- **Live Odoo data, nothing to reload** (`odoo/LiveSync.kt`). Every minute, never during a payment or
+  a split bill, the till reads:
+  - its `pos.config`;
+  - the newest `write_date` of each model it uses (products, menu, taxes and fiscal positions,
+    loyalty, note tags, company, bill template; archived records count).
+
+  Then:
+  - **Products:** only changed products are merged, and the id list drops archived ones.
+  - **Taxes:** a tax change clears the price cache.
+  - **Offers:** reload on a loyalty change, a session change, or a new day (daily combos).
+  - **Session or offline:** a session opened elsewhere updates the session only. Being back online
+    runs the full load.
+  - **Open cart:** repriced, with "Prices updated from Odoo at …".
+  - **Bill text:** the fixed words come from Odoo's "ZenZebra Bill" template by their place in it.
+  - **Header:** shows the company name from Odoo.
+- **Today's sales** (SALES in the top bar, `odoo/SalesService.kt`, `ui/SalesScreen.kt`):
+  - **What it shows:** the store's total, bills, average, first and last bill, payment methods, and
+    hour by hour.
+  - **Source:** Odoo's own grouping (`formatted_read_group` on `pos.order` / `pos.payment`), net of
+    refunds.
+  - **The day:** runs 06:00–24:00 in the Odoo user's time zone and resets by itself (hours on Setup).
+  - **Refresh:** every minute while open.
+- **Customer search by name** (2+ letters) or mobile (4+ digits), A→Z, 20 at a time, scroll for more.
+  Product search lists names starting with the query first.
+- **Crash reports** open in full on Setup and record the build that crashed.
+
 ---
 
 ## 6. Odoo integration (verified against live DB, 2026-09-21)
@@ -591,7 +658,14 @@ company password manager + encrypted drive.
 | 20 | SPLIT ₹500: UPI ₹300, then Cash ₹200 (tendered ₹500) | UPI charged for ₹300 only; Validate; change ₹300 shown; Odoo order has 2 payment lines = ₹500; bill shows both |
 | 21 | SPLIT: UPI ₹200, then Card for the rest; close the screen after UPI | Red bar "partly paid"; cart and New bill locked; FINISH reopens it; Card charges only the rest |
 | 22 | SETUP with 1234, change the PIN, wrong PIN 5 × | Setup opens; new PIN works, 1234 no longer; locked 60 s after 5 wrong tries |
-| 23 | Top bar badge | Shows "PROD · 0.3.0", so the installed build is never a guess |
+| 23 | Top bar badge | Shows "PROD · 0.4.0", so the installed build is never a guess |
+| 24 | ⋮ → Enter Code: a ZZ Note on a bill below its minimum, then add items past it | "Code accepted"; the ₹N off line appears by itself once the bill qualifies; paid; Odoo order has the reward line and the WhatsApp PDF shows it |
+| 25 | Sampling code on a 2-item bill | One unit of the cheaper item comes off |
+| 26 | At a store with a combo / Fugeno / free item (HQ27, KLJ, Club 125): the combo's two items; a free item tapped last | Discount line appears by itself; the free item comes off; ✕ takes an offer off and it stays off for this bill |
+| 27 | ZZ Cash reward and a ZZ Note on one bill | Only the larger whole-bill discount stays; the cashier is told |
+| 28 | Change a product's price (or a tax) in Odoo, wait a minute with the till open | Tile shows the new price; an open cart is repriced with "Prices updated from Odoo at …" |
+| 29 | SALES in the top bar | Today from 6 AM: total, bills, first bill, payment methods, hour by hour; equals Odoo's Orders Analysis for the store |
+| 30 | Customer: type 2+ letters of a name, scroll | Every match A→Z, more load while scrolling |
 
 ---
 
@@ -649,6 +723,10 @@ company password manager + encrypted drive.
 - [ ] Pine image print type for the bill logo (Setup switch, UAT 9b)
 - [ ] 2,362 of 2,421 POS products have no POS category: they show under All / search / barcode only. Tagging them into tabs is Odoo data work
 - [ ] On device: first full catalogue load time and memory with 2,421 tiles on the E700 (UAT case 14)
+- [ ] ZZ Note codes have no usage limit in Odoo (`limit_usage` off): anyone who learns one can reuse it. Odoo setting, not the app
+- [ ] Offers not supported on the till: gift cards, eWallets, coupons for a next order, pricelist-limited programs (none in use)
+- [ ] Under the POS-User key, confirm `pos.session.load_data`, `product.product.search` on reward domains, `use_coupon_code` and `formatted_read_group` on `pos.order` / `pos.payment` are allowed
+- [ ] First live sale with an offer from the till (UAT 24–27), then read `loyalty.history` and the order's reward lines back
 
 ---
 

@@ -126,3 +126,16 @@ What the till does now:
 
 Open: a **voided** E700 sale keeps the points it earned (Odoo's refund books negative points). Fix with
 the settled-sale refund work.
+
+## 0.4.0: ZZ Cash among the store's offers (2026-10-28)
+
+- **Which stores:** ZZ Cash is the store's nominative loyalty program from Odoo's POS loader
+  (`pos.session.load_data`). A store Odoo does not give it to has no ZZ Cash on the till. Without the
+  loader (an old key, an error), the till finds the program the old way.
+- **The offers engine** (`odoo/Offers.kt`) computes the ZZ Cash reward line with the other offers:
+  - It takes off what is left after them.
+  - A ₹N off reward and a ZZ Note never stack: both are whole-bill discounts, and the larger wins, as
+    in the web POS.
+  - Earning and booking stay as before (`LoyaltyPoints`, `confirm_coupon_programs`), in one call
+    with the offers' coupons.
+
