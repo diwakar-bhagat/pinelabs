@@ -728,6 +728,8 @@ company password manager + encrypted drive.
 - [ ] Under the POS-User key, confirm `pos.session.load_data`, `product.product.search` on reward domains, `use_coupon_code` and `formatted_read_group` on `pos.order` / `pos.payment` are allowed
 - [ ] First live sale with an offer from the till (UAT 24–27), then read `loyalty.history` and the order's reward lines back
 - [ ] A code whose program has several rewards waits for the cashier's pick under Reward; Odoo applies the only claimable one at once (no live program has several)
+- [ ] "Cash" at KLJ, SWN, HQ27GGN and Club 125 is payment method 4, type Bank (`is_cash_count` false): an E700 there takes exact cash only, no change. Owner / accountant to decide on a Cash-type method per store before rollout (`docs/CASE_2026-10-28_PINE_OVERPAY.md`)
+- [ ] Odoo's shared "Pine labs" method 10 is still on ZenZebra (config 1) and Club 125 (config 8): a web POS payment there rings HQ27GGN's terminal
 
 ---
 
@@ -752,3 +754,4 @@ in the repo root (`ODOO_URL`, `ODOO_DB`, `ODOO_USER`, `ODOO_API_KEY`). Writes ne
 | `PINE_CASE_2026-10-24.md` | Integration case for Pine: routes (AppToApp / Cloud / PadController), what works vs blocked, questions |
 | `REVIEW.md` | External review checklist (2026-10-27): findings F1–F6 with fixes, endpoint map, identity/signing, commands run, blockers |
 | `AGENT_PROMPT_E700_A2A.md` | Prompt for an on-device AI agent (adb) to run and report the App-to-App flow safely |
+| `CASE_2026-10-28_PINE_OVERPAY.md` | Case study: Odoo web POS took ₹42 by Pine on a ₹20 bill at HQ27GGN; why, the fix, and how the E700 till prevents it |
