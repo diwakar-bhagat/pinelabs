@@ -191,6 +191,7 @@ fun OrderPanel(s: SellState, vm: PosViewModel, modifier: Modifier) {
                     }
                 }
             }
+            items(s.offerLines, key = { "offer-${it.line.code}-${it.line.taxIds}-${it.line.rewardProductId}" }) { o -> OfferLineRow(o, vm) }
         }
         HorizontalDivider(color = Zz.Line)
         Column(Modifier.padding(horizontal = 12.dp, vertical = 6.dp)) {
@@ -228,9 +229,41 @@ fun OrderPanel(s: SellState, vm: PosViewModel, modifier: Modifier) {
         s.lines.firstOrNull { it.uuid == uuid }?.let { line -> NoteDialog(line, s, onDone = { vm.setLineNote(uuid, it); noteFor = null }, onDismiss = { noteFor = null }) }
             ?: run { noteFor = null }
     }
-    if (showActions) ActionsDialog(s, onReward = { showActions = false; showRewards = true }, onDismiss = { showActions = false })
+    var showCode by remember { mutableStateOf(false) }
+    if (showActions) ActionsDialog(s, onReward = { showActions = false; showRewards = true }, onCode = { showActions = false; showCode = true },
+        onDismiss = { showActions = false })
+    if (showCode) EnterCodeDialog(onApply = { vm.enterCode(it); showCode = false }, onDismiss = { showCode = false })
     if (showRewards) RewardsDialog(s, vm, onDismiss = { showRewards = false })
     if (showCustomer) CustomerDialog(s, vm, onDismiss = { showCustomer = false })
+}
+
+/** A promotion, code or free item on the bill, in italics like Odoo's reward lines; ✕ takes it off. */
+@Composable
+private fun OfferLineRow(o: com.bohemian.odoo.pos.odoo.PricedOffer, vm: PosViewModel) {
+    val italic = androidx.compose.ui.text.font.FontStyle.Italic
+    Row(Modifier.fillMaxWidth().padding(start = 12.dp, end = 4.dp, top = 2.dp, bottom = 2.dp), verticalAlignment = Alignment.CenterVertically) {
+        Text("${o.line.qty}", Modifier.width(28.dp), fontStyle = italic)
+        Text(o.line.name, Modifier.weight(1f), fontSize = 14.sp, fontStyle = italic, color = Zz.Green, maxLines = 2, overflow = TextOverflow.Ellipsis)
+        Text(o.totalIncl.format(), fontSize = 14.sp, fontStyle = italic, color = Zz.Green)
+        TextButton({ vm.removeOffer(o.line.code) }, contentPadding = PaddingValues(horizontal = 6.dp)) { Text("✕", color = Zz.Muted) }
+    }
+}
+
+/** ⋮ → Enter Code: a promo code (a ZZ Note, a store code) or a coupon, as on the web POS. */
+@Composable
+private fun EnterCodeDialog(onApply: (String) -> Unit, onDismiss: () -> Unit) {
+    var code by remember { mutableStateOf("") }
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = { Text("Enter Code") },
+        text = {
+            OutlinedTextField(code, { code = it.trim().take(64) }, Modifier.fillMaxWidth(), singleLine = true, label = { Text("Code") },
+                keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Ascii, imeAction = ImeAction.Done),
+                keyboardActions = KeyboardActions(onDone = { if (code.isNotBlank()) onApply(code) }))
+        },
+        confirmButton = { Button({ onApply(code) }, enabled = code.isNotBlank()) { Text("Apply") } },
+        dismissButton = { TextButton(onDismiss) { Text("Cancel") } },
+    )
 }
 
 @Composable
@@ -450,25 +483,28 @@ private fun NoteDialog(line: CartLine, s: SellState, onDone: (List<LineNote>) ->
 
 /** The ⋮ actions of the web POS that this till supports. */
 @Composable
-private fun ActionsDialog(s: SellState, onReward: () -> Unit, onDismiss: () -> Unit) {
+private fun ActionsDialog(s: SellState, onReward: () -> Unit, onCode: () -> Unit, onDismiss: () -> Unit) {
     AlertDialog(
         onDismissRequest = onDismiss,
         title = { Text("Actions") },
         text = {
             Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                val canReward = s.customer != null && s.zzCash != null && s.totals != null
+                OutlinedButton(onCode, Modifier.fillMaxWidth().height(56.dp), enabled = s.lines.isNotEmpty(), shape = RoundedCornerShape(6.dp)) {
+                    MdiIcon(R.drawable.mdi_barcode_scan, null, Zz.Black); Spacer(Modifier.width(8.dp)); Text("Enter Code", color = Zz.Black)
+                }
+                val canReward = s.totals != null && (s.offerClaimable.isNotEmpty() || s.offerLines.isNotEmpty() || (s.customer != null && s.zzCash != null))
                 OutlinedButton(onReward, Modifier.fillMaxWidth().height(56.dp), enabled = canReward, shape = RoundedCornerShape(6.dp),
                     colors = ButtonDefaults.outlinedButtonColors(containerColor = if (s.rewardFits) Zz.GoldSoft else Color.Transparent)) {
                     MdiIcon(R.drawable.mdi_star, null, Zz.Gold); Spacer(Modifier.width(8.dp)); Text("Reward", color = Zz.Black)
                 }
-                if (!canReward) Text("Attach a customer with a ZZ Cash card to use a reward.", fontSize = 13.sp, color = Zz.Muted)
+                if (!canReward) Text("No reward fits this bill yet. ZZ Cash needs a customer with a card.", fontSize = 13.sp, color = Zz.Muted)
             }
         },
         confirmButton = { TextButton(onDismiss) { Text("Close") } },
     )
 }
 
-/** "Available rewards": every ZZ Cash reward this card can pay for on this bill. */
+/** "Available rewards": the store's offers this bill can take, and every ZZ Cash reward the card can pay for. */
 @Composable
 private fun RewardsDialog(s: SellState, vm: PosViewModel, onDismiss: () -> Unit) {
     val bal = s.zzCash?.takeIf { it.partnerId == s.customer?.id }
@@ -485,7 +521,14 @@ private fun RewardsDialog(s: SellState, vm: PosViewModel, onDismiss: () -> Unit)
                         TextButton({ vm.removeZzCash(); onDismiss() }) { Text("Remove") }
                     }
                 }
-                if (options.isEmpty() && s.zzRedemption == null) {
+                s.offerLines.distinctBy { it.line.code }.forEach { o ->
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        Text("Applied: ${o.line.name}", Modifier.weight(1f))
+                        TextButton({ vm.removeOffer(o.line.code); onDismiss() }) { Text("Remove") }
+                    }
+                }
+                OfferChoices(s, vm, onDismiss)
+                if (options.isEmpty() && s.zzRedemption == null && s.customer != null) {
                     val can = bal?.let { ZzCashRules.available(it, s.zzEarned) }
                     Text("No reward fits this card and bill" + (can?.let { " (${it.toPlainString()} ZZ Cash to spend, cheapest reward " +
                         (s.zzRewards.firstOrNull()?.points?.toPlainString() ?: "—") + ")" } ?: "") + "." +
@@ -509,6 +552,27 @@ private fun RewardsDialog(s: SellState, vm: PosViewModel, onDismiss: () -> Unit)
         },
         confirmButton = { TextButton(onDismiss) { Text("Close") } },
     )
+}
+
+/** The store's offers this bill can take; a reward with several free items lists those in the cart. */
+@Composable
+private fun OfferChoices(s: SellState, vm: PosViewModel, onDismiss: () -> Unit) {
+    s.offerClaimable.forEach { o ->
+        val names = s.lines.associate { it.product.id to it.product.name }
+        val picks: List<Int?> = o.productChoices.ifEmpty { listOf(o.productId) }
+        picks.forEach { pid ->
+            Card(Modifier.fillMaxWidth().padding(vertical = 4.dp).clickable { vm.claimOffer(o, pid); onDismiss() },
+                colors = CardDefaults.cardColors(containerColor = Color.White), border = BorderStroke(1.dp, Zz.Line)) {
+                Row(Modifier.padding(14.dp), verticalAlignment = Alignment.CenterVertically) {
+                    Column(Modifier.weight(1f)) {
+                        Text(o.program.name, fontWeight = FontWeight.Bold)
+                        Text("Add \"${o.reward.description}\"" + (pid?.let { names[it] }?.let { ": $it" } ?: ""), fontSize = 14.sp)
+                    }
+                    Text("›", fontSize = 22.sp, color = Zz.Muted)
+                }
+            }
+        }
+    }
 }
 
 /**

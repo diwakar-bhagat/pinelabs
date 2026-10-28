@@ -12,7 +12,21 @@ import com.bohemian.odoo.pos.di.AppContainer
 import com.bohemian.odoo.pos.odoo.CartLine
 import com.bohemian.odoo.pos.odoo.CartTotals
 import com.bohemian.odoo.pos.odoo.CatalogIncomplete
+import com.bohemian.odoo.pos.odoo.AppliedOffers
+import com.bohemian.odoo.pos.odoo.CardBalance
 import com.bohemian.odoo.pos.odoo.CatalogService
+import com.bohemian.odoo.pos.odoo.Claim
+import com.bohemian.odoo.pos.odoo.Claimable
+import com.bohemian.odoo.pos.odoo.CouponChange
+import com.bohemian.odoo.pos.odoo.CouponCodeResult
+import com.bohemian.odoo.pos.odoo.OfferInput
+import com.bohemian.odoo.pos.odoo.OfferProgram
+import com.bohemian.odoo.pos.odoo.OfferProgramInfo
+import com.bohemian.odoo.pos.odoo.OfferState
+import com.bohemian.odoo.pos.odoo.Offers
+import com.bohemian.odoo.pos.odoo.PricedOffer
+import com.bohemian.odoo.pos.odoo.RewardPart
+import com.bohemian.odoo.pos.odoo.SalesService
 import com.bohemian.odoo.pos.odoo.LiveArea
 import com.bohemian.odoo.pos.odoo.LiveStamps
 import com.bohemian.odoo.pos.odoo.ProductGrid
@@ -247,6 +261,14 @@ data class SellState(
     val partPaid: Paise = Paise.ZERO,
     /** Live sync changed this cart's prices ("Prices updated from Odoo at 1:21 PM"); not an error. */
     val notice: String? = null,
+    /** Promotions, codes and free items on this bill (ZZ Cash aside), priced by Odoo. */
+    val offerLines: List<PricedOffer> = emptyList(),
+    /** Points each offer program gives on this bill, booked after sync. */
+    val offerCoupons: List<CouponChange> = emptyList(),
+    /** Offers this bill could still take, for the Reward dialog. */
+    val offerClaimable: List<Claimable> = emptyList(),
+    /** Codes entered, rewards chosen or taken off, coupons scanned on this bill. */
+    val offers: OfferState = OfferState(),
 ) {
     // Derived values are computed once per state, not on every read while the screen is drawn.
 
@@ -263,7 +285,8 @@ data class SellState(
     val rewardFits: Boolean by lazy {
         val bal = zzCash?.takeIf { it.partnerId == customer?.id }
         val total = totals?.totalIncl
-        zzRedemption == null && bal != null && total != null && ZzCashRules.eligible(bal, zzEarned, zzRewards, total).isNotEmpty()
+        offerClaimable.isNotEmpty() ||
+            (zzRedemption == null && bal != null && total != null && ZzCashRules.eligible(bal, zzEarned, zzRewards, total).isNotEmpty())
     }
 }
 
@@ -507,9 +530,16 @@ class PosViewModel(private val c: AppContainer) : ViewModel() {
                 // Mapping and sorting 2,400+ products runs off the screen thread.
                 val productsJob = async(Dispatchers.Default) { stampsJob.await(); c.catalog.products(cfg) }
                 val fposJob = async { c.fiscalPositions.load(fposIds) }
+                // The store's offers as Odoo's POS loader gives them to this session; ZZ Cash is one of them
+                // where Odoo gives it to this store.
+                val offersJob = async {
+                    odooTz = runCatching { c.sales.timeZone() }.onFailure { PosLog.w("ODOO_TZ_FAILED", "err" to it.message) }.getOrNull() ?: odooTz
+                    loadOffers(cfg)
+                }
                 // ZZ Cash is optional: a failed lookup hides the balance, it never blocks a sale here.
                 val zzJob = async {
-                    val program = try { c.zzCash.program(cfg) } catch (e: Exception) {
+                    val offers = offersJob.await()
+                    val program = if (offers != null) zzProgramOf(offers) else try { c.zzCash.program(cfg) } catch (e: Exception) {
                         PosLog.w("ZZ_CASH_PROGRAM_LOOKUP_FAILED", "err" to e.message); null
                     }
                     program to program?.let { p ->
@@ -529,12 +559,13 @@ class PosViewModel(private val c: AppContainer) : ViewModel() {
                 val positions = fposJob.await()
                 primeJob.await()
                 Loaded(products, positions, zzJob.await(), categoriesJob.await(), notesJob.await(), addressJob.await(), taxNamesJob.await(),
-                    stampsJob.await(), billTextJob.await())
+                    stampsJob.await(), billTextJob.await(), offersJob.await())
             }
             if (generation != catalogGeneration) return@launchSafe // a newer load owns the screen
             val (products, positions, zz, categories, notes, address, names) = loaded
             liveStamps = loaded.stamps
             loaded.billText?.let { billText = it }
+            useOffers(loaded.offers)
             fiscalPositionsById = positions
             zzProgram = zz.first
             taxNames = names
@@ -608,6 +639,8 @@ class PosViewModel(private val c: AppContainer) : ViewModel() {
         /** Null when they could not be read: the first live-sync pass reads them instead. */
         val stamps: LiveStamps?,
         val billText: BillText?,
+        /** Null when Odoo's loader could not be read: no offers, ZZ Cash found the old way. */
+        val offers: List<OfferProgram>?,
     )
 
     // ------------------------------------------------------------------ live Odoo data
@@ -663,6 +696,9 @@ class PosViewModel(private val c: AppContainer) : ViewModel() {
             PosLog.i("LIVE_CONFIG_CHANGED", "session_only" to sessionOnly, "session" to cfg.currentSessionId, "open" to cfg.sessionOpen)
             if (!sessionOnly) return reloadAll()
             _sell.update { if (catalogGeneration == generation) it.copy(config = cfg) else it }
+            reloadLoyalty(cfg) // offers come per session
+        } else if (offersDay != null && offersDay != odooToday()) {
+            reloadLoyalty(cfg) // a new day: today's combos in, yesterday's out
         }
         val now = c.liveSync.read()
         val changed = now.changedSince(old)
@@ -737,7 +773,7 @@ class PosViewModel(private val c: AppContainer) : ViewModel() {
         }
         if (LiveArea.LOYALTY in changed) {
             reloadLoyalty(cfg)
-            cartChanged = cartChanged || _sell.value.zzRedemption != null
+            cartChanged = true // any offer may now apply, or stop applying, to the open cart
         }
         if (LiveArea.BILL_TEXT in changed) c.billText.load()?.let { billText = it }
         return cartChanged
@@ -746,14 +782,147 @@ class PosViewModel(private val c: AppContainer) : ViewModel() {
     /** A full catalogue load in place of a live-sync pass (offline, config changed, too much changed). */
     private fun reloadAll() { loadCatalog() }
 
-    /** Loyalty programs, rules or rewards changed in Odoo: read them again, and the attached card's rewards. */
+    /** Loyalty programs, rules or rewards changed in Odoo (or the session or day did): read them again. */
     private suspend fun reloadLoyalty(cfg: PosConfig) {
-        val program = c.zzCash.program(cfg)
+        val offers = loadOffers(cfg)
+        val program = if (offers != null) zzProgramOf(offers) else c.zzCash.program(cfg)
         val rules = program?.let { c.zzCash.rules(it.id) }
+        useOffers(offers)
         zzProgram = program
         rewardsCache = null
         _sell.update { it.copy(zzRules = rules) }
         _sell.value.customer?.let { refreshZzCash(it) }
+        if (_sell.value.lines.isNotEmpty() && !_sell.value.partPaid.isPositive && _sell.value.pay == PayUi.Idle) reprice()
+    }
+
+    // ------------------------------------------------------------------ offers (Odoo pos_loyalty)
+
+    /** The store's offer programs for this session, from Odoo's own POS loader. */
+    private var offerPrograms: List<OfferProgram> = emptyList()
+
+    /** Odoo's loader answered for this session (an empty list is a store without offers). */
+    private var offersLoaded = false
+
+    /** The Odoo date the offers were loaded for; the next day reloads them (daily combos). */
+    private var offersDay: String? = null
+
+    private suspend fun loadOffers(cfg: PosConfig): List<OfferProgram>? {
+        val session = cfg.currentSessionId ?: return emptyList() // nothing is sold without a session
+        return runCatching { c.offers.load(session) }
+            .onSuccess { PosLog.i("OFFERS_LOADED", "session" to session, "programs" to it.size, "supported" to it.count { p -> p.supported }) }
+            .onFailure { PosLog.w("OFFERS_LOAD_FAILED", "err" to it.message) }.getOrNull()
+    }
+
+    private fun useOffers(programs: List<OfferProgram>?) {
+        offerPrograms = programs.orEmpty()
+        offersLoaded = programs != null
+        offersDay = if (programs != null) odooToday() else null
+    }
+
+    /** ZZ Cash: the one customer-card loyalty program Odoo gives this store; none, or two, means none. */
+    private fun zzProgramOf(programs: List<OfferProgram>): ZzCashProgram? =
+        programs.filter { it.type == "loyalty" && it.nominative && it.supported }.singleOrNull()?.let { ZzCashProgram(it.id, it.name) }
+
+    /** The Odoo user's time zone, read with the catalogue; the device's until then. */
+    private var odooTz: java.util.TimeZone? = null
+
+    /** Today in the Odoo user's time zone: offers' dates are Odoo dates. Never waits on Odoo. */
+    private fun odooToday(): String =
+        SimpleDateFormat("yyyy-MM-dd", Locale.US).apply { timeZone = odooTz ?: java.util.TimeZone.getDefault() }.format(Date())
+
+    /**
+     * ⋮ → Enter Code (or a scanned code that is no product): a program's code is matched here as the web
+     * POS does (exactly, then in any case); any other code is a coupon Odoo checks. The reward follows
+     * on the reprice, by itself when its program has one, else in Reward.
+     */
+    fun enterCode(raw: String) = launchSafe {
+        val code = raw.trim()
+        val s = _sell.value
+        if (code.isEmpty() || s.pay is PayUi.Working || lockedByPartPayment()) return@launchSafe
+        if (!offersLoaded) return@launchSafe _sell.update { it.copy(error = "Offers are not loaded from Odoo yet. Check the connection, then try the code again.") }
+        when (val check = Offers.ruleForCode(offerPrograms, code, odooToday(), s.offers)) {
+            is Offers.CodeCheck.Rule -> {
+                PosLog.i("CODE_ACCEPTED", "program" to check.program.id)
+                _sell.update { it.copy(offers = it.offers.copy(codes = it.offers.codes + check.rule.id), totals = null, error = null,
+                    notice = "Code accepted: ${check.program.name}. Its reward shows on the bill once the bill qualifies.") }
+                reprice()
+            }
+            is Offers.CodeCheck.Refused -> _sell.update { it.copy(error = check.message) }
+            Offers.CodeCheck.NoRule -> {
+                if (s.offers.scanned.any { it.code == code }) return@launchSafe _sell.update { it.copy(error = "That coupon code has already been scanned and activated.") }
+                val cfg = s.config ?: return@launchSafe
+                val answer = try { c.offers.useCouponCode(cfg.id, code, SalesService.utc(System.currentTimeMillis()), s.customer?.id) }
+                    catch (e: CancellationException) { throw e } catch (e: Exception) { return@launchSafe _sell.update { it.copy(error = "Could not check the code: ${friendly(e)}") } }
+                when (answer) {
+                    is CouponCodeResult.Refused -> _sell.update { it.copy(error = answer.message) }
+                    is CouponCodeResult.Accepted -> {
+                        val program = offerPrograms.firstOrNull { it.id == answer.coupon.programId }
+                        if (program == null || !program.supported) {
+                            return@launchSafe _sell.update { it.copy(error = "${program?.name ?: "This coupon"} is not supported on this till yet (gift cards and eWallets: use the web POS).") }
+                        }
+                        PosLog.i("COUPON_ACCEPTED", "program" to program.id, "card" to answer.coupon.cardId)
+                        _sell.update { it.copy(offers = it.offers.copy(scanned = it.offers.scanned + answer.coupon), totals = null, error = null,
+                            notice = "Coupon accepted: ${program.name}. Pick its reward under Reward if it does not apply by itself.") }
+                        reprice()
+                    }
+                }
+            }
+        }
+    }
+
+    /** Reward dialog: put this offer on the bill ([productId]: the free item picked). */
+    fun claimOffer(offer: Claimable, productId: Int? = null) {
+        if (_sell.value.pay is PayUi.Working || lockedByPartPayment()) return
+        _sell.update {
+            it.copy(offers = it.offers.copy(claims = it.offers.claims + Claim(offer.reward.id, offer.couponKey, productId ?: offer.productId, ZzCashRules.newRewardCode()),
+                disabled = it.offers.disabled - offer.reward.id), totals = null, error = null)
+        }
+        reprice()
+    }
+
+    /** ✕ on an offer line: off the bill; an offer that applied by itself stays off for this bill. */
+    fun removeOffer(code: String) {
+        if (_sell.value.pay is PayUi.Working || lockedByPartPayment()) return
+        val claim = _sell.value.offers.claims.firstOrNull { it.code == code } ?: return
+        _sell.update {
+            it.copy(offers = it.offers.copy(claims = it.offers.claims - claim,
+                disabled = if (claim.auto) it.offers.disabled + claim.rewardId else it.offers.disabled), totals = null)
+        }
+        reprice()
+    }
+
+    /** What the engine gave for one reprice, priced by Odoo. */
+    private class Evaluated(
+        val lines: List<PricedOffer>, val zz: ZzCashRedemption?, val coupons: List<CouponChange>,
+        val claimable: List<Claimable>, val claims: List<Claim>, val messages: List<String>,
+    )
+
+    /**
+     * Run Odoo's offer rules on the priced cart, ZZ Cash included so they interact as in the web POS
+     * (one whole-bill discount, discounts on what is left), then price every reward line with Odoo.
+     */
+    private suspend fun evaluateOffers(priced: List<CartLine>, s: SellState, position: FiscalPosition?): Evaluated {
+        val zzId = zzProgram?.id?.takeIf { id -> offerPrograms.any { it.id == id } }
+        val bal = s.zzCash?.takeIf { it.partnerId == s.customer?.id }
+        val zzClaim = s.zzRedemption?.takeIf { bal != null && it.cardId == bal.cardId && zzId != null }
+            ?.let { Claim(it.reward.rewardId, it.cardId, code = it.rewardCode) }
+        val cards = if (bal != null && zzId != null) listOf(CardBalance(bal.cardId, zzId, bal.points.toRupees())) else emptyList()
+        val input = OfferInput(offerPrograms, priced, s.customer?.id, odooToday(), cards, s.lines.firstOrNull { it.uuid == s.selectedLine }?.product?.id)
+        val state = s.offers.copy(claims = s.offers.claims + listOfNotNull(zzClaim))
+        val result = withContext(Dispatchers.Default) { Offers.evaluate(input, state) { ZzCashRules.newRewardCode() } }
+        val zzLines = result.lines.filter { it.programId == zzId }
+        val zz = s.zzRedemption?.takeIf { zzLines.isNotEmpty() }?.let { r ->
+            r.copy(parts = zzLines.mapIndexed { i, l ->
+                val line = c.pricing.price(CartLine("zz-${r.rewardCode}-$i", Product(l.productId, l.name, l.unitPrice, null, null, l.taxIds), 1), position)
+                RewardPart(l.taxIds, Paise(-l.unitPrice.value), line.totalIncl, line.totalExcl)
+            })
+        }
+        val promo = result.lines.filter { it.programId != zzId }.mapIndexed { i, l ->
+            val line = c.pricing.price(CartLine("offer-${l.code}-$i", Product(l.productId, l.name, l.unitPrice, null, null, l.taxIds), l.qty), position)
+            PricedOffer(l, line.totalIncl!!, line.totalExcl!!)
+        }
+        return Evaluated(promo, zz, result.coupons.filter { it.programId != zzId }, result.claimable.filter { it.program.id != zzId },
+            result.claims.filter { it.code != zzClaim?.code }, result.messages)
     }
 
     fun openSession() = launchSafe {
@@ -984,8 +1153,14 @@ class PosViewModel(private val c: AppContainer) : ViewModel() {
     /** Keyboard-wedge scanners type the barcode then Enter. */
     fun submitQuery() {
         val s = _sell.value
-        val exact = s.products.firstOrNull { it.barcode == s.query.trim() }
-        if (exact != null) { add(exact); _sell.update { it.copy(query = "").regrid() } }
+        val q = s.query.trim()
+        val exact = s.products.firstOrNull { it.barcode == q }
+        if (exact != null) { add(exact); _sell.update { it.copy(query = "").regrid() }; return }
+        // A scanned coupon or a typed code (one word, no product shown for it) goes to Enter Code.
+        if (q.length >= 4 && ' ' !in q && grid.show(null, q).isEmpty() && offersLoaded) {
+            _sell.update { it.copy(query = "").regrid() }
+            enterCode(q)
+        }
     }
 
     fun add(p: Product) {
@@ -1209,7 +1384,7 @@ class PosViewModel(private val c: AppContainer) : ViewModel() {
         if (reward.points > ZzCashRules.available(balance, s.zzEarned)) {
             _sell.update { it.copy(error = "Not enough ZZ Cash for ${reward.description}") }; return
         }
-        val cartTotal = c.pricing.totals(s.lines)?.totalIncl
+        val cartTotal = totalsWith(s.lines, null, s.offerLines)?.totalIncl
         if (cartTotal == null || reward.amount >= cartTotal) {
             _sell.update { it.copy(error = "ZZ Cash reward is more than the bill") }; return
         }
@@ -1318,6 +1493,8 @@ class PosViewModel(private val c: AppContainer) : ViewModel() {
      * cancels its HTTP calls.
      */
     private fun reprice() {
+        // A bill with a paid part keeps the prices and rewards it was charged with.
+        if (_sell.value.partPaid.isPositive) return
         val generation = ++priceGeneration
         repriceJob?.cancel()
         _sell.update { it.copy(pricing = true, error = null) }
@@ -1328,7 +1505,10 @@ class PosViewModel(private val c: AppContainer) : ViewModel() {
                 val position = start.fiscalPosition
                 val priced = c.pricing.priceAll(start.lines, position)
                 val wanted = _sell.value.zzRedemption
-                val pricedRedemption = wanted?.takeIf { affordable(it, priced) }?.let { priceRedemption(it, priced, position) }
+                // With the store's offers loaded, Odoo's rules decide (ZZ Cash among them); without, ZZ Cash alone.
+                val offers = if (offersLoaded && priced.isNotEmpty()) evaluateOffers(priced, _sell.value, position) else null
+                val pricedRedemption = if (offers != null) offers.zz
+                    else wanted?.takeIf { affordable(it, priced) }?.let { priceRedemption(it, priced, position) }
                 val dropped = wanted != null && pricedRedemption == null
                 _sell.update { s ->
                     when {
@@ -1338,9 +1518,16 @@ class PosViewModel(private val c: AppContainer) : ViewModel() {
                         else -> s.copy(
                             lines = priced.map { p -> p.copy(note = s.lines.firstOrNull { it.uuid == p.uuid }?.note ?: p.note) },
                             zzRedemption = pricedRedemption,
-                            totals = totalsWith(priced, pricedRedemption),
+                            offerLines = offers?.lines.orEmpty(),
+                            offerCoupons = offers?.coupons.orEmpty(),
+                            offerClaimable = offers?.claimable.orEmpty(),
+                            offers = if (offers != null) s.offers.copy(claims = offers.claims) else s.offers,
+                            totals = totalsWith(priced, pricedRedemption, offers?.lines.orEmpty()),
                             pricing = false,
-                            error = if (dropped) "ZZ Cash reward removed: the cart no longer qualifies. Check the total." else s.error,
+                            error = listOfNotNull(
+                                "ZZ Cash reward removed: the cart no longer qualifies. Check the total.".takeIf { dropped },
+                                offers?.messages?.takeIf { it.isNotEmpty() }?.joinToString(" ")?.let { "$it. Check the total." },
+                            ).joinToString(" ").ifEmpty { s.error },
                         )
                     }
                 }
@@ -1383,13 +1570,15 @@ class PosViewModel(private val c: AppContainer) : ViewModel() {
         return r.copy(parts = priced)
     }
 
-    /** Cart total plus the priced reward (a negative line). Null until every line is priced. */
-    private fun totalsWith(lines: List<CartLine>, redemption: ZzCashRedemption?): CartTotals? {
+    /** Cart total plus the priced rewards (negative lines). Null until every line is priced. */
+    private fun totalsWith(lines: List<CartLine>, redemption: ZzCashRedemption?, offers: List<PricedOffer> = emptyList()): CartTotals? {
         val base = c.pricing.totals(lines) ?: return null
-        if (redemption == null) return base
+        val offIncl = offers.fold(Paise.ZERO) { a, o -> a + o.totalIncl }
+        val offExcl = offers.fold(Paise.ZERO) { a, o -> a + o.totalExcl }
+        if (redemption == null) return CartTotals(base.totalIncl + offIncl, base.totalExcl + offExcl)
         val incl = redemption.totalIncl ?: return null
         val excl = redemption.totalExcl ?: return null
-        return CartTotals(base.totalIncl + incl, base.totalExcl + excl)
+        return CartTotals(base.totalIncl + incl + offIncl, base.totalExcl + excl + offExcl)
     }
 
     // ------------------------------------------------------------------ payment
@@ -1481,6 +1670,10 @@ class PosViewModel(private val c: AppContainer) : ViewModel() {
             it.copy(
                 orderUuid = snap.orderUuid, lines = snap.cartLines(), totals = snap.totals(), customer = snap.customer(),
                 zzRedemption = snap.zzRedemption(), fiscalPosition = fiscalPositionsById[snap.fiscalPositionId],
+                offerLines = snap.appliedOffers()?.lines.orEmpty(), offerCoupons = snap.appliedOffers()?.coupons.orEmpty(),
+                offerClaimable = emptyList(),
+                offers = OfferState(claims = snap.appliedOffers()?.lines.orEmpty().map { o -> Claim(o.line.rewardId, o.line.couponKey, o.line.rewardProductId, o.line.code) }
+                    .distinctBy { c -> c.code }),
                 selectedLine = null, keypad = "", error = null,
             )
         }
@@ -1668,9 +1861,19 @@ class PosViewModel(private val c: AppContainer) : ViewModel() {
                 .getOrElse { err -> _sell.update { it.copy(error = friendly(err as? Exception ?: Exception(err))) }; return null }
             if (check != null) { _sell.update { it.copy(error = "ZZ Cash: $check") }; return null }
         }
+        // A scanned coupon is checked by Odoo before the charge, as the web POS does.
+        val couponSpend = s.offerLines.map { it.line }.filter { it.couponKey > 0 }.groupBy { it.couponKey }
+            .mapValues { (_, ls) -> ls.fold(java.math.BigDecimal.ZERO) { a, l -> a + l.pointsCost }.negate() }
+        if (couponSpend.isNotEmpty()) {
+            val check = runCatching { c.offers.validate(couponSpend) }
+                .getOrElse { err -> _sell.update { it.copy(error = friendly(err as? Exception ?: Exception(err))) }; return null }
+            if (check != null) { _sell.update { it.copy(error = "Coupon: $check") }; return null }
+        }
         val cardId = s.zzCash?.takeIf { it.partnerId == customer?.id }?.cardId
+        val used = (s.offerLines.map { it.line.programId } + s.offerCoupons.map { it.programId }).toSet()
+        val applied = AppliedOffers(s.offerLines, s.offerCoupons, offerPrograms.filter { it.id in used }.map { OfferProgramInfo.of(it) })
         val snap = SaleSnapshot.of(s.orderUuid, cfg, s.lines, totals, customer, s.fiscalPosition?.id, s.zzRedemption, earned, cardId,
-            loyaltyProgramId = zzProgram?.id, split = split)
+            loyaltyProgramId = zzProgram?.id, split = split, offers = applied)
         c.finalizer.save(snap) // HARD RULE 4/7: the cart survives a crash mid-payment
         return snap
     }
@@ -1815,6 +2018,7 @@ class PosViewModel(private val c: AppContainer) : ViewModel() {
                 zzRewards = emptyList(), zzRedemption = null, selectedLine = null, keypad = "",
                 fiscalPosition = fiscalPositionsById[it.config?.defaultFiscalPositionId],
                 pay = PayUi.Idle, error = null, notice = null,
+                offerLines = emptyList(), offerCoupons = emptyList(), offerClaimable = emptyList(), offers = OfferState(),
             )
         }
     }

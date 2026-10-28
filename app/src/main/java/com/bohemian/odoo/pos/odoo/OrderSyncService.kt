@@ -51,6 +51,8 @@ data class PaidSale(
     val loyaltyProgramId: Int? = null,
     /** pos.preset of the order (the config default, e.g. Pickup); null when presets are off. */
     val presetId: Int? = null,
+    /** Promotions, codes and free items on this sale (ZZ Cash aside). Their lines are inside [totals]. */
+    val offers: AppliedOffers? = null,
 ) {
     val amountPaid: Paise get() = payments.fold(Paise.ZERO) { a, p -> a + p.amount }
 }
@@ -174,17 +176,24 @@ class OrderSyncService(
         private fun odooUtc(millis: Long): String =
             SimpleDateFormat("yyyy-MM-dd HH:mm:ss", Locale.ROOT).apply { timeZone = TimeZone.getTimeZone("UTC") }.format(Date(millis))
 
-        /** Pure: the ZZ Cash change of this sale, or null when there is none (or no program to book it on). */
+        /**
+         * Pure: the loyalty changes of this sale for `confirm_coupon_programs`: the ZZ Cash card's, and
+         * each offer's coupon. Null when there is nothing to book.
+         */
         fun couponData(s: PaidSale): JsonObject? {
-            val programId = s.loyaltyProgramId ?: return null
-            return LoyaltyPoints.couponData(
-                programId = programId,
-                partnerId = s.customer?.id,
-                cardId = s.redemption?.cardId ?: s.loyaltyCardId,
-                earned = s.loyaltyEarned,
-                spent = s.redemption?.reward?.points ?: Paise.ZERO,
-                rewardCodes = listOfNotNull(s.redemption?.rewardCode),
-            )
+            val zz = s.loyaltyProgramId?.let { programId ->
+                LoyaltyPoints.couponData(
+                    programId = programId,
+                    partnerId = s.customer?.id,
+                    cardId = s.redemption?.cardId ?: s.loyaltyCardId,
+                    earned = s.loyaltyEarned,
+                    spent = s.redemption?.reward?.points ?: Paise.ZERO,
+                    rewardCodes = listOfNotNull(s.redemption?.rewardCode),
+                )
+            }
+            val offers = s.offers?.couponData(s.customer?.id).orEmpty()
+            if (zz == null && offers.isEmpty()) return null
+            return JsonObject(zz.orEmpty() + offers.mapValues { (_, v) -> toJson(v) })
         }
 
         /** Pure: unit-tested in OrderPayloadTest. */
@@ -207,7 +216,7 @@ class OrderSyncService(
                     "price_subtotal_incl" to l.totalIncl!!.toRupees(),
                     "note" to LineNotes.toOdoo(l.note),
                 ))
-            } + (s.redemption?.let { rewardLines(it) } ?: emptyList())
+            } + (s.redemption?.let { rewardLines(it) } ?: emptyList()) + (s.offers?.let { offerLines(it) } ?: emptyList())
             val order = mapOf(
                 "uuid" to s.orderUuid,
                 "session_id" to s.sessionId,
@@ -243,6 +252,32 @@ class OrderSyncService(
                 },
             )
             return jsonOf("orders" to listOf(order))
+        }
+
+        /**
+         * Offer reward lines as the web POS sends them (pos_order.js `_getRewardLineValues*`): on the
+         * reward's product at a negative price, flagged, with `reward_id`, `reward_identifier_code` and
+         * `points_cost`. A coupon the bill creates has no id yet: Odoo links the lines to it through
+         * their codes in `confirm_coupon_programs`; a scanned coupon keeps its own id.
+         */
+        private fun offerLines(o: AppliedOffers): List<List<Any>> = o.lines.map { p ->
+            val l = p.line
+            listOf(0, 0, mapOf(
+                "uuid" to UUID.randomUUID().toString(),
+                "product_id" to l.productId,
+                "full_product_name" to l.name,
+                "qty" to l.qty,
+                "price_unit" to l.unitPrice.toRupees(),
+                "discount" to 0,
+                "tax_ids" to listOf(listOf(6, 0, l.taxIds)),
+                "price_subtotal" to p.totalExcl.toRupees(),
+                "price_subtotal_incl" to p.totalIncl.toRupees(),
+                "is_reward_line" to true,
+                "reward_id" to l.rewardId,
+                "coupon_id" to (l.couponKey.takeIf { it > 0 } ?: false),
+                "reward_identifier_code" to l.code,
+                "points_cost" to l.pointsCost,
+            ))
         }
 
         /**

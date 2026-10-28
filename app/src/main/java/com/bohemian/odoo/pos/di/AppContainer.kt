@@ -66,6 +66,7 @@ class AppContainer(context: Context) {
     val sales = com.bohemian.odoo.pos.odoo.SalesService(odoo)
     val liveSync = com.bohemian.odoo.pos.odoo.LiveSync(odoo)
     val billText = com.bohemian.odoo.pos.odoo.BillTextService(odoo)
+    val offers = com.bohemian.odoo.pos.odoo.OffersService(odoo)
     val zzCash = com.bohemian.odoo.pos.odoo.ZzCashService(odoo)
     val orderSync = OrderSyncService(
         odoo = odoo,

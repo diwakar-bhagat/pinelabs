@@ -61,6 +61,8 @@ internal object BillReceipt {
             ReceiptItem(l.product.name, "${l.qty}", rate(amount, BigDecimal(l.qty)), amount)
         } + sale.redemption?.parts.orEmpty().mapNotNull { p ->
             p.totalIncl?.let { ReceiptItem(sale.redemption!!.reward.description, "1", it, it) }
+        } + sale.offers?.lines.orEmpty().map { p ->
+            ReceiptItem(p.line.name, "${p.line.qty}", rate(p.totalIncl, BigDecimal(p.line.qty)), p.totalIncl)
         },
         taxable = sale.totals.totalExcl,
         tax = sale.totals.tax,

@@ -6,6 +6,7 @@ import com.bohemian.odoo.pos.data.SaleSnapshotDao
 import com.bohemian.odoo.pos.data.SaleSnapshotEntity
 import com.bohemian.odoo.pos.payment.PaymentAttempt
 import kotlinx.serialization.Serializable
+import java.math.BigDecimal
 import kotlinx.serialization.decodeFromString
 import kotlinx.serialization.encodeToString
 import kotlinx.serialization.json.Json
@@ -25,6 +26,45 @@ data class SnapshotRedemption(
     val totalInclPaise: Long = 0, val totalExclPaise: Long = 0,
     val parts: List<SnapshotRewardPart> = emptyList(),
 )
+
+/** An offer reward line as stored with the sale, priced, with its code (I4: a retry sends the same). */
+@Serializable
+data class SnapshotOfferLine(
+    val rewardId: Int, val programId: Int, val couponKey: Int, val code: String, val productId: Int, val name: String,
+    val unitPaise: Long, val qty: Int, val taxIds: List<Int>, val pointsCost: String, val rewardProductId: Int? = null,
+    val totalInclPaise: Long, val totalExclPaise: Long,
+)
+
+@Serializable
+data class SnapshotCoupon(val programId: Int, val couponKey: Int, val points: String)
+
+@Serializable
+data class SnapshotProgramInfo(val id: Int, val type: String, val appliesOn: String, val nominative: Boolean, val dateTo: String? = null)
+
+/** The offers on a sale (promotions, codes, free items), ZZ Cash aside. */
+@Serializable
+data class SnapshotOffers(val lines: List<SnapshotOfferLine>, val coupons: List<SnapshotCoupon>, val programs: List<SnapshotProgramInfo>) {
+    fun applied() = AppliedOffers(
+        lines = lines.map {
+            PricedOffer(OfferLine(it.rewardId, it.programId, it.couponKey, it.code, it.productId, it.name, Paise(it.unitPaise), it.qty,
+                it.taxIds, BigDecimal(it.pointsCost), it.rewardProductId), Paise(it.totalInclPaise), Paise(it.totalExclPaise))
+        },
+        coupons = coupons.map { CouponChange(it.programId, it.couponKey, BigDecimal(it.points)) },
+        programs = programs.map { OfferProgramInfo(it.id, it.type, it.appliesOn, it.nominative, it.dateTo) },
+    )
+
+    companion object {
+        fun of(o: AppliedOffers) = SnapshotOffers(
+            lines = o.lines.map { p ->
+                val l = p.line
+                SnapshotOfferLine(l.rewardId, l.programId, l.couponKey, l.code, l.productId, l.name, l.unitPrice.value, l.qty, l.taxIds,
+                    l.pointsCost.toPlainString(), l.rewardProductId, p.totalIncl.value, p.totalExcl.value)
+            },
+            coupons = o.coupons.map { SnapshotCoupon(it.programId, it.couponKey, it.points.toPlainString()) },
+            programs = o.programs.map { SnapshotProgramInfo(it.id, it.type, it.appliesOn, it.nominative, it.dateTo) },
+        )
+    }
+}
 
 @Serializable
 data class SnapshotLine(
@@ -67,7 +107,11 @@ data class SaleSnapshot(
      * (cash is counted at Validate) or, after a crash, once its terminal parts alone cover the total.
      */
     val split: Boolean = false,
+    /** Offers other than ZZ Cash. Absent in snapshots written before the offers engine (0.4.0). */
+    val offers: SnapshotOffers? = null,
 ) {
+    fun appliedOffers(): AppliedOffers? = offers?.applied()
+
     fun zzRedemption(): ZzCashRedemption? = redemption?.let {
         ZzCashRedemption(
             cardId = it.cardId,
@@ -105,6 +149,7 @@ data class SaleSnapshot(
             loyaltyCardId: Int? = null,
             loyaltyProgramId: Int? = null,
             split: Boolean = false,
+            offers: AppliedOffers? = null,
         ) = SaleSnapshot(
             orderUuid = orderUuid,
             sessionId = cfg.currentSessionId ?: error("no open session"),
@@ -137,6 +182,7 @@ data class SaleSnapshot(
             loyaltyProgramId = loyaltyProgramId,
             presetId = cfg.defaultPresetId,
             split = split,
+            offers = offers?.takeIf { it.lines.isNotEmpty() || it.coupons.isNotEmpty() }?.let { SnapshotOffers.of(it) },
         )
     }
 }
@@ -240,6 +286,7 @@ class SaleFinalizer(
             loyaltyCardId = snap.loyaltyCardId,
             loyaltyProgramId = snap.loyaltyProgramId,
             presetId = snap.presetId,
+            offers = snap.appliedOffers(),
         )
         orderSync.submit(sale)          // outbox row written first inside submit()
         snapshots.delete(snap.orderUuid)
