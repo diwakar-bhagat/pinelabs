@@ -36,32 +36,47 @@ data class SnapshotOfferLine(
 )
 
 @Serializable
-data class SnapshotCoupon(val programId: Int, val couponKey: Int, val points: String)
+data class SnapshotCoupon(val programId: Int, val couponKey: Int, val points: String, val correction: String = "0")
+
+@Serializable
+data class SnapshotScanned(val cardId: Int, val programId: Int, val points: String, val code: String)
 
 @Serializable
 data class SnapshotProgramInfo(val id: Int, val type: String, val appliesOn: String, val nominative: Boolean, val dateTo: String? = null)
 
-/** The offers on a sale (promotions, codes, free items), ZZ Cash aside. */
+/** The offers on a sale (promotions, codes, free items), ZZ Cash aside, and the codes and coupons entered. */
 @Serializable
-data class SnapshotOffers(val lines: List<SnapshotOfferLine>, val coupons: List<SnapshotCoupon>, val programs: List<SnapshotProgramInfo>) {
+data class SnapshotOffers(
+    val lines: List<SnapshotOfferLine>, val coupons: List<SnapshotCoupon>, val programs: List<SnapshotProgramInfo>,
+    val codes: List<Int> = emptyList(), val scanned: List<SnapshotScanned> = emptyList(),
+) {
+    /** What the cashier entered on the bill, so a bill brought back (a split part voided) keeps its codes. */
+    fun state() = OfferState(
+        codes = codes.toSet(),
+        claims = lines.map { Claim(it.rewardId, it.couponKey, it.rewardProductId, it.code) }.distinctBy { it.code },
+        scanned = scanned.map { ScannedCoupon(it.cardId, it.programId, BigDecimal(it.points), it.code) },
+    )
+
     fun applied() = AppliedOffers(
         lines = lines.map {
             PricedOffer(OfferLine(it.rewardId, it.programId, it.couponKey, it.code, it.productId, it.name, Paise(it.unitPaise), it.qty,
                 it.taxIds, BigDecimal(it.pointsCost), it.rewardProductId), Paise(it.totalInclPaise), Paise(it.totalExclPaise))
         },
-        coupons = coupons.map { CouponChange(it.programId, it.couponKey, BigDecimal(it.points)) },
+        coupons = coupons.map { CouponChange(it.programId, it.couponKey, BigDecimal(it.points), BigDecimal(it.correction)) },
         programs = programs.map { OfferProgramInfo(it.id, it.type, it.appliesOn, it.nominative, it.dateTo) },
     )
 
     companion object {
-        fun of(o: AppliedOffers) = SnapshotOffers(
+        fun of(o: AppliedOffers, state: OfferState = OfferState()) = SnapshotOffers(
             lines = o.lines.map { p ->
                 val l = p.line
                 SnapshotOfferLine(l.rewardId, l.programId, l.couponKey, l.code, l.productId, l.name, l.unitPrice.value, l.qty, l.taxIds,
                     l.pointsCost.toPlainString(), l.rewardProductId, p.totalIncl.value, p.totalExcl.value)
             },
-            coupons = o.coupons.map { SnapshotCoupon(it.programId, it.couponKey, it.points.toPlainString()) },
+            coupons = o.coupons.map { SnapshotCoupon(it.programId, it.couponKey, it.points.toPlainString(), it.correction.toPlainString()) },
             programs = o.programs.map { SnapshotProgramInfo(it.id, it.type, it.appliesOn, it.nominative, it.dateTo) },
+            codes = state.codes.toList(),
+            scanned = state.scanned.map { SnapshotScanned(it.cardId, it.programId, it.points.toPlainString(), it.code) },
         )
     }
 }
@@ -150,6 +165,7 @@ data class SaleSnapshot(
             loyaltyProgramId: Int? = null,
             split: Boolean = false,
             offers: AppliedOffers? = null,
+            offerState: OfferState = OfferState(),
         ) = SaleSnapshot(
             orderUuid = orderUuid,
             sessionId = cfg.currentSessionId ?: error("no open session"),
@@ -182,7 +198,9 @@ data class SaleSnapshot(
             loyaltyProgramId = loyaltyProgramId,
             presetId = cfg.defaultPresetId,
             split = split,
-            offers = offers?.takeIf { it.lines.isNotEmpty() || it.coupons.isNotEmpty() }?.let { SnapshotOffers.of(it) },
+            offers = (offers ?: AppliedOffers(emptyList(), emptyList(), emptyList()))
+                .takeIf { it.lines.isNotEmpty() || it.coupons.isNotEmpty() || offerState.codes.isNotEmpty() || offerState.scanned.isNotEmpty() }
+                ?.let { SnapshotOffers.of(it, offerState) },
         )
     }
 }

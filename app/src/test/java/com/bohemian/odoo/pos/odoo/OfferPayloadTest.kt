@@ -69,6 +69,26 @@ class OfferPayloadTest {
         assertEquals(setOf("3563", noteKey.toString()), data.keys)
     }
 
+    @Test fun `points its own free items would earn are not booked, as in Odoo`() {
+        val corrected = AppliedOffers(emptyList(), listOf(CouponChange(19, Offers.newCouponKey(19), BigDecimal(3), correction = BigDecimal.ONE)),
+            listOf(OfferProgramInfo(19, "loyalty", "both", nominative = false, dateTo = null)))
+        val e = corrected.couponData(19).getValue(Offers.newCouponKey(19).toString())
+        assertEquals(0, (e["points_earned"] as BigDecimal).compareTo(BigDecimal(2)))
+    }
+
+    @Test fun `a program whose booking rules are unknown is booked only with a reward used`() {
+        val unknown = AppliedOffers(emptyList(), listOf(CouponChange(77, Offers.newCouponKey(77), BigDecimal.ONE)), emptyList())
+        assertTrue(unknown.couponData(19).isEmpty())
+    }
+
+    @Test fun `a stored bill keeps the codes and coupons entered on it`() {
+        val state = OfferState(codes = setOf(30), claims = listOf(Claim(11, noteKey, code = "k3xq9z1ab")),
+            scanned = listOf(ScannedCoupon(9001, 3, BigDecimal.ONE, "CPN-1")))
+        val snap = SaleSnapshot.of("u1", cfg, listOf(set), CartTotals(Paise.ofRupees(699), Paise(59237)), customer = null, offers = offers, offerState = state)
+        val json = Json { ignoreUnknownKeys = true }
+        assertEquals(state, json.decodeFromString<SaleSnapshot>(json.encodeToString(snap)).offers!!.state())
+    }
+
     @Test fun `nothing to book, nothing sent`() = assertNull(OrderSyncService.couponData(sale(o = null)))
 
     @Test fun `a stored sale sends the same offer lines and codes after a crash`() {

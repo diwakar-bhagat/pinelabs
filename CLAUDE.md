@@ -727,6 +727,7 @@ company password manager + encrypted drive.
 - [ ] Offers not supported on the till: gift cards, eWallets, coupons for a next order, pricelist-limited programs (none in use)
 - [ ] Under the POS-User key, confirm `pos.session.load_data`, `product.product.search` on reward domains, `use_coupon_code` and `formatted_read_group` on `pos.order` / `pos.payment` are allowed
 - [ ] First live sale with an offer from the till (UAT 24–27), then read `loyalty.history` and the order's reward lines back
+- [ ] A code whose program has several rewards waits for the cashier's pick under Reward; Odoo applies the only claimable one at once (no live program has several)
 
 ---
 

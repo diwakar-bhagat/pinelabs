@@ -180,6 +180,18 @@ class OffersTest {
         assertTrue(run(listOf(later), listOf(line(21916, "Momos", "149", listOf(36)), line(21796, "Coffee", "139", listOf(36)))).lines.isEmpty())
     }
 
+    @Test fun `a code's minimum is the bill after the automatic discounts, as in Odoo`() {
+        // ₹899 of Fugeno, 35% off on the bill (as the till saves it from the reprice before), then the code:
+        // ₹584.35 is under the ₹800 the note needs, so it is not claimable.
+        val programs = listOf(fugeno, zzNote200)
+        val cart = listOf(line(601, "Fugeno Jacket", "899", listOf(30)))
+        val before = run(programs, cart)
+        val r = run(programs, cart, OfferState(codes = setOf(activated(programs, "NOTE200X")), claims = before.claims))
+        assertEquals(listOf(30), r.lines.map { it.rewardId })
+        // Without Fugeno the same bill takes the note.
+        assertEquals(listOf(11), run(listOf(zzNote200), listOf(line(601, "Fugeno Jacket", "899", listOf(30))), OfferState(codes = setOf(30))).lines.map { it.rewardId })
+    }
+
     @Test fun `a code already on the bill is refused`() =
         assertEquals(Offers.CodeCheck.Refused("That promo code program has already been activated."),
             Offers.ruleForCode(listOf(zzNote200), "NOTE200X", today, OfferState(codes = setOf(30))))

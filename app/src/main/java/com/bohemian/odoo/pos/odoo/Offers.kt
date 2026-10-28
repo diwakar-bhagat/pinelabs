@@ -134,8 +134,14 @@ data class OfferLine(
     val amount: Paise get() = unitPrice * qty
 }
 
-/** Points a program gives on this bill, on its coupon or card ([couponKey]). */
-data class CouponChange(val programId: Int, val couponKey: Int, val points: BigDecimal)
+/**
+ * Points a program gives on this bill, on its coupon or card ([couponKey]). [correction] is Odoo's
+ * `_getPointsCorrection`: points its own free items would otherwise earn, taken off when booking.
+ */
+data class CouponChange(val programId: Int, val couponKey: Int, val points: BigDecimal, val correction: BigDecimal = BigDecimal.ZERO) {
+    /** What Odoo books as earned (pos_store.js `postProcessLoyalty`). */
+    val earned: BigDecimal get() = points - correction
+}
 
 /** A reward the bill can take now; for a reward with several free items, [productChoices] are those in the cart. */
 data class Claimable(
@@ -192,7 +198,7 @@ data class AppliedOffers(val lines: List<PricedOffer>, val coupons: List<CouponC
             if (p != null && (p.nominative || p.type == "next_order_coupons") && partnerId != null) e["partner_id"] = partnerId
             if (p != null && p.type != "loyalty" && p.dateTo != null) e["expiration_date"] = p.dateTo
         }
-        for (c in coupons) entries[c.couponKey] = entry(c.programId, c.couponKey, c.points)
+        for (c in coupons) entries[c.couponKey] = entry(c.programId, c.couponKey, c.earned)
         for (l in lines.map { it.line }) {
             val e = entries.getOrPut(l.couponKey) { entry(l.programId, l.couponKey, BigDecimal.ZERO) }
             @Suppress("UNCHECKED_CAST")
@@ -201,7 +207,8 @@ data class AppliedOffers(val lines: List<PricedOffer>, val coupons: List<CouponC
             e["points"] = (e["points"] as BigDecimal) - l.pointsCost
             e["points_spent"] = (e["points_spent"] as BigDecimal) + l.pointsCost
         }
-        return entries.filter { (_, e) -> info[e["program_id"] as Int]?.appliesOn != "current" || e.containsKey("line_codes") }
+        // A program whose booking rules are unknown is treated like one acting on this bill only.
+        return entries.filter { (_, e) -> info[e["program_id"] as Int]?.appliesOn.let { it != null && it != "current" } || e.containsKey("line_codes") }
             .entries.associate { (k, v) -> k.toString() to v }
     }
 }
@@ -243,22 +250,25 @@ object Offers {
             if (pass == 1) (claims - kept.toSet()).filter { !it.auto }.forEach { c ->
                 messages += "${e.reward(c.rewardId)?.description ?: "Reward"}: the bill no longer qualifies"
             }
-            val auto = e.claimable(coupons, lines, auto = true)
+            fun ordered(all: List<Claim>) = all.filter { e.reward(it.rewardId)?.type == "product" } + all.filter { e.reward(it.rewardId)?.type != "product" }
+            // The claims that stand first; new automatic rewards are judged on that bill, as Odoo judges
+            // them on the order with its reward lines (a code's minimum is the bill after other discounts).
+            val base = e.applyAll(ordered(kept), coupons)
+            messages += base.messages
+            val auto = e.claimable(coupons, base.lines, auto = true)
                 .filter { cl ->
                     cl.program.rewards.size == 1 && !cl.program.nominative && (cl.reward.type != "product" || cl.productId != null) &&
-                        kept.none { it.rewardId == cl.reward.id && it.couponKey == cl.couponKey }
+                        base.claims.none { it.rewardId == cl.reward.id && it.couponKey == cl.couponKey }
                 }
                 .map { Claim(it.reward.id, it.couponKey, it.productId, newCode(), auto = true) }
-            val all = kept + auto
-            val ordered = all.filter { e.reward(it.rewardId)?.type == "product" } + all.filter { e.reward(it.rewardId)?.type != "product" }
-            val applied = e.applyAll(ordered, coupons)
+            val applied = if (auto.isEmpty()) base else e.applyAll(ordered(base.claims + auto), coupons)
             messages += applied.messages
             val stable = applied.lines == lines && applied.claims == claims
             lines = applied.lines
             claims = applied.claims
             if (stable) break
         }
-        val coupons = e.coupons(e.points(lines))
+        val coupons = e.coupons(e.points(lines)).map { it.copy(correction = e.correction(it.programId, lines)) }
         val claimable = e.claimable(coupons, lines, auto = false).filter { cl -> lines.none { it.rewardId == cl.reward.id } }
         return OfferResult(lines, coupons, claimable, claims, messages.toList())
     }
@@ -714,6 +724,8 @@ object Offers {
             } else perReward
             return minOf(available, freeQty) - claimed
         }
+
+        fun correction(programId: Int, lines: List<OfferLine>): BigDecimal = programs[programId]?.let { pointsCorrection(it, lines) } ?: ZERO
 
         /** Odoo `_getPointsCorrection`: points the free items of a program would otherwise earn. */
         private fun pointsCorrection(p: OfferProgram, lines: List<OfferLine>): BigDecimal {

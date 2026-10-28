@@ -272,6 +272,8 @@ fun SellScreen(vm: PosViewModel) {
         }
         s.error?.let { Text(it, color = MaterialTheme.colorScheme.error, modifier = Modifier.padding(8.dp)) }
         s.notice?.let { Text(it, Modifier.fillMaxWidth().background(Zz.GoldSoft).padding(8.dp)) }
+        if (s.offersUnavailable) Text("Offers and codes could not be loaded from Odoo, so none apply now. The till tries again every minute.",
+            Modifier.fillMaxWidth().background(Zz.GoldSoft).padding(8.dp))
         s.offlineCatalogSavedAt?.let { at ->
             Row(Modifier.fillMaxWidth().background(Zz.GoldSoft).padding(8.dp), verticalAlignment = Alignment.CenterVertically) {
                 Text("Catalogue not refreshed (${s.catalogStaleReason ?: "No connection to Odoo"}) — showing the complete one from " +
