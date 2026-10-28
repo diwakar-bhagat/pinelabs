@@ -24,22 +24,42 @@ class CustomerService(private val odoo: OdooJson2Client) {
     suspend fun findByPhone(e164: String): Customer? = search(listOf("phone_sanitized", "=", e164))
 
     /**
+     * "Name or mobile" in the customer dialog: [MIN_DIGITS]+ digits search the phone's last digits,
+     * [MIN_LETTERS]+ letters search the name. One page of [limit] from [offset], A→Z, so every match
+     * can be reached by scrolling. Empty when too little is typed.
+     */
+    suspend fun search(query: String, offset: Int = 0, limit: Int = PAGE): List<Customer> =
+        if (isPhoneQuery(query)) searchByPhoneSuffix(query, offset, limit) else searchByName(query, offset, limit)
+
+    /**
      * Search by the last N digits of the phone number (minimum 4).
      * Cashiers remember the last few digits; this lets them find the customer without
-     * typing the full number. Returns up to [limit] matches.
+     * typing the full number.
      *
      * Uses Odoo's `=ilike` operator: `phone_sanitized =ilike %<digits>` matches phones
      * ending with those digits.
      */
-    suspend fun searchByPhoneSuffix(digits: String, limit: Int = 5): List<Customer> {
+    suspend fun searchByPhoneSuffix(digits: String, offset: Int = 0, limit: Int = PAGE): List<Customer> {
         val clean = digits.filter { it.isDigit() }
-        if (clean.length < 4) return emptyList()
-        return odoo.call("res.partner", "search_read", jsonOf(
-            "domain" to listOf(listOf("phone_sanitized", "=ilike", "%$clean")),
-            "fields" to PARTNER_FIELDS,
-            "limit" to limit,
-        )).objects().map { it.toCustomer() }
+        if (clean.length < MIN_DIGITS) return emptyList()
+        return page(listOf(listOf("phone_sanitized", "=ilike", "%$clean")), offset, limit)
     }
+
+    /** Customers whose name (or email) contains [text], A→Z: "ra" lists every Rahul, Ravi and Sara. */
+    suspend fun searchByName(text: String, offset: Int = 0, limit: Int = PAGE): List<Customer> {
+        val q = text.trim()
+        if (q.count { it.isLetter() } < MIN_LETTERS) return emptyList()
+        return page(listOf("|", listOf("name", "ilike", q), listOf("email", "ilike", q)), offset, limit)
+    }
+
+    private suspend fun page(domain: List<Any?>, offset: Int, limit: Int): List<Customer> =
+        odoo.call("res.partner", "search_read", jsonOf(
+            "domain" to domain,
+            "fields" to PARTNER_FIELDS,
+            "offset" to offset,
+            "limit" to limit,
+            "order" to "name, id",
+        )).objects().map { it.toCustomer() }
 
     /** Look a business up by its GSTIN, so a repeat B2B customer is not re-created. */
     suspend fun findByGstin(gstin: String): Customer? =
@@ -105,9 +125,21 @@ class CustomerService(private val odoo: OdooJson2Client) {
         fiscalPositionId = m2oId("property_account_position_id"),
     )
 
-    private companion object {
-        val PARTNER_FIELDS = listOf(
+    companion object {
+        private val PARTNER_FIELDS = listOf(
             "name", "phone", "vat", "l10n_in_gst_treatment", "state_id", "property_account_position_id",
         )
+
+        /** Results per page in the customer dialog; the next page loads as the list is scrolled. */
+        const val PAGE = 20
+        const val MIN_DIGITS = 4
+        const val MIN_LETTERS = 2
+
+        /** Typed text is a mobile (digits, spaces, +), not a name. */
+        fun isPhoneQuery(query: String): Boolean = query.any { it.isDigit() } && query.none { it.isLetter() }
+
+        /** Enough typed to search: [MIN_DIGITS] digits of a mobile, or [MIN_LETTERS] letters of a name. */
+        fun isSearchable(query: String): Boolean =
+            if (isPhoneQuery(query)) query.count { it.isDigit() } >= MIN_DIGITS else query.count { it.isLetter() } >= MIN_LETTERS
     }
 }

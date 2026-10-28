@@ -42,6 +42,22 @@ class ProductGridTest {
         assertEquals(listOf(tee), grid.show(null, "abn-bk-gm"))
     }
 
+    @Test fun `names starting with the search come first, then a word starting with it, then the rest, each A to Z`() {
+        val masala = product(1, "Masalachai Premix")
+        val latteChai = product(2, "Chai Latte")
+        val kulhad = product(3, "Kulhad Chai")
+        val adrak = product(4, "Adrak Elaichi Chai")
+        val chaiBun = product(5, "chai bun")
+        val g = ProductGrid(listOf(masala, latteChai, kulhad, adrak, chaiBun), menu)
+        assertEquals(listOf(chaiBun, latteChai, adrak, kulhad, masala), g.show(null, "chai"))
+    }
+
+    @Test fun `an exact barcode comes before names that merely contain it`() {
+        val code = product(1, "Gift box", barcode = "1234")
+        val named = product(2, "Box 1234 large")
+        assertEquals(listOf(code, named), ProductGrid(listOf(named, code), menu).show(null, "1234"))
+    }
+
     @Test fun `nothing is capped`() {
         val many = (1..2421).map { product(it, "SKU $it") }
         assertEquals(2421, ProductGrid(many, menu).show(null, "").size)

@@ -14,6 +14,7 @@ import com.bohemian.odoo.pos.odoo.CartTotals
 import com.bohemian.odoo.pos.odoo.CatalogIncomplete
 import com.bohemian.odoo.pos.odoo.ProductGrid
 import com.bohemian.odoo.pos.odoo.Customer
+import com.bohemian.odoo.pos.odoo.CustomerService
 import com.bohemian.odoo.pos.odoo.ZzCashBalance
 import com.bohemian.odoo.pos.odoo.ZzCashProgram
 import com.bohemian.odoo.pos.odoo.ZzCashReward
@@ -185,12 +186,15 @@ data class SellState(
     val lines: List<CartLine> = emptyList(),
     val totals: CartTotals? = null,
     val pricing: Boolean = false,
+    /** What is typed in the customer dialog's "Name or mobile" field: a mobile (digits) or part of a name. */
     val phone: String = "",
     val customerName: String = "",
     /** Attached customer. Set only by [PosViewModel.pickCustomer] (a match, a lookup or a saved new customer). */
     val customer: Customer? = null,
-    /** Matches returned by partial phone search (last N digits). */
+    /** Customers matching [phone] (last digits of the mobile, or the name), A→Z, the pages loaded so far. */
     val customerMatches: List<Customer> = emptyList(),
+    /** Odoo has more matches than [customerMatches]: the next page loads when the list is scrolled to its end. */
+    val customerHasMore: Boolean = false,
     /** The typed mobile is valid but no customer has it: the dialog offers to save a new one. */
     val customerNotFound: Boolean = false,
     /** Confirmation or error in the customer dialog ("Saved: …", "Enter the customer's name"). */
@@ -888,10 +892,11 @@ class PosViewModel(private val c: AppContainer) : ViewModel() {
 
     fun remove(uuid: String) = editCart { lines -> lines.filterNot { it.uuid == uuid } }
 
-    fun setPhone(v: String) {
-        val cleaned = v.filter { ch -> ch.isDigit() || ch == '+' }.take(14)
+    /** "Name or mobile": the last digits of a mobile, or part of a name or email. */
+    fun setCustomerQuery(v: String) {
+        val cleaned = v.filter { ch -> ch.isLetterOrDigit() || ch in " +.-@'" }.take(40)
         _sell.update { it.copy(phone = cleaned, customerNotFound = false, customerNote = null) }
-        searchCustomerByPhone(cleaned)
+        searchCustomers(cleaned)
     }
 
     fun setCustomerName(v: String) = _sell.update { it.copy(customerName = v.take(60), customerNote = null) }
@@ -901,6 +906,8 @@ class PosViewModel(private val c: AppContainer) : ViewModel() {
      * new-customer form when nobody has it.
      */
     fun lookupCustomer() = launchSafe {
+        // Find on a name searches at once instead of after the typing pause.
+        if (!CustomerService.isPhoneQuery(_sell.value.phone)) return@launchSafe searchCustomers(_sell.value.phone, debounce = false)
         val e164 = c.customers.normalizeIndianMobile(_sell.value.phone)
             ?: return@launchSafe _sell.update { it.copy(customerNote = "Enter the 10-digit mobile number.") }
         val typed = _sell.value.phone
@@ -925,7 +932,7 @@ class PosViewModel(private val c: AppContainer) : ViewModel() {
         val s = _sell.value
         if (s.customerBusy) return@launchSafe
         val e164 = c.customers.normalizeIndianMobile(s.phone)
-            ?: return@launchSafe _sell.update { it.copy(customerNote = "Enter the 10-digit mobile number.") }
+            ?: return@launchSafe _sell.update { it.copy(customerNote = "Type the new customer's 10-digit mobile in Name or mobile.") }
         val name = s.customerName.trim()
         if (name.isEmpty()) return@launchSafe _sell.update { it.copy(customerNote = "Enter the customer's name.") }
         _sell.update { it.copy(customerBusy = true, customerNote = null, customerNoteOk = false) }
@@ -961,6 +968,7 @@ class PosViewModel(private val c: AppContainer) : ViewModel() {
             customerName = customer.name,
             phone = customer.phone?.filter { it.isDigit() || it == '+' } ?: _sell.value.phone,
             customerMatches = emptyList(),
+            customerHasMore = false,
             customerNotFound = false,
             // A different customer has a different card: the old balance and reward must not carry over.
             zzCash = if (changed) null else it.zzCash,
@@ -1062,7 +1070,7 @@ class PosViewModel(private val c: AppContainer) : ViewModel() {
         phoneSearchJob?.cancel()
         val hadReward = _sell.value.zzRedemption != null
         _sell.update {
-            it.copy(customer = null, customerMatches = emptyList(), phone = "", customerName = "",
+            it.copy(customer = null, customerMatches = emptyList(), customerHasMore = false, phone = "", customerName = "",
                 customerNotFound = false, customerNote = null,
                 zzCash = null, zzRewards = emptyList(), zzRedemption = null, zzLookup = ZzLookup.NONE,
                 // The reward was inside the total: without it the old total must never be charged.
@@ -1074,24 +1082,52 @@ class PosViewModel(private val c: AppContainer) : ViewModel() {
     private var phoneSearchJob: kotlinx.coroutines.Job? = null
 
     /**
-     * Fire a background search when the cashier types ≥4 digits. Debounced: only the
-     * last keystroke's search runs. Clears matches when input is too short.
+     * Search in the background once 4 digits or 2 letters are typed: the first page, A→Z. Debounced:
+     * only the last keystroke's search runs. Clears the list when too little is typed.
      */
-    private fun searchCustomerByPhone(digits: String) {
-        val clean = digits.filter { it.isDigit() }
+    private fun searchCustomers(query: String, debounce: Boolean = true) {
         phoneSearchJob?.cancel() // any edit cancels the search in flight
-        if (clean.length < 4) {
-            _sell.update { it.copy(customerMatches = emptyList()) }
+        if (!CustomerService.isSearchable(query)) {
+            _sell.update { it.copy(customerMatches = emptyList(), customerHasMore = false) }
             return
         }
         phoneSearchJob = launchSafe {
-            kotlinx.coroutines.delay(300) // debounce keystrokes
+            if (debounce) delay(CUSTOMER_SEARCH_DEBOUNCE_MS)
             try {
-                val matches = c.customers.searchByPhoneSuffix(clean)
-                // Only for what is typed now: a slow answer for older digits is dropped.
-                _sell.update { if (it.phone.filter { ch -> ch.isDigit() } == clean) it.copy(customerMatches = matches) else it }
-            } catch (_: Exception) {
-                // search failure is silent — the cashier can still type the full number
+                val page = c.customers.search(query)
+                // Only for what is typed now: a slow answer for older text is dropped.
+                _sell.update {
+                    if (it.phone == query) it.copy(customerMatches = page, customerHasMore = page.size == CustomerService.PAGE) else it
+                }
+            } catch (e: CancellationException) {
+                throw e
+            } catch (e: Exception) {
+                // The cashier can still type the full number; the reason goes to the log only.
+                PosLog.w("CUSTOMER_SEARCH_FAILED", "err" to e.message)
+            }
+        }
+    }
+
+    /** The list was scrolled to its end: append the next page of the same search. */
+    fun loadMoreCustomers() {
+        val s = _sell.value
+        if (!s.customerHasMore || phoneSearchJob?.isActive == true) return
+        val query = s.phone
+        val offset = s.customerMatches.size
+        phoneSearchJob = launchSafe {
+            try {
+                val page = c.customers.search(query, offset)
+                _sell.update {
+                    if (it.phone != query || it.customerMatches.size != offset) it
+                    else it.copy(
+                        customerMatches = (it.customerMatches + page).distinctBy { m -> m.id },
+                        customerHasMore = page.size == CustomerService.PAGE,
+                    )
+                }
+            } catch (e: CancellationException) {
+                throw e
+            } catch (e: Exception) {
+                PosLog.w("CUSTOMER_SEARCH_FAILED", "offset" to offset, "err" to e.message)
             }
         }
     }
@@ -1414,6 +1450,9 @@ class PosViewModel(private val c: AppContainer) : ViewModel() {
         }
         val customer = s.customer ?: run {
             if (s.phone.isBlank()) return@run null
+            if (!CustomerService.isPhoneQuery(s.phone)) return null.also {
+                _sell.update { it.copy(error = "Pick the customer from the list under Customer, or clear the search.") }
+            }
             // A typed number must belong to a saved customer: nobody is created silently at payment.
             val e164 = c.customers.normalizeIndianMobile(s.phone)
                 ?: return null.also { _sell.update { it.copy(error = "The customer mobile is not valid. Fix or clear it under Customer.") } }
@@ -1606,7 +1645,7 @@ class PosViewModel(private val c: AppContainer) : ViewModel() {
         _sell.update {
             it.copy(
                 orderUuid = UUID.randomUUID().toString(), lines = emptyList(), totals = null, partPaid = Paise.ZERO,
-                phone = "", customerName = "", customer = null, customerMatches = emptyList(), zzCash = null,
+                phone = "", customerName = "", customer = null, customerMatches = emptyList(), customerHasMore = false, zzCash = null,
                 customerNotFound = false, customerNote = null, zzLookup = ZzLookup.NONE,
                 zzRewards = emptyList(), zzRedemption = null, selectedLine = null, keypad = "",
                 fiscalPosition = fiscalPositionsById[it.config?.defaultFiscalPositionId],
@@ -1636,6 +1675,9 @@ class PosViewModel(private val c: AppContainer) : ViewModel() {
 
         /** Search waits this long after the last key before filtering the grid. */
         private const val SEARCH_DEBOUNCE_MS = 120L
+
+        /** The customer search asks Odoo once typing pauses this long. */
+        private const val CUSTOMER_SEARCH_DEBOUNCE_MS = 300L
 
         /** Taps closer together than this are priced once, together. */
         private const val REPRICE_DEBOUNCE_MS = 150L

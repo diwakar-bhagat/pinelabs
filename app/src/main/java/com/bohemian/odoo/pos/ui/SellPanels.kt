@@ -512,8 +512,34 @@ private fun RewardsDialog(s: SellState, vm: PosViewModel, onDismiss: () -> Unit)
 }
 
 /**
- * Find the customer by mobile (last digits as you type, or the full number + Find), or save a
- * new one: name + mobile → Save creates the Odoo customer and attaches them to this sale.
+ * Every customer matching "Name or mobile", A→Z. Odoo sends 20 at a time; scrolling near the end
+ * asks for the next 20, so all matches (436 for "ra") can be reached.
+ */
+@Composable
+private fun CustomerMatches(s: SellState, vm: PosViewModel) {
+    if (s.customerMatches.isEmpty()) return
+    val list = rememberLazyListState()
+    // A new search starts at the top again.
+    LaunchedEffect(s.phone) { list.scrollToItem(0) }
+    val nearEnd by remember { derivedStateOf { (list.layoutInfo.visibleItemsInfo.lastOrNull()?.index ?: 0) >= list.layoutInfo.totalItemsCount - 4 } }
+    LaunchedEffect(nearEnd, s.customerMatches.size) { if (nearEnd) vm.loadMoreCustomers() }
+    Text("${s.customerMatches.size}${if (s.customerHasMore) "+" else ""} found" + if (s.customerHasMore) " · scroll for more" else "",
+        fontSize = 13.sp, color = Zz.Muted)
+    LazyColumn(Modifier.heightIn(max = 300.dp), state = list) {
+        items(s.customerMatches, key = { it.id }) { m ->
+            Row(Modifier.fillMaxWidth().clickable { vm.pickCustomer(m) }.padding(vertical = 10.dp),
+                verticalAlignment = Alignment.CenterVertically) {
+                Text(m.name, Modifier.weight(1f), fontWeight = FontWeight.Bold, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                Text(m.phone ?: "", fontSize = 13.sp, color = Zz.Muted)
+            }
+            HorizontalDivider(color = Zz.Line)
+        }
+    }
+}
+
+/**
+ * Find the customer by name or mobile (as you type, or the full number + Find), or save a new
+ * one: mobile above + name → Save creates the Odoo customer and attaches them to this sale.
  */
 @Composable
 private fun CustomerDialog(s: SellState, vm: PosViewModel, onDismiss: () -> Unit) {
@@ -540,27 +566,18 @@ private fun CustomerDialog(s: SellState, vm: PosViewModel, onDismiss: () -> Unit
                     }
                 } else {
                     Row(verticalAlignment = Alignment.CenterVertically) {
-                        // Locked while Find / Save talk to Odoo, so the answer always matches the number shown.
-                        OutlinedTextField(s.phone, vm::setPhone, Modifier.weight(1f), singleLine = true, enabled = !s.customerBusy,
-                            label = { Text("Customer mobile (for WhatsApp bill)") },
-                            keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Phone, imeAction = ImeAction.Search),
+                        // Locked while Find / Save talk to Odoo, so the answer always matches the text shown.
+                        OutlinedTextField(s.phone, vm::setCustomerQuery, Modifier.weight(1f), singleLine = true, enabled = !s.customerBusy,
+                            label = { Text("Name or mobile") },
+                            keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Text, imeAction = ImeAction.Search),
                             keyboardActions = KeyboardActions(onSearch = { vm.lookupCustomer() }))
                         Spacer(Modifier.width(8.dp))
                         OutlinedButton({ vm.lookupCustomer() }, Modifier.height(56.dp), enabled = !s.customerBusy,
                             shape = RoundedCornerShape(6.dp)) { Text("Find") }
                     }
-                    LazyColumn(Modifier.heightIn(max = 200.dp)) {
-                        items(s.customerMatches, key = { it.id }) { m ->
-                            Row(Modifier.fillMaxWidth().clickable { vm.pickCustomer(m) }.padding(vertical = 10.dp),
-                                verticalAlignment = Alignment.CenterVertically) {
-                                Text(m.name, Modifier.weight(1f), fontWeight = FontWeight.Bold, maxLines = 1, overflow = TextOverflow.Ellipsis)
-                                Text(m.phone ?: "", fontSize = 13.sp, color = Zz.Muted)
-                            }
-                            HorizontalDivider(color = Zz.Line)
-                        }
-                    }
+                    CustomerMatches(s, vm)
                     // New customer: always offered, and called out when the full number is not in Odoo.
-                    Text(if (s.customerNotFound) "Not in Odoo yet: save as a new customer" else "New customer",
+                    Text(if (s.customerNotFound) "Not in Odoo yet: save as a new customer" else "New customer: mobile above, name here",
                         fontWeight = FontWeight.Bold, fontSize = 14.sp, color = if (s.customerNotFound) Zz.Red else Zz.Black)
                     Row(verticalAlignment = Alignment.CenterVertically) {
                         OutlinedTextField(s.customerName, vm::setCustomerName, Modifier.weight(1f), singleLine = true,
