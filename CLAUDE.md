@@ -527,7 +527,8 @@ Private (`_x`) methods are not callable.
   points (earned − spent) are booked right after with `pos.order.confirm_coupon_programs` —
   `sync_from_ui` alone never moves them (`docs/ZZ_CASH.md`, 2026-10-27).
 - **Automations:** WhatsApp bill, ZZ Cash expiry, dashboard webhook fire server-side on
-  `sync_from_ui` orders. E700 `pos.config` id must be added to their filters.
+  `sync_from_ui` orders. They have no store filter (checked 2026-10-28): the WhatsApp bill covers every
+  POS order except self-order (`source not in (mobile, kiosk)`), so E700 orders from any store get it.
 
 ---
 
@@ -686,7 +687,8 @@ company password manager + encrypted drive.
 - **Release keystore** password was exposed in an earlier agent session. Rotate with
   `keytool -storepasswd`. The SHA-256 fingerprint is safe to share.
 - API keys stored encrypted on device (Setup screen). One key per terminal.
-- Odoo user for E700 has POS User rights only — minimal privilege.
+- Odoo user for E700: one per store, POS User rights only — minimal privilege. Not yet true: the key
+  in use is an administrator's (§13, `docs/ROLLOUT_STORES.md`).
 - `.gitignore` excludes all secrets. **The repo is public** by the owner's choice.
 - Never log: API keys, keystore passwords, card PAN, customer phone numbers.
 - Release builds strip debug-level logs.
@@ -702,7 +704,7 @@ company password manager + encrypted drive.
 - [x] Upgrade Pine SDK 1.0.0 → 2.0.0 (2026-10-24, from the Pine POS MCP; `currency` string, `invoice_number`)
 - [ ] Capture a web POS refund `sync_from_ui` payload on the UAT config and diff it against `RefundService.buildPayload` (`tools/payload_diff.py`) — 4c was built from Odoo 19 source, not a capture
 - [x] Confirm SDK 1.0.0 `init` arity and `amount` type against `classes.jar` in AAR (2026-10-23)
-- [ ] Add E700 `pos.config` id to WhatsApp / ZZ Cash automation filters in Odoo
+- [x] WhatsApp / ZZ Cash automations: no store filter to extend; E700 orders from every store are covered (checked 2026-10-28)
 - [ ] E700 printer width in dots and chars per line (measure on device)
 - [ ] Confirm `GetStatus` relevance for card sales (vs UPI/BQR only)
 - [ ] Confirm `charge_slip_print_data` vs what MasterApp auto-prints
@@ -717,7 +719,7 @@ company password manager + encrypted drive.
 - [ ] Abandoning a split bill after a UPI part: UPI cannot be voided from the till; a supervisor refunds it in Odoo
 - [ ] A voided E700 sale keeps its earned ZZ Cash (Odoo's refund books negative points) — fix with the settled-sale refund
 - [ ] Live check of `confirm_coupon_programs` from the till: one approved cash sale, then `loyalty.history` read back
-- [ ] Odoo API key in use belongs to Ankur (internal user, res.users 28) — create a POS-User-only user for the E700 and issue its own key
+- [ ] Odoo API key in use belongs to Ankur (internal user, res.users 28), Administrator in Accounting, Inventory, POS and Sales; every E700 bill records him as cashier. Before rollout: one POS-User-only user and key per store, never one shared key (`docs/ROLLOUT_STORES.md`, "Before a store goes live" item 1)
 - [ ] Under that POS-User key, confirm `res.partner.create` (Save customer) and `loyalty.card` reads are allowed
 - [ ] Odoo's "ZenZebra Bill" PDF prints the order time in UTC (12:04 pm for a 17:34 sale): set Asia/Kolkata as the time zone of the user the WhatsApp automation runs as
 - [ ] Pine image print type for the bill logo (Setup switch, UAT 9b)
@@ -728,8 +730,14 @@ company password manager + encrypted drive.
 - [ ] Under the POS-User key, confirm `pos.session.load_data`, `product.product.search` on reward domains, `use_coupon_code` and `formatted_read_group` on `pos.order` / `pos.payment` are allowed
 - [ ] First live sale with an offer from the till (UAT 24–27), then read `loyalty.history` and the order's reward lines back
 - [ ] A code whose program has several rewards waits for the cashier's pick under Reward; Odoo applies the only claimable one at once (no live program has several)
-- [ ] "Cash" at KLJ, SWN, HQ27GGN and Club 125 is payment method 4, type Bank (`is_cash_count` false): an E700 there takes exact cash only, no change. Owner / accountant to decide on a Cash-type method per store before rollout (`docs/CASE_2026-10-28_PINE_OVERPAY.md`)
+- [ ] "Cash" at KLJ, SWN, HQ27GGN and Club 125 is payment method 4, type Bank (`is_cash_count` false): Setup lists no Cash method there, so an E700 refuses every cash sale ("No cash method configured"), and method 4 shows up as a Card / UPI choice in Setup. Owner / accountant to decide on a Cash-type method per store before rollout (`docs/CASE_2026-10-28_PINE_OVERPAY.md`)
 - [ ] Odoo's shared "Pine labs" method 10 is still on ZenZebra (config 1) and Club 125 (config 8): a web POS payment there rings HQ27GGN's terminal
+- [ ] Multi-store rollout checklist: `docs/ROLLOUT_STORES.md` (live check, 2026-10-28). Items still open:
+  - "Pine Labs E700 (A2A)" (method 22) is only on ZenZebra (config 1). Add it to KLJ, SWN, HQ27GGN and Club 125 (configs 2, 3, 4, 8) before their terminals are set up
+  - Web POS and E700 on one store's POS share one session, and I9 sees only the E700's own pending work: one device closes the day
+  - Change the Setup PIN from 1234 on every terminal
+  - The till ignores pricelists: today pricelist 1 only touches shelf-rental products, which are not in POS
+  - KLJ, SWN and Club 125 (Noida) and HQ27 (Gurugram) sell under company 1 (Delhi GSTIN); "ZenZebra Noida" / "ZenZebra Haryana" exist with archived POS configs. Moving a store to its state company needs a till change first (company context on every call)
 
 ---
 
@@ -754,4 +762,5 @@ in the repo root (`ODOO_URL`, `ODOO_DB`, `ODOO_USER`, `ODOO_API_KEY`). Writes ne
 | `PINE_CASE_2026-10-24.md` | Integration case for Pine: routes (AppToApp / Cloud / PadController), what works vs blocked, questions |
 | `REVIEW.md` | External review checklist (2026-10-27): findings F1–F6 with fixes, endpoint map, identity/signing, commands run, blockers |
 | `AGENT_PROMPT_E700_A2A.md` | Prompt for an on-device AI agent (adb) to run and report the App-to-App flow safely |
+| `ROLLOUT_STORES.md` | Multi-store rollout checklist: per-store Odoo user and key, E700 and Cash methods, who closes the day, terminal Setup, checks under the store key |
 | `CASE_2026-10-28_PINE_OVERPAY.md` | Case study: Odoo web POS took ₹42 by Pine on a ₹20 bill at HQ27GGN; why, the fix, and how the E700 till prevents it |
