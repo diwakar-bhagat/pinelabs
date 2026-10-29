@@ -636,6 +636,7 @@ class PosViewModel(private val c: AppContainer) : ViewModel() {
         } catch (e: Exception) {
             val reason = when {
                 e is OdooException.Network -> "No connection to Odoo"
+                e is OdooException.Server && e.status == 429 -> "Odoo is busy (too many requests)"
                 e is OdooException.Server && e.status >= 500 -> "Odoo is not answering (HTTP ${e.status})"
                 e is CatalogIncomplete -> "Odoo sent ${e.got} of ${e.expected} products"
                 else -> null

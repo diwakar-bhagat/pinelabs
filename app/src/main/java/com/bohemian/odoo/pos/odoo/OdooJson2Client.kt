@@ -2,6 +2,9 @@ package com.bohemian.odoo.pos.odoo
 
 import com.bohemian.odoo.pos.core.PosLog
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.sync.Semaphore
+import kotlinx.coroutines.sync.withPermit
 import kotlinx.coroutines.suspendCancellableCoroutine
 import kotlinx.coroutines.withContext
 import kotlinx.serialization.SerializationException
@@ -43,7 +46,35 @@ class OdooJson2Client(
     private val http: OkHttpClient = defaultHttp(),
     val json: Json = Json { ignoreUnknownKeys = true; explicitNulls = false },
 ) {
-    suspend fun call(model: String, method: String, body: JsonObject = JsonObject(emptyMap())): JsonElement =
+    /** At most [MAX_IN_FLIGHT] Odoo calls at once from this till, so live sync, photos and pricing never burst. */
+    private val gate = Semaphore(MAX_IN_FLIGHT)
+
+    /** Until when every call waits: Odoo said 429 (Too Many Requests) and how long to back off. */
+    @Volatile private var coolUntil = 0L
+
+    /**
+     * One JSON-2 call. Odoo Online answers 429 (or 503) when a database gets too many requests; it
+     * refuses the request without running it, so the call waits ([Retry-After], else 2 / 4 / 8 s) and
+     * is sent again, and every other call waits with it instead of adding to the burst.
+     */
+    suspend fun call(model: String, method: String, body: JsonObject = JsonObject(emptyMap())): JsonElement {
+        var attempt = 0
+        while (true) {
+            (coolUntil - System.currentTimeMillis()).takeIf { it > 0 }?.let { delay(it) }
+            val result = gate.withPermit { send(model, method, body) }
+            val wait = result.retryAfterMs ?: return result.value()
+            if (attempt >= THROTTLE_RETRIES) return result.value()
+            attempt++
+            val backoff = maxOf(wait, 2_000L shl (attempt - 1)).coerceAtMost(30_000L)
+            coolUntil = maxOf(coolUntil, System.currentTimeMillis() + backoff)
+            PosLog.w("ODOO_THROTTLED", "m" to "$model.$method", "attempt" to attempt, "wait_ms" to backoff)
+        }
+    }
+
+    /** An answer, or the HTTP error to throw; [retryAfterMs] set when Odoo asked to slow down. */
+    private class Sent(val retryAfterMs: Long?, val value: () -> JsonElement)
+
+    private suspend fun send(model: String, method: String, body: JsonObject): Sent =
         withContext(Dispatchers.IO) {
             val key = apiKey()?.takeIf { it.isNotBlank() } ?: throw OdooException.Auth("Odoo API key not set")
             val req = Request.Builder()
@@ -54,16 +85,20 @@ class OdooJson2Client(
                 .post(body.toString().toRequestBody(JSON))
                 .build()
             val started = System.currentTimeMillis()
-            val (code, text) = try {
+            val (code, text, retryAfter) = try {
                 http.newCall(req).await()
             } catch (e: IOException) {
                 throw OdooException.Network(e)
             }
             PosLog.d("ODOO_CALL", "m" to "$model.$method", "http" to code, "ms" to (System.currentTimeMillis() - started))
-            when {
-                code in 200..299 -> parse(text, code)
-                code == 401 || code == 403 -> throw OdooException.Auth(errorMessage(text) ?: "Unauthorized")
-                else -> throw OdooException.Server(code, errorName(text), errorMessage(text) ?: "HTTP $code")
+            val throttled = if (code == 429 || code == 503) (retryAfter?.trim()?.toLongOrNull()?.times(1000) ?: 0L) else null
+            Sent(throttled) {
+                when {
+                    code in 200..299 -> parse(text, code)
+                    code == 401 || code == 403 -> throw OdooException.Auth(errorMessage(text) ?: "Unauthorized")
+                    code == 429 -> throw OdooException.Server(code, "TooManyRequests", "Odoo is busy (too many requests). Wait a moment and retry.")
+                    else -> throw OdooException.Server(code, errorName(text), errorMessage(text) ?: "HTTP $code")
+                }
             }
         }
 
@@ -82,7 +117,7 @@ class OdooJson2Client(
      * a timeout or a screen that moved on really stops waiting (a blocking execute() cannot be
      * stopped). Re-sent writes are safe: orders and loyalty are deduplicated by Odoo (I7).
      */
-    private suspend fun Call.await(): Pair<Int, String> = suspendCancellableCoroutine { cont ->
+    private suspend fun Call.await(): Triple<Int, String, String?> = suspendCancellableCoroutine { cont ->
         cont.invokeOnCancellation { runCatching { cancel() } }
         enqueue(object : Callback {
             override fun onFailure(call: Call, e: IOException) {
@@ -90,7 +125,7 @@ class OdooJson2Client(
             }
 
             override fun onResponse(call: Call, response: Response) {
-                val read = runCatching { response.use { it.code to (it.body?.string().orEmpty()) } }
+                val read = runCatching { response.use { Triple(it.code, it.body?.string().orEmpty(), it.header("Retry-After")) } }
                 if (!cont.isActive) return
                 read.fold(
                     { cont.resume(it) },
@@ -106,6 +141,8 @@ class OdooJson2Client(
 
     companion object {
         private val JSON = "application/json; charset=utf-8".toMediaType()
+        private const val MAX_IN_FLIGHT = 3
+        private const val THROTTLE_RETRIES = 3
         fun defaultHttp(): OkHttpClient = OkHttpClient.Builder()
             .connectTimeout(10, TimeUnit.SECONDS)
             .readTimeout(30, TimeUnit.SECONDS)
