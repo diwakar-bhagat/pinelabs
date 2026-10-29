@@ -47,6 +47,32 @@ class PaymentRolesTest {
         assertFalse(PaymentRoles.bookable(PaymentMethod(30, "UPI QR", isCash = false, terminal = null, kind = "qr_code")))
     }
 
+    // SWN as read live on 2026-10-29: the E700 method added, its till still saved on "Pine Labs SWN".
+    private val pineSwn = PaymentMethod(19, "Pine Labs SWN", isCash = false, terminal = "pine_labs", kind = "terminal")
+    private val swn = listOf(razorpay, bankCash, cards, online, upi, pineSwn, e700)
+
+    @Test fun `a saved Odoo-driven method is not offered, so Setup picks SWN's methods again`() {
+        assertFalse(PaymentRoles(card = 19, upi = 19, cash = 0).offeredIn(swn))
+        assertEquals(PaymentRoles(card = 22, upi = 22, cash = 4), PaymentRoles.defaults(swn))
+        assertTrue(PaymentRoles(card = 22, upi = 22, cash = 4).offeredIn(swn))
+        // A tender turned off stays off; a method of another store is not offered here.
+        assertTrue(PaymentRoles(card = 5, upi = 0, cash = 4).offeredIn(swn))
+        assertFalse(PaymentRoles(card = 22, upi = 22, cash = 2).offeredIn(swn))
+        // Cash is never offered for card or UPI, nor Cards for cash.
+        assertFalse(PaymentRoles(card = 4, upi = 7, cash = 4).offeredIn(swn))
+        assertFalse(PaymentRoles(card = 5, upi = 7, cash = 5).offeredIn(swn))
+    }
+
+    @Test fun `the till warns when a tender books on a method Odoo drives itself`() {
+        assertEquals("Card and UPI are booked on \"Pine Labs SWN\", which Odoo's web POS uses with its own device. " +
+            "Ask a supervisor to tap SETUP and choose again.",
+            PaymentRoles(card = 19, upi = 19, cash = 4).unbookableWarning(swn))
+        assertEquals("Cash is booked on \"Customer Account\", which is not a till payment method. Ask a supervisor to tap SETUP and choose again.",
+            PaymentRoles(card = 22, upi = 22, cash = 13).unbookableWarning(swn + customerAccount))
+        assertEquals(null, PaymentRoles(card = 22, upi = 22, cash = 4).unbookableWarning(swn))
+        assertEquals(null, PaymentRoles(card = 5, upi = 7, cash = 4).unbookableWarning(swn))
+    }
+
     @Test fun `each terminal mode books on its own method`() {
         val roles = PaymentRoles(card = 5, upi = 7, cash = 4)
         assertEquals(5, roles.forMode(PayMode.CARD))

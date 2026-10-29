@@ -127,6 +127,10 @@ fun SetupScreen(vm: PosViewModel) {
             MethodChips(terminalChoices, s.upiMethodId, vm::setUpiMethod)
             Text("5. Cash method")
             MethodChips(cashChoices, s.cashMethodId, vm::setCashMethod)
+            if (s.methodsRepicked) {
+                Text("The methods saved on this till are not all offered for ${s.selectedConfig?.name} any more, so they were picked again from Odoo. Check them before Start selling.",
+                    Modifier.background(Zz.GoldSoft).padding(4.dp), style = MaterialTheme.typography.bodySmall)
+            }
             val byName = s.methods.associateBy { it.id }
             if (listOf(s.cardMethodId, s.upiMethodId).any { id -> id != 0 && byName[id]?.name?.contains("E700", true) == false }) {
                 Text("No E700 method on this POS in Odoo: card and UPI are booked on the store's own methods, as its web POS books them.",
@@ -280,6 +284,7 @@ fun SellScreen(vm: PosViewModel) {
         }
         s.error?.let { Text(it, color = MaterialTheme.colorScheme.error, modifier = Modifier.padding(8.dp)) }
         s.notice?.let { Text(it, Modifier.fillMaxWidth().background(Zz.GoldSoft).padding(8.dp)) }
+        s.methodWarning?.let { Text(it, Modifier.fillMaxWidth().background(Zz.GoldSoft).padding(8.dp)) }
         if (s.offersUnavailable) Text("Offers and codes could not be loaded from Odoo, so none apply now. The till tries again every minute.",
             Modifier.fillMaxWidth().background(Zz.GoldSoft).padding(8.dp))
         s.offlineCatalogSavedAt?.let { at ->

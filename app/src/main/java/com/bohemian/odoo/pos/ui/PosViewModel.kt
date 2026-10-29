@@ -121,6 +121,8 @@ data class SetupState(
     val cardMethodId: Int = 0,
     val upiMethodId: Int = 0,
     val cashMethodId: Int = 0,
+    /** The methods saved on this terminal for this POS are not all offered any more, so they were picked again. */
+    val methodsRepicked: Boolean = false,
     val printerWidth: Int = 24,
     val useFake: Boolean = false,
     val kioskMode: Boolean = false,
@@ -277,6 +279,8 @@ data class SellState(
     val offerPrograms: List<OfferProgramInfo> = emptyList(),
     /** Odoo's offers could not be loaded for this session: promotions and codes are off until they are. */
     val offersUnavailable: Boolean = false,
+    /** A tender is set to a method the till must not book on (`PaymentRoles.unbookableWarning`); sales go on. */
+    val methodWarning: String? = null,
 ) {
     // Derived values are computed once per state, not on every read while the screen is drawn.
 
@@ -394,11 +398,15 @@ class PosViewModel(private val c: AppContainer) : ViewModel() {
 
     fun selectConfig(cfg: PosConfig) = launchSetup {
         val methods = c.catalog.paymentMethods(cfg.paymentMethodIds)
-        // The same store as before keeps the methods chosen for it; another store starts from Odoo's.
-        val saved = c.paymentRoles().takeIf { cfg.id == c.settings.posConfigId && it.any && it.ids.all { id -> id in cfg.paymentMethodIds } }
+        // The same store as before keeps the methods chosen for it, but only while Setup still offers each
+        // one: a method it does not show (an Odoo-driven Pine link saved by an older build) would otherwise
+        // be saved again unseen. Another store, or a stale choice, starts from Odoo's.
+        val previous = c.paymentRoles().takeIf { cfg.id == c.settings.posConfigId && it.any }
+        val saved = previous?.takeIf { it.offeredIn(methods) }
         val roles = saved ?: PaymentRoles.defaults(methods)
         _setup.update {
-            it.copy(selectedConfig = cfg, methods = methods, cardMethodId = roles.card, upiMethodId = roles.upi, cashMethodId = roles.cash)
+            it.copy(selectedConfig = cfg, methods = methods, cardMethodId = roles.card, upiMethodId = roles.upi, cashMethodId = roles.cash,
+                methodsRepicked = previous != null && saved == null)
         }
     }
 
@@ -569,6 +577,11 @@ class PosViewModel(private val c: AppContainer) : ViewModel() {
                 // Products the store's pricelist prices differently from the list price: not sold here.
                 // Like the products, a failed read fails the load (never sell without knowing).
                 val pricelistJob = async { c.pricelists.hold(cfg, SalesService.utc(System.currentTimeMillis())) }
+                // The methods this terminal books on, for the warning when one is Odoo-driven; never blocks.
+                val methodsJob = async {
+                    runCatching { c.catalog.paymentMethods(c.paymentRoles().ids.toList()) }
+                        .onFailure { PosLog.w("PAYMENT_METHODS_READ_FAILED", "err" to it.message) }.getOrNull()
+                }
                 val products = productsJob.await()
                 val taxIds = products.flatMap { it.taxIds }.toSet()
                 val primeJob = async { c.fiscalPositions.primeTaxFiscalPositions(taxIds.toList()) }
@@ -576,7 +589,7 @@ class PosViewModel(private val c: AppContainer) : ViewModel() {
                 val positions = fposJob.await()
                 primeJob.await()
                 Loaded(products, positions, zzJob.await(), categoriesJob.await(), notesJob.await(), addressJob.await(), taxNamesJob.await(),
-                    stampsJob.await(), billTextJob.await(), offersJob.await(), pricelistJob.await())
+                    stampsJob.await(), billTextJob.await(), offersJob.await(), pricelistJob.await(), methodsJob.await())
             }
             if (generation != catalogGeneration) return@launchSafe // a newer load owns the screen
             val (products, positions, zz, categories, notes, address, names) = loaded
@@ -604,8 +617,10 @@ class PosViewModel(private val c: AppContainer) : ViewModel() {
                     // The cashier's tab survives a reload; All when it is gone or none was chosen.
                     selectedCateg = it.selectedCateg?.takeIf { id -> categories.any { c -> c.id == id } },
                     fiscalPosition = fiscalPositionsById[cfg.defaultFiscalPositionId],
+                    methodWarning = if (loaded.methods != null) c.paymentRoles().unbookableWarning(loaded.methods) else it.methodWarning,
                 ).regrid()
             }
+            _sell.value.methodWarning?.let { PosLog.w("PAYMENT_METHOD_UNBOOKABLE", "roles" to c.paymentRoles().ids) }
             // Only a complete catalogue is cached, so a later failure never falls back to a partial one.
             launchSafe(Dispatchers.IO) {
                 runCatching { c.catalogCache.save(cfg, products, categories = categories, notes = notes) }
@@ -662,6 +677,8 @@ class PosViewModel(private val c: AppContainer) : ViewModel() {
         /** Null when Odoo's loader could not be read: no offers, ZZ Cash found the old way. */
         val offers: List<OfferProgram>?,
         val pricelist: PricelistHold,
+        /** The methods this terminal books on; null when they could not be read (the last warning stays). */
+        val methods: List<PaymentMethod>?,
     )
 
     // ------------------------------------------------------------------ live Odoo data

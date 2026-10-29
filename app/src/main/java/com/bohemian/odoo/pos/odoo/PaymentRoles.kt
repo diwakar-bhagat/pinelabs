@@ -22,6 +22,29 @@ data class PaymentRoles(val card: Int = 0, val upi: Int = 0, val cash: Int = 0) 
 
     val ids: Set<Int> get() = setOf(card, upi, cash) - 0
 
+    /** Every method set here is one Setup offers for its tender, among a store's [methods]. */
+    fun offeredIn(methods: List<PaymentMethod>): Boolean {
+        val terminal = terminalChoices(methods).map { it.id }
+        val cashIds = cashChoices(methods).map { it.id }
+        return (card == 0 || card in terminal) && (upi == 0 || upi in terminal) && (cash == 0 || cash in cashIds)
+    }
+
+    /**
+     * Why a method set here is one the till must not book on, or null ([methods]: at least the ones
+     * set here). Builds before 0.5.0 could save one: SWN's till booked card and UPI on "Pine Labs SWN",
+     * the web POS's own Pine link (2026-10-29). Odoo takes those sales, so the till warns, never stops.
+     */
+    fun unbookableWarning(methods: List<PaymentMethod>): String? {
+        val byId = methods.associateBy { it.id }
+        val wrong = listOf("Card" to card, "UPI" to upi, "Cash" to cash)
+            .mapNotNull { (tender, id) -> byId[id]?.takeIf { !bookable(it) }?.let { tender to it } }
+        if (wrong.isEmpty()) return null
+        return wrong.groupBy({ it.second }, { it.first }).map { (m, tenders) ->
+            val why = if (m.terminal != null || m.kind != "none") "which Odoo's web POS uses with its own device" else "which is not a till payment method"
+            "${tenders.joinToString(" and ")} ${if (tenders.size > 1) "are" else "is"} booked on \"${m.name}\", $why"
+        }.joinToString("; ") + ". Ask a supervisor to tap SETUP and choose again."
+    }
+
     companion object {
         /**
          * A method the till may book on. Excluded:
