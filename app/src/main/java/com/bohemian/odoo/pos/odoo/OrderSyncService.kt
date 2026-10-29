@@ -9,6 +9,7 @@ import com.bohemian.odoo.pos.data.OutboxDao
 import com.bohemian.odoo.pos.data.OutboxEntity
 import com.bohemian.odoo.pos.pine.PayMode
 import com.bohemian.odoo.pos.pine.TxnDetails
+import kotlinx.coroutines.withContext
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.jsonObject
 import java.text.SimpleDateFormat
@@ -84,7 +85,7 @@ class OrderSyncService(
                 .upsert(LoyaltyConfirmEntity(uuid, couponData.toString(), 0, null, clock(), 0))
         }
         outbox.upsert(OutboxEntity(uuid, payload.toString(), amountPaise, 0, null, clock(), 0))
-        return trySend(uuid, payload)
+        return withContext(OdooLane.SALE) { trySend(uuid, payload) }
     }
 
     /**
@@ -125,29 +126,35 @@ class OrderSyncService(
         for (row in dao.due(now)) if (row.orderUuid !in waitingOrders && row.orderUuid !in sending) confirmLoyalty(row)
     }
 
-    /** Called by the background loop (every 30 s) and after each sale. */
-    suspend fun flushDue(): Int {
+    /**
+     * Called by the background loop (every 30 s), in Odoo's background lane. After an outage it sends
+     * at most [MAX_PER_PASS] orders per pass, one at a time, so 20 tills do not empty their outboxes
+     * into Odoo at once.
+     */
+    suspend fun flushDue(): Int = withContext(OdooLane.BACKGROUND) {
         var sent = 0
-        for (e in outbox.due(clock())) {
+        for (e in outbox.due(clock()).take(MAX_PER_PASS)) {
             val payload = odoo.json.parseToJsonElement(e.payloadJson).jsonObject
             if (trySend(e.orderUuid, payload, e.attempts)) sent++
         }
         flushLoyalty(clock())
-        return sent
+        sent
     }
 
     /** Session close: try every outbox order now, ignoring backoff (the web POS syncs before closing too). */
-    suspend fun flushAll(): Int {
+    suspend fun flushAll(): Int = withContext(OdooLane.SALE) {
         var sent = 0
         for (e in outbox.due(Long.MAX_VALUE)) {
             val payload = odoo.json.parseToJsonElement(e.payloadJson).jsonObject
             if (trySend(e.orderUuid, payload, e.attempts)) sent++
         }
         flushLoyalty(Long.MAX_VALUE)
-        return sent
+        sent
     }
 
-    private fun backoff(attempts: Int) = minOf(15 * 60_000L, 30_000L shl minOf(attempts, 5)) // 30s → 16 min cap
+    /** 30 s, 1, 2, 4, 8 min, then 15 min, ±25% so tills that failed together do not retry together. */
+    private fun backoff(attempts: Int) =
+        (minOf(15 * 60_000L, 30_000L shl minOf(attempts, 5)) * (0.75 + Math.random() * 0.5)).toLong()
 
     /**
      * Orders being sent right now. The 30 s background loop and the live sale can reach the same
@@ -173,6 +180,9 @@ class OrderSyncService(
     }
 
     companion object {
+        /** Outbox orders sent per background pass (every 30 s); session close sends them all. */
+        const val MAX_PER_PASS = 10
+
         private fun odooUtc(millis: Long): String =
             SimpleDateFormat("yyyy-MM-dd HH:mm:ss", Locale.ROOT).apply { timeZone = TimeZone.getTimeZone("UTC") }.format(Date(millis))
 

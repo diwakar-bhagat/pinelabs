@@ -45,6 +45,7 @@ import com.bohemian.odoo.pos.odoo.PosCategory
 import com.bohemian.odoo.pos.odoo.PosNote
 import com.bohemian.odoo.pos.odoo.FiscalPosition
 import com.bohemian.odoo.pos.odoo.OdooException
+import com.bohemian.odoo.pos.odoo.OdooLane
 import com.bohemian.odoo.pos.odoo.PaidSale
 import com.bohemian.odoo.pos.odoo.PaymentLineData
 import com.bohemian.odoo.pos.odoo.PaymentMethod
@@ -482,6 +483,14 @@ class PosViewModel(private val c: AppContainer) : ViewModel() {
 
     private var catalogLoadedAt = 0L
 
+    /** Full loads that failed in a row, and when live sync may try the next one. */
+    private var loadFailures = 0
+    private var nextReloadAt = 0L
+
+    /** 1, 2, 4, 8, 15 minutes after the 1st … 5th failure in a row, ±25%, so 20 tills do not retry together. */
+    private fun reloadBackoffMs(failures: Int): Long =
+        ((60_000L shl (failures - 1).coerceIn(0, 4)).coerceAtMost(15 * 60_000L) * (0.75 + Math.random() * 0.5)).toLong()
+
     /** On resume: refresh the catalogue and photos when the last load is older than 30 minutes. */
     fun refreshIfStale() {
         if (_configured.value && System.currentTimeMillis() - catalogLoadedAt > 30 * 60_000L && !_sell.value.loading
@@ -610,6 +619,8 @@ class PosViewModel(private val c: AppContainer) : ViewModel() {
             c.pricing.clearCache()
             rewardsCache = null
             completeCatalogAt = System.currentTimeMillis()
+            loadFailures = 0
+            nextReloadAt = 0L
             _sell.update {
                 it.copy(
                     config = cfg, products = products, loading = false, offlineCatalogSavedAt = null, catalogStaleReason = null,
@@ -643,11 +654,19 @@ class PosViewModel(private val c: AppContainer) : ViewModel() {
             }
             if (reason == null) { _sell.update { it.copy(loading = false, error = friendly(e)) }; return@launchSafe }
             PosLog.w("CATALOG_REFRESH_FAILED", "reason" to e::class.simpleName, "err" to e.message)
+            loadFailures++
+            nextReloadAt = System.currentTimeMillis() + reloadBackoffMs(loadFailures)
+            val posId = c.settings.posConfigId
+            val onScreen = _sell.value.products.isNotEmpty() && completeCatalogAt > 0 && _sell.value.config?.id == posId
+            // Odoo busy (429) is not offline: the till keeps selling from what it has, and live sync
+            // carries on after the cool-down. Marking it offline made live sync reload all every minute.
+            if (onScreen && e is OdooException.Server && e.status == 429) {
+                _sell.update { it.copy(loading = false, notice = "Odoo is busy, so the menu was not refreshed. The till keeps the one it has and catches up by itself.") }
+                return@launchSafe
+            }
             // Phase 5: keep the last complete catalogue so the till is usable for browsing; selling
             // still needs Odoo pricing (I2), which fails with a friendly error until it is back.
             // Only the catalogue of the POS this terminal is set to: never another POS's session.
-            val posId = c.settings.posConfigId
-            val onScreen = _sell.value.products.isNotEmpty() && completeCatalogAt > 0 && _sell.value.config?.id == posId
             val cached = if (onScreen) null else withContext(Dispatchers.IO) { c.catalogCache.load() }?.takeIf { it.config.id == posId }
             if (cached != null) useCatalog(cached.products, cached.categories)
             _sell.update {
@@ -702,7 +721,7 @@ class PosViewModel(private val c: AppContainer) : ViewModel() {
             while (true) {
                 delay(LIVE_SYNC_MS)
                 try {
-                    liveSyncOnce()
+                    withContext(OdooLane.BACKGROUND) { liveSyncOnce() }
                 } catch (e: CancellationException) {
                     throw e
                 } catch (e: Exception) {
@@ -720,8 +739,12 @@ class PosViewModel(private val c: AppContainer) : ViewModel() {
     private suspend fun liveSyncOnce() {
         val s = _sell.value
         if (!_configured.value || s.loading || s.pay != PayUi.Idle || payStarting || _split.value != null) return
-        // Offline, or the first load never completed: the full load is the retry (and the way back online).
-        if (s.offlineCatalogSavedAt != null || completeCatalogAt == 0L) return reloadAll()
+        // Offline, or the first load never completed: the full load is the retry (and the way back online),
+        // 1, 2, 4 … 15 minutes apart after failures, never every minute.
+        if (s.offlineCatalogSavedAt != null || completeCatalogAt == 0L) {
+            if (System.currentTimeMillis() >= nextReloadAt) reloadAll()
+            return
+        }
         val generation = catalogGeneration
         val old = liveStamps ?: return run { liveStamps = c.liveSync.read() }
         val current = s.config ?: return reloadAll()
@@ -1009,9 +1032,11 @@ class PosViewModel(private val c: AppContainer) : ViewModel() {
         if (_sell.value.loading) return@launchSafe // a second tap must not create a second pos.session
         _sell.update { it.copy(loading = true, error = null) }
         try {
-            c.sessions.open(c.settings.posConfigId)
+            withContext(OdooLane.SALE) { c.sessions.open(c.settings.posConfigId) }
             val cfg = c.catalog.config(c.settings.posConfigId)
             _sell.update { it.copy(config = cfg ?: it.config, loading = false) }
+            // Offers and ZZ Cash come per session: without this they stayed empty until the next full load.
+            cfg?.let { reloadLoyalty(it) }
         } catch (e: Exception) {
             _sell.update { it.copy(loading = false, error = friendly(e)) }
         }
@@ -1051,7 +1076,7 @@ class PosViewModel(private val c: AppContainer) : ViewModel() {
         } else null
         _closing.update { it?.copy(busy = true, error = null) }
         try {
-            when (val r = c.sessions.close(sessionId, cfg.cashControl, counted, ui.notes.trim())) {
+            when (val r = withContext(OdooLane.SALE) { c.sessions.close(sessionId, cfg.cashControl, counted, ui.notes.trim()) }) {
                 CloseResult.Closed -> {
                     PosLog.i("SESSION_CLOSED", "session" to sessionId)
                     _closing.update { it?.copy(busy = false, closed = true) }
@@ -1114,9 +1139,13 @@ class PosViewModel(private val c: AppContainer) : ViewModel() {
         if (_sales.value != null) return
         _sales.value = SalesUi(storeName = _sell.value.config?.name ?: c.settings.posConfigName)
         salesJob = launchSafe {
+            var first = true
             while (true) {
-                // Never competes with a payment for the network.
-                if (_sell.value.pay !is PayUi.Working) loadSales()
+                // Never competes with a payment for the network; the minute refreshes wait behind the cashier.
+                if (_sell.value.pay !is PayUi.Working) {
+                    if (first) loadSales() else withContext(OdooLane.BACKGROUND) { loadSales() }
+                    first = false
+                }
                 delay(SALES_REFRESH_MS)
             }
         }

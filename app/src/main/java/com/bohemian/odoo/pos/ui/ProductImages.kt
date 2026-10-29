@@ -6,6 +6,7 @@ import android.util.LruCache
 import androidx.compose.ui.graphics.ImageBitmap
 import androidx.compose.ui.graphics.asImageBitmap
 import com.bohemian.odoo.pos.core.PosLog
+import com.bohemian.odoo.pos.odoo.OdooLane
 import com.bohemian.odoo.pos.odoo.Product
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.CoroutineScope
@@ -87,7 +88,7 @@ class ProductImages(
     }
 
     private suspend fun download(batch: List<Product>) {
-        val got = try { fetch(batch.map { it.id }) } catch (e: Exception) {
+        val got = try { withContext(OdooLane.BACKGROUND) { fetch(batch.map { it.id }) } } catch (e: Exception) {
             PosLog.w("IMAGE_FETCH_FAILED", "count" to batch.size, "err" to e.message); return
         }
         dir.mkdirs()
