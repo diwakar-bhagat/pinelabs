@@ -17,10 +17,15 @@ payment-method change per store.**
 |---|---|---|---|---|---|
 | 1 | ZenZebra | ZenZebra (Delhi) | 22 "Pine Labs E700 (A2A)" | 2 "Cash" (cash count) | 10 "Pine labs" |
 | 2 | KLJ | ZenZebra (Delhi) | 5 "Cards" / 7 "UPI" | 4 "Cash" (Bank type) | 20 "Pine Labs KLJ" |
-| 3 | SWN | ZenZebra (Delhi) | 5 / 7 | 4 | 19 "Pine Labs SWN" |
+| 3 | SWN | ZenZebra (Delhi) | 22 "Pine Labs E700 (A2A)" (since 29 Oct) | 4 | 19 "Pine Labs SWN" |
 | 4 | HQ27GGN | ZenZebra (Delhi) | 5 / 7 | 4 | 10 "Pine labs" |
 | 8 | Club 125 | ZenZebra (Delhi) | 5 / 7 | 4 | 10 and 18 "Pine Labs Club 125" |
 
+- Configs 11 Kite Noida and 12 Kite Gurugram (seen 29 Oct) have methods 1, 4, 5, 6 and 22: the till
+  books card / UPI on 22 and cash on 4. Their company and pricelist are not checked yet.
+- **SWN, 29 Oct:** its till had saved 19 "Pine Labs SWN" from an older build and kept booking card and
+  UPI there after method 22 was added. 0.5.1 shows a gold bar for such a method and Setup picks again;
+  on 0.5.0, tap each method in Setup by hand.
 - Configs 9 and 10 (ZZ Café HO / KLJ) take only Razorpay and are not E700 stores.
 - Configs 5, 6 and 7 are archived copies of KLJ, SWN and HQ27 under the "ZenZebra Noida" and
   "ZenZebra Haryana" companies.

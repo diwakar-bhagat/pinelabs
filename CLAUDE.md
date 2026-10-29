@@ -526,6 +526,21 @@ store. Checked live against every POS config (read-only).
   - **Live:** watched in the minute loop (`product.pricelist.item`, and products).
   - **Today:** pricelist 1's 8 rules are on shelf rentals, which are not in POS, so nothing is held.
 
+### Decisions 2026-10-29 (SWN's till on the web POS's Pine link, 0.5.1)
+
+Method 22 "Pine Labs E700 (A2A)" was added to SWN (config 3) after SWN/00241 closed, yet the SWN
+till kept booking card and UPI on 19 "Pine Labs SWN", the web POS's own Pine link: 26 payments,
+₹1,780 on 29 Oct, none with a Plutus ref.
+- **Why:** an older build had saved 19. 0.5.0 never offers an Odoo-driven method in Setup, but for the
+  same store it kept the saved methods when they were still on the config, so the chips showed nothing
+  selected and Start selling saved 19 again.
+- **Setup** (`PaymentRoles.offeredIn`): the saved methods are kept only when Setup offers each one for
+  its tender. Otherwise Setup starts from Odoo's picks (SWN: 22 / 22 / 4) and says the saved ones were
+  picked again.
+- **Till** (`PaymentRoles.unbookableWarning`): every catalogue load reads the terminal's own methods.
+  One that is Odoo-driven, QR, online or customer account shows a gold bar naming it and asking for a
+  supervisor's Setup. Sales go on, since Odoo accepts them; a failed read keeps the last warning.
+
 ---
 
 ## 6. Odoo integration (verified against live DB, 2026-09-21)
@@ -700,7 +715,7 @@ company password manager + encrypted drive.
 | 20 | SPLIT ₹500: UPI ₹300, then Cash ₹200 (tendered ₹500) | UPI charged for ₹300 only; Validate; change ₹300 shown; Odoo order has 2 payment lines = ₹500; bill shows both |
 | 21 | SPLIT: UPI ₹200, then Card for the rest; close the screen after UPI | Red bar "partly paid"; cart and New bill locked; FINISH reopens it; Card charges only the rest |
 | 22 | SETUP with 1234, change the PIN, wrong PIN 5 × | Setup opens; new PIN works, 1234 no longer; locked 60 s after 5 wrong tries |
-| 23 | Top bar badge | Shows "PROD · 0.5.0", so the installed build is never a guess |
+| 23 | Top bar badge | Shows "PROD · 0.5.1", so the installed build is never a guess |
 | 24 | ⋮ → Enter Code: a ZZ Note on a bill below its minimum, then add items past it | "Code accepted"; the ₹N off line appears by itself once the bill qualifies; paid; Odoo order has the reward line and the WhatsApp PDF shows it |
 | 25 | Sampling code on a 2-item bill | One unit of the cheaper item comes off |
 | 26 | At a store with a combo / Fugeno / free item (HQ27, KLJ, Club 125): the combo's two items; a free item tapped last | Discount line appears by itself; the free item comes off; ✕ takes an offer off and it stays off for this bill |
@@ -711,6 +726,7 @@ company password manager + encrypted drive.
 | 31 | Setup on a terminal for KLJ (or SWN, HQ27GGN, Club 125) | Card "Cards", UPI "UPI", Cash "Cash" picked by themselves, with the two notes; Start selling works |
 | 32 | At that store: one card, one UPI and one cash sale (tender more than the bill) | Change shown and handed back; Odoo orders have Cards / UPI / Cash lines equal to the bills; SALES "Paid by" shows them |
 | 33 | ZenZebra terminal updated from 0.4.0 to 0.5.0, without Setup | Card and UPI still on "Pine Labs E700 (A2A)"; Setup shows it on both |
+| 34 | SWN terminal still saved on "Pine Labs SWN", updated to 0.5.1 | Gold bar names "Pine Labs SWN"; sales still go through. SETUP → SWN: Card and UPI show "Pine Labs E700 (A2A)", Cash "Cash", with the "picked again" note; Start selling; bar gone; the next card / UPI sale is on method 22 in Odoo |
 
 ---
 
@@ -777,7 +793,8 @@ company password manager + encrypted drive.
 - [x] Cash at KLJ, SWN, HQ27GGN and Club 125 (method 4, Bank type): the till books cash on it since 0.5.0, as their web POS does, and hands change back. A Cash-type method per store stays an accounting choice (`docs/CASE_2026-10-28_PINE_OVERPAY.md`)
 - [ ] Odoo's shared "Pine labs" method 10 is still on ZenZebra (config 1) and Club 125 (config 8): a web POS payment there rings HQ27GGN's terminal
 - [ ] Multi-store rollout checklist: `docs/ROLLOUT_STORES.md` (live check, 2026-10-28). Items still open:
-  - Optional since 0.5.0: "Pine Labs E700 (A2A)" (method 22) is only on ZenZebra. Elsewhere card and UPI are booked on the store's "Cards" / "UPI". Add method 22 to a store only if the accountant wants E700 payments apart; the web POS there then shows it too
+  - Optional since 0.5.0: "Pine Labs E700 (A2A)" (method 22) is on ZenZebra, SWN, Kite Noida and Kite Gurugram (29 Oct). Elsewhere card and UPI are booked on the store's "Cards" / "UPI". Add method 22 to a store only if the accountant wants E700 payments apart; the web POS there then shows it too
+  - SWN's till: redo Setup (or install 0.5.1, which shows the bar). Until then its card and UPI go on 19 "Pine Labs SWN" (26 payments, ₹1,780 on 29 Oct); refund those on UPI or Cash, never through "Pine Labs SWN"
   - Web POS and E700 on one store's POS share one session, and I9 sees only the E700's own pending work: one device closes the day
   - Change the Setup PIN from 1234 on every terminal
   - The till charges list prices: products a store's pricelist prices differently are refused (0.5.0 guard); a store that needs pricelist prices on the E700 needs pricelist pricing ported from the web POS first
