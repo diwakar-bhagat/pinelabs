@@ -29,6 +29,7 @@ import com.bohemian.odoo.pos.odoo.RewardPart
 import com.bohemian.odoo.pos.odoo.SalesService
 import com.bohemian.odoo.pos.odoo.LiveArea
 import com.bohemian.odoo.pos.odoo.LiveStamps
+import com.bohemian.odoo.pos.odoo.LiveSync
 import com.bohemian.odoo.pos.odoo.ProductGrid
 import com.bohemian.odoo.pos.odoo.Customer
 import com.bohemian.odoo.pos.odoo.CustomerService
@@ -89,9 +90,11 @@ import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withTimeoutOrNull
 import java.text.SimpleDateFormat
+import java.util.Calendar
 import java.util.Date
 import java.util.Locale
 import java.util.UUID
+import kotlin.random.Random
 
 /** The close-session dialog. Figures come from Odoo; the cashier types only counted cash and notes. */
 data class ClosingUi(
@@ -131,6 +134,8 @@ data class SetupState(
     val printLogo: Boolean = false,
     /** Local crash reports, newest first, full redacted text (at most CrashLog.KEEP). */
     val crashReports: List<String> = emptyList(),
+    /** This till's Odoo traffic and 429s ([OdooStats]), so a store visit shows whether it is within budget. */
+    val odooRate: String? = null,
     val busy: Boolean = false,
     val error: String? = null,
     /** Result of "Change PIN" on the Setup screen. */
@@ -333,7 +338,15 @@ class PosViewModel(private val c: AppContainer) : ViewModel() {
 
     private fun SetupState.withCrashes(): SetupState {
         val reports = c.crashLog.reports()
-        return copy(crashReports = reports.mapNotNull { f -> runCatching { f.readText() }.getOrNull() })
+        return copy(crashReports = reports.mapNotNull { f -> runCatching { f.readText() }.getOrNull() }, odooRate = odooRateText())
+    }
+
+    /** "Odoo calls: 1.4 a minute (sale 3, cashier 9, background 2 in the last 10 min) · 429s today: 0". */
+    private fun odooRateText(): String {
+        val r = c.odoo.stats.snapshot()
+        val last = r.lastThrottledAt?.let { " · last at " + SimpleDateFormat("h:mm a", Locale("en", "IN")).format(Date(it)) } ?: ""
+        return "Odoo calls: %.1f a minute (sale %d, cashier %d, background %d in the last 10 min) · Odoo busy (429) today: %d%s".format(
+            r.perMinute, r.byLane[OdooLane.SALE] ?: 0, r.byLane[OdooLane.TAP] ?: 0, r.byLane[OdooLane.BACKGROUND] ?: 0, r.throttledToday, last)
     }
 
     /** Takes effect at once; MainActivity applies lock task on resume, Setup applies it on toggle. */
@@ -438,7 +451,7 @@ class PosViewModel(private val c: AppContainer) : ViewModel() {
         startLiveSync()
     }
 
-    fun reopenSetup() { _configured.value = false; loadConfigs() }
+    fun reopenSetup() { _configured.value = false; _setup.update { it.copy(odooRate = odooRateText()) }; loadConfigs() }
 
     // ------------------------------------------------------------------ Setup PIN
 
@@ -491,10 +504,19 @@ class PosViewModel(private val c: AppContainer) : ViewModel() {
     private fun reloadBackoffMs(failures: Int): Long =
         ((60_000L shl (failures - 1).coerceIn(0, 4)).coerceAtMost(15 * 60_000L) * (0.75 + Math.random() * 0.5)).toLong()
 
-    /** On resume: refresh the catalogue and photos when the last load is older than 30 minutes. */
+    /**
+     * On resume: a full load only when Odoo has not been heard from for 30 minutes (no full load and no
+     * live-sync pass). Live sync keeps a running till current, so a resume costs no Odoo calls.
+     */
     fun refreshIfStale() {
-        if (_configured.value && System.currentTimeMillis() - catalogLoadedAt > 30 * 60_000L && !_sell.value.loading
+        if (_configured.value && System.currentTimeMillis() - maxOf(catalogLoadedAt, lastLiveOkAt) > 30 * 60_000L && !_sell.value.loading
             && _sell.value.pay == PayUi.Idle) loadCatalog()
+    }
+
+    /** The reload icon and Retry: ignored while a load runs, so a double tap is one load, not two. */
+    fun reloadFromOdoo() {
+        if (_sell.value.loading) return
+        loadCatalog()
     }
 
     val images get() = c.productImages
@@ -541,6 +563,9 @@ class PosViewModel(private val c: AppContainer) : ViewModel() {
         val generation = ++catalogGeneration // a live-sync pass still running for the old catalogue must not apply
         _sell.update { it.copy(loading = true, error = null) }
         showSavedCatalogFirst()
+        // Just after the E700 boots (every till of a chain is often switched on at once): wait 0–20 s
+        // first, with the saved catalogue on screen, so 20 tills do not load from Odoo in the same second.
+        if (generation == 1L && android.os.SystemClock.elapsedRealtime() < BOOT_WINDOW_MS) delay(Random.nextLong(BOOT_SPREAD_MS))
         try {
             val cfg = c.catalog.config(c.settings.posConfigId) ?: run {
                 _sell.update { it.copy(config = null, loading = false, error =
@@ -603,6 +628,7 @@ class PosViewModel(private val c: AppContainer) : ViewModel() {
             if (generation != catalogGeneration) return@launchSafe // a newer load owns the screen
             val (products, positions, zz, categories, notes, address, names) = loaded
             liveStamps = loaded.stamps
+            loaded.stamps?.let { st -> val at = System.currentTimeMillis(); st.byModel.keys.forEach { stampsReadAt[it] = at } }
             loaded.billText?.let { billText = it }
             usePricelistHold(loaded.pricelist)
             useOffers(loaded.offers)
@@ -714,14 +740,32 @@ class PosViewModel(private val c: AppContainer) : ViewModel() {
 
     private var liveJob: Job? = null
 
-    /** Every [LIVE_SYNC_MS] while the app runs: what changed in Odoo reaches the till by itself. */
+    /** When each watched model was last read (live sync looks at prices every 5 min, the rest every 15). */
+    private val stampsReadAt = mutableMapOf<String, Long>()
+
+    /** The last live-sync pass that reached Odoo. */
+    private var lastLiveOkAt = 0L
+
+    /** Within the store's sales day (Setup hours, 06:00–24:00 by default), on the till's clock. */
+    private fun inSalesDay(): Boolean =
+        Calendar.getInstance().get(Calendar.HOUR_OF_DAY) in c.settings.salesDayStartHour until c.settings.salesDayEndHour
+
+    /**
+     * Every [LIVE_SYNC_MS] in the sales day, every [QUIET_SYNC_MS] outside it: what changed in Odoo
+     * reaches the till by itself. Each till starts at its own random moment, so tills do not align.
+     */
     private fun startLiveSync() {
         if (liveJob?.isActive == true || !_configured.value) return
         liveJob = launchSafe {
+            delay(Random.nextLong(LIVE_SYNC_MS))
+            var lastPassAt = 0L
             while (true) {
                 delay(LIVE_SYNC_MS)
+                if (!inSalesDay() && System.currentTimeMillis() - lastPassAt < QUIET_SYNC_MS) continue
+                lastPassAt = System.currentTimeMillis()
                 try {
                     withContext(OdooLane.BACKGROUND) { liveSyncOnce() }
+                    lastLiveOkAt = System.currentTimeMillis()
                 } catch (e: CancellationException) {
                     throw e
                 } catch (e: Exception) {
@@ -746,7 +790,10 @@ class PosViewModel(private val c: AppContainer) : ViewModel() {
             return
         }
         val generation = catalogGeneration
-        val old = liveStamps ?: return run { liveStamps = c.liveSync.read() }
+        val old = liveStamps ?: return run {
+            val at = System.currentTimeMillis()
+            liveStamps = c.liveSync.read().also { st -> st.byModel.keys.forEach { stampsReadAt[it] = at } }
+        }
         val current = s.config ?: return reloadAll()
         val cfg = c.catalog.config(c.settings.posConfigId)
         if (cfg == null || cfg.paymentMethodProblem(c.paymentRoles()) != null) {
@@ -762,14 +809,29 @@ class PosViewModel(private val c: AppContainer) : ViewModel() {
         } else if ((offersDay != null && offersDay != odooToday()) || (!offersLoaded && cfg.sessionOpen)) {
             reloadLoyalty(cfg) // a new day (today's combos in, yesterday's out), or the offers never loaded
         }
-        val now = c.liveSync.read()
+        // Outside the sales day only the config and session are looked at; the stamps wait for the morning.
+        if (!inSalesDay()) return
+        val readAt = System.currentTimeMillis()
+        val due = LiveSync.due(stampsReadAt, readAt).takeIf { it.isNotEmpty() } ?: return
+        val now = c.liveSync.read(due)
         val changed = now.changedSince(old)
-        if (changed.isEmpty()) return
-        PosLog.i("LIVE_CHANGES", "areas" to changed.joinToString(","))
-        val cartChanged = applyLiveChanges(cfg, old, changed, generation) ?: return
-        if (catalogGeneration != generation) return
-        liveStamps = now
-        if (cartChanged && _sell.value.lines.isNotEmpty() && !_sell.value.partPaid.isPositive && _sell.value.pay == PayUi.Idle) {
+        if (changed.isNotEmpty()) {
+            PosLog.i("LIVE_CHANGES", "areas" to changed.joinToString(","))
+            // Not marked read when the change did not apply: the next pass looks at those models again.
+            val applied = applyLiveChanges(cfg, old, changed, generation)
+            if (applied == null || catalogGeneration != generation) return
+            liveStamps = now.over(old)
+            due.forEach { stampsReadAt[it] = readAt }
+            if (applied) repriceAfterLiveChange()
+            return
+        }
+        liveStamps = now.over(old)
+        due.forEach { stampsReadAt[it] = readAt }
+    }
+
+    /** A live change touched the open cart's prices: price it again and say so (a bill with a paid part keeps its own). */
+    private fun repriceAfterLiveChange() {
+        if (_sell.value.lines.isNotEmpty() && !_sell.value.partPaid.isPositive && _sell.value.pay == PayUi.Idle) {
             val at = SimpleDateFormat("h:mm a", Locale("en", "IN")).format(Date())
             _sell.update { it.copy(totals = null, notice = "Prices updated from Odoo at $at. Check the total.") }
             reprice()
@@ -2173,7 +2235,14 @@ class PosViewModel(private val c: AppContainer) : ViewModel() {
         private const val BILL_READ_TIMEOUT_MS = 8_000L
 
         /** How often the till asks Odoo what changed (config, products, menu, taxes, offers, bill text). */
-        private const val LIVE_SYNC_MS = 60_000L
+        private const val LIVE_SYNC_MS = 120_000L
+
+        /** Outside the sales day: the config only, this often. */
+        private const val QUIET_SYNC_MS = 15 * 60_000L
+
+        /** A first load this soon after boot waits up to [BOOT_SPREAD_MS] first. */
+        private const val BOOT_WINDOW_MS = 5 * 60_000L
+        private const val BOOT_SPREAD_MS = 20_000L
 
         /** The SALES screen reloads this often while it is open. */
         private const val SALES_REFRESH_MS = 60_000L

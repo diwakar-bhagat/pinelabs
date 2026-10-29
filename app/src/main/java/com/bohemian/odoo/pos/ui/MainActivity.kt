@@ -167,6 +167,7 @@ fun SetupScreen(vm: PosViewModel) {
             Text("Print the company logo on bills, as on Odoo's PDF (if the printer refuses it, the bill prints without it)")
         }
         CrashReportsRow(s.crashReports, vm)
+        s.odooRate?.let { Text(it, fontSize = 13.sp) }
         var pineReport by remember { mutableStateOf<String?>(null) }
         OutlinedButton({ pineReport = PineCheck.report(activity, BuildConfig.PINE_APPLICATION_ID, BuildConfig.PINE_SDK_PRESENT) }) {
             Text("Check Pine payment app")
@@ -276,7 +277,7 @@ fun SellScreen(vm: PosViewModel) {
             if (outbox > 0) Badge(containerColor = Zz.Red) { Text("$outbox not synced to Odoo", color = Zz.Cream) }
             if (unresolved.isNotEmpty()) { Spacer(Modifier.width(8.dp)); Badge(containerColor = Zz.Gold) { Text("${unresolved.size} payment(s) to check", color = Zz.Black) } }
             Spacer(Modifier.width(12.dp))
-            IconButton({ vm.loadCatalog() }) { MdiIcon(R.drawable.mdi_refresh, "Reload menu and photos from Odoo", Zz.Cream) }
+            IconButton({ vm.reloadFromOdoo() }) { MdiIcon(R.drawable.mdi_refresh, "Reload menu and photos from Odoo", Zz.Cream) }
             TextButton({ vm.openSales() }) { Text("SALES", color = Zz.Cream, style = ZzHeading) }
             TextButton({ vm.startVoid() }) { Text("VOID", color = Zz.Cream, style = ZzHeading) }
             if (s.config?.sessionOpen == true) TextButton({ vm.startClose() }) { Text("CLOSE SESSION", color = Zz.Cream, style = ZzHeading) }
@@ -292,7 +293,7 @@ fun SellScreen(vm: PosViewModel) {
                 Text("Catalogue not refreshed (${s.catalogStaleReason ?: "No connection to Odoo"}) — showing the complete one from " +
                     SimpleDateFormat("dd-MMM HH:mm", Locale("en", "IN")).format(Date(at)) +
                     ". Prices and payment need Odoo. ", Modifier.weight(1f))
-                OutlinedButton({ vm.loadCatalog() }) { Text("Retry") }
+                OutlinedButton({ vm.reloadFromOdoo() }) { Text("Retry") }
             }
         }
         if (s.config != null && !s.config!!.sessionOpen && s.offlineCatalogSavedAt == null) {

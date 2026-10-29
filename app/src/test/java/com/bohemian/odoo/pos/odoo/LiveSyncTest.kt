@@ -34,6 +34,25 @@ class LiveSyncTest {
         assertEquals(setOf(LiveArea.BILL_TEXT), stamps("ir.ui.view" to "2026-10-28 08:00:00").changedSince(before))
     }
 
+    @Test fun `a look at some models finds changes only in those, and keeps the rest of the last look`() {
+        val before = stamps()
+        val prices = LiveStamps(mapOf("product.product" to "2026-10-28 05:00:00", "product.template" to "2026-10-28 07:56:40"))
+        assertEquals(setOf(LiveArea.PRODUCTS), prices.changedSince(before))
+        val merged = prices.over(before)
+        assertEquals(LiveSync.WATCHED.size, merged.byModel.size)
+        assertEquals("2026-10-28 07:56:40", merged.byModel["product.template"])
+        assertEquals("2026-10-28 05:00:00", merged.byModel["account.tax"])
+    }
+
+    @Test fun `prices are looked at every 5 minutes, everything else every 15`() {
+        val t0 = 1_000_000L
+        val all = LiveSync.WATCHED.keys.associateWith { t0 }
+        assertEquals(LiveSync.WATCHED.keys.toList(), LiveSync.due(emptyMap(), t0))
+        assertEquals(emptyList<String>(), LiveSync.due(all, t0 + 4 * 60_000))
+        assertEquals(listOf("product.product", "product.template"), LiveSync.due(all, t0 + 5 * 60_000))
+        assertEquals(LiveSync.WATCHED.keys.toList(), LiveSync.due(all, t0 + 15 * 60_000))
+    }
+
     @Test fun `products are fetched from the older of the two product stamps`() =
         assertEquals("2026-10-28 05:00:00", stamps("product.product" to "2026-10-28 07:56:40").productsSince)
 
