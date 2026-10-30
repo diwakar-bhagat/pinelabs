@@ -40,6 +40,12 @@ enum class OdooLane : CoroutineContext.Element {
 class OdooGate(
     private val maxInFlight: Int = 2,
     private val backgroundGapMs: Long = 1_000,
+    /**
+     * Pacing: this till starts about [perSecond] calls a second, with up to [burst] at once after a quiet
+     * spell, so it waits a moment itself instead of Odoo answering 429 and the backoff costing seconds.
+     */
+    private val perSecond: Double = 1.0,
+    private val burst: Double = 2.0,
     private val now: () -> Long = System::currentTimeMillis,
 ) {
     private class Waiter(val lane: OdooLane, val seq: Long)
@@ -52,6 +58,8 @@ class OdooGate(
     private var inFlight = 0
     private var backgroundInFlight = 0
     private var lastBackgroundAt: Long? = null
+    private var tokens = burst
+    private var tokensAt: Long? = null
 
     suspend fun <T> run(lane: OdooLane, block: suspend () -> T): T {
         acquire(lane)
@@ -87,6 +95,10 @@ class OdooGate(
     private fun tryStart(me: Waiter): Long {
         val ahead = waiting.any { it !== me && (it.lane < me.lane || (it.lane == me.lane && it.seq < me.seq)) }
         if (ahead || inFlight >= maxInFlight) return -1
+        val t = now()
+        tokens = minOf(burst, tokens + ((tokensAt?.let { t - it } ?: 0L) / 1000.0) * perSecond)
+        tokensAt = t
+        if (tokens < 1) return maxOf(1L, ((1 - tokens) / perSecond * 1000).toLong())
         if (me.lane == OdooLane.BACKGROUND) {
             if (backgroundInFlight > 0) return -1
             val gap = lastBackgroundAt?.let { it + backgroundGapMs - now() } ?: 0
@@ -94,6 +106,7 @@ class OdooGate(
             backgroundInFlight++
             lastBackgroundAt = now()
         }
+        tokens -= 1
         waiting.remove(me)
         inFlight++
         changed.value++

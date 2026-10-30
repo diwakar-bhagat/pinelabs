@@ -2,7 +2,6 @@ package com.bohemian.odoo.pos.odoo
 
 import com.bohemian.odoo.pos.core.Paise
 import com.bohemian.odoo.pos.core.PosLog
-import kotlinx.coroutines.async
 import kotlinx.coroutines.coroutineScope
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.JsonPrimitive
@@ -129,7 +128,8 @@ class BillService(private val odoo: OdooJson2Client) {
 
     /**
      * The bill of the order with [uuid], or null when Odoo does not have the order yet (outbox).
-     * After the order itself, lines, payments and the ZZ Cash texts are read at the same time.
+     * After the order itself, lines, payments and the ZZ Cash texts are read one after another: four
+     * calls at once go past Odoo Online's burst and come back as 429s (peak simulation, 2026-10-30).
      * [knownPhone] (the attached customer's res.partner.phone) and [knownTaxNames] (from the
      * catalogue) save a round trip each; anything not known is read from Odoo.
      */
@@ -141,39 +141,33 @@ class BillService(private val odoo: OdooJson2Client) {
         )).objects().firstOrNull() ?: return@coroutineScope null
         val lineIds = o.ids("lines")
         val paymentIds = o.ids("payment_ids")
-        val linesJob = async {
+        val lines =
             if (lineIds.isEmpty()) emptyList() else odoo.call("pos.order.line", "read", jsonOf(
                 "ids" to lineIds, "fields" to listOf("full_product_name", "product_id", "qty", "price_subtotal_incl", "discount", "tax_ids"),
             )).objects()
-        }
-        val paymentsJob = async {
+        val payments =
             if (paymentIds.isEmpty()) emptyList() else odoo.call("pos.payment", "read", jsonOf(
                 "ids" to paymentIds, "fields" to listOf("payment_method_id", "amount"),
             )).objects()
-        }
-        val phoneJob = async {
+        val phone =
             knownPhone?.takeIf { it.isNotBlank() } ?: o.m2oId("partner_id")?.let { pid ->
                 odoo.call("res.partner", "read", jsonOf("ids" to listOf(pid), "fields" to listOf("phone")))
                     .objects().firstOrNull()?.str("phone")
             }
-        }
-        val zzJob = async {
+        val zz =
             runCatching { zzCash(o.int("id")!!) }
                 .onFailure { PosLog.w("BILL_ZZ_UNREADABLE", "uuid" to uuid, "err" to it.message) }.getOrNull()
-        }
-        val lines = linesJob.await()
         val missingTaxIds = lines.flatMap { it.ids("tax_ids") }.distinct().filter { it !in knownTaxNames }
         val taxNames = knownTaxNames + if (missingTaxIds.isEmpty()) emptyMap() else odoo.call("account.tax", "read", jsonOf(
             "ids" to missingTaxIds, "fields" to listOf("name"),
         )).objects().associate { it.int("id")!! to (it.str("name") ?: "") }
-        val payments = paymentsJob.await()
         OdooBill(
             name = o.str("name") ?: uuid.take(8),
             posReference = o.str("pos_reference"),
             dateOrderUtc = o.str("date_order") ?: "",
             storeName = o.m2oName("config_id") ?: "",
             customerName = o.m2oName("partner_id"),
-            customerPhone = phoneJob.await(),
+            customerPhone = phone,
             cashier = o.str("cashier"),
             lines = lines.map { l ->
                 OdooBillLine(
@@ -188,7 +182,7 @@ class BillService(private val odoo: OdooJson2Client) {
             amountTax = o.money("amount_tax"),
             payments = payments.map { OdooBillPayment(it.m2oName("payment_method_id") ?: "?", it.money("amount")) },
             accessToken = o.str("access_token")?.takeIf { it.isNotBlank() },
-            zzCash = zzJob.await(),
+            zzCash = zz,
         )
     }
 

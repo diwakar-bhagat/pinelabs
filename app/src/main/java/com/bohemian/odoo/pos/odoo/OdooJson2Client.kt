@@ -65,6 +65,9 @@ class OdooJson2Client(
         val backgroundBudgetMs: Long = 120_000,
         val firstBackoffMs: Long = 2_000,
         val maxBackoffMs: Long = 60_000,
+        /** Pacing of this till's calls ([OdooGate]): about one a second, two at once after a quiet spell. */
+        val perSecond: Double = 1.0,
+        val burst: Double = 2.0,
         /** 0..1, for jitter; tests pin it. */
         val jitter: () -> Double = { Random.nextDouble() },
     ) {
@@ -76,7 +79,7 @@ class OdooJson2Client(
     }
 
     /** At most 2 calls in flight from this till, sales first, background alone (Odoo: no parallel calls). */
-    val gate = OdooGate(now = now)
+    val gate = OdooGate(perSecond = throttle.perSecond, burst = throttle.burst, now = now)
 
     /** Calls per lane and 429s, for Setup and the `ODOO_RATE` log line. */
     val stats = OdooStats(now)

@@ -24,7 +24,7 @@ class OdooThrottleTest {
 
     /** Short budgets and no randomness: jitter 0.5 makes our own backoff exactly 100 / 200 / 400 / 800 ms. */
     private fun client(tapBudgetMs: Long = 1_000) = OdooJson2Client(server.url("/").toString().trimEnd('/'), "test", apiKey = { "k" },
-        throttle = OdooJson2Client.Throttle(tapBudgetMs = tapBudgetMs, saleBudgetMs = 1_000, backgroundBudgetMs = 1_000,
+        throttle = OdooJson2Client.Throttle(perSecond = 1_000.0, burst = 10.0, tapBudgetMs = tapBudgetMs, saleBudgetMs = 1_000, backgroundBudgetMs = 1_000,
             firstBackoffMs = 100, jitter = { 0.5 }))
 
     @Test fun `a 429 is waited out for as long as Odoo asks and the call succeeds`() = runBlocking {
@@ -108,5 +108,14 @@ class OdooThrottleTest {
         val odoo = client()
         withContext(OdooLane.BACKGROUND) { odoo.call("pos.config", "search_count", jsonOf()) }
         assertEquals(1, odoo.stats.snapshot().byLane[OdooLane.BACKGROUND])
+    }
+
+    @Test fun `a till paces itself at about one call a second after a burst of two`() = runBlocking {
+        repeat(4) { server.enqueue(MockResponse().setBody("[]")) }
+        val odoo = OdooJson2Client(server.url("/").toString().trimEnd('/'), "test", apiKey = { "k" })
+        val started = System.currentTimeMillis()
+        repeat(4) { odoo.call("pos.config", "search", jsonOf()) }
+        val ms = System.currentTimeMillis() - started
+        org.junit.Assert.assertTrue("4 calls took $ms ms", ms in 1_800..3_500) // 2 at once, then one a second
     }
 }
