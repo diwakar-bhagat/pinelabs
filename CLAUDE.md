@@ -541,6 +541,64 @@ till kept booking card and UPI on 19 "Pine Labs SWN", the web POS's own Pine lin
   One that is Odoo-driven, QR, online or customer account shows a gold bar naming it and asking for a
   supervisor's Setup. Sales go on, since Odoo accepts them; a failed read keeps the last warning.
 
+
+### Decisions 2026-10-30 (Odoo traffic, the bill queue, customer search, 0.6.0)
+
+0.5.2 (29 Oct, another session) waited out a 429 and capped a till at 3 calls in flight. 0.6.0 sets up
+20 stores on one database and one shared key. The full write-up is `docs/API_ENGINEERING.md`.
+- **Why the 429s:**
+  - Live sync was 13 calls a minute per till, 12 of them at once.
+  - A catalogue load was 31–40 calls in seconds.
+  - A 429 during a load counted as offline, so live sync reloaded everything every minute.
+  - Odoo's guidance is about 1 call a second with no parallel calls, counted per database, not per key.
+- **Lanes** (`odoo/OdooGate.kt`): SALE > TAP > BACKGROUND, at most 2 calls in flight per till. Background
+  calls run alone, at most one a second. A 429 waits Retry-After in full (seconds or a date) plus jitter,
+  and each lane gives up after its budget (cashier 10 s, sale 20 s then outbox, background 2 min). A 503
+  is repeated only for reads and uuid-deduplicated writes. A 429 is never "offline", and failed full
+  reloads back off 1 → 15 min.
+- **Live sync in tiers:** config every 2 min, prices every 5, the rest every 15; config only outside the
+  sales day; a random phase per till; no full reload on resume unless Odoo was silent for 30 min; a
+  0–20 s start spread after boot.
+- **Each sale:** the bill is built from the `sync_from_ui` reply (`read_pos_data`: every order and
+  payment field, links as ids; checked on a live order). `confirm_coupon_programs` takes the order id
+  from that reply. Fixed calls per sale went from 7 to 1 for a walk-in, 3 with a customer.
+- **Outbox:** at most 10 orders per 30 s pass, with jittered backoff.
+- **Setup** shows the till's calls per minute by lane and today's 429s.
+- **Double taps:**
+  - **Split Charge:** marked Charging before anything waits. `PaymentCoordinator.pay(expectedPaid)`
+    refuses a second tap queued behind a paid first one; the terminal used to ask the customer again for
+    the same part.
+  - **Guards** on Validate, VOID, refund, PRINT AGAIN (no second paper bill), ZZ Retry, Find, Start
+    selling, Enter Code and a customer row, plus a 600 ms throttle (`ui/Clicks.kt`).
+- **Customer search:** a mobile matches its first **or** last digits in one call ("9910" on the live
+  database: 0 customers before, 40 now). 91 / 0 in front of a full number is ignored. Names starting
+  with the text come first.
+- **Open-bill queue** (`odoo/ParkedBill.kt`, Room v4 `parked_bill`): chips over the order panel. "+"
+  parks the bill on screen, a chip opens one, a long-press removes one, and after a paid bill the oldest
+  waiting one comes up; at most 10.
+  - **Where it lives:** on the till only, and it survives a restart. Odoo sees a bill once it is paid.
+  - **What is kept:** what the cashier did, never a price. An opened bill is priced again by Odoo from
+    today's catalogue (I2); the customer's fiscal position and ZZ Cash are read again; the chosen reward
+    goes back on.
+  - **What stays on screen:** a bill with a paid or unconfirmed payment cannot be parked, and its lines
+    are locked while the payment is to be checked.
+  - **Leaving the queue:** a bill leaves the moment it is paid (cash before it is sent), so a restart
+    never brings a paid bill back.
+  - **Results for other orders:** a result resolved from the bar no longer clears the bill on screen.
+  - **One reward per card:** a ZZ Cash reward or coupon already on another open bill is refused, and so
+    is a reward on a card whose last booking has not reached Odoo yet.
+  - **Session close** waits for the queue to be empty.
+- **Crash at Kite Gurugram (0.5.0, 30 Oct, 02:59 and 03:05):**
+  - **What it was:** "NullPointerException … StateFlowImpl.setValue", retraced with 0.5.0's R8 map to
+    `PosViewModel.refreshPartlyPaid`. The ViewModel's `init` sat above `_partlyPaid`, so every start
+    wrote to a null field. The cashier saw "Something went wrong", and the part-paid bar was not
+    restored after a restart (I9 still counted the bill).
+  - **The fix:** `init` is now last in the class, and `PosViewModelOrderTest` keeps it there.
+  - **The other report:** "attempt already final: RESOLVED_NOT_PAID" (27 Oct, no build line) is the
+    pre-0.3.0 crash fixed in 0.3.0.
+  - **Decoding future reports:** keep each release's `mapping.txt` (`marketplace/mappings/`, not in git)
+    to retrace them.
+- **Unchanged:** the money invariants. No Odoo-side change.
 ---
 
 ## 6. Odoo integration (verified against live DB, 2026-09-21)
@@ -715,18 +773,25 @@ company password manager + encrypted drive.
 | 20 | SPLIT ₹500: UPI ₹300, then Cash ₹200 (tendered ₹500) | UPI charged for ₹300 only; Validate; change ₹300 shown; Odoo order has 2 payment lines = ₹500; bill shows both |
 | 21 | SPLIT: UPI ₹200, then Card for the rest; close the screen after UPI | Red bar "partly paid"; cart and New bill locked; FINISH reopens it; Card charges only the rest |
 | 22 | SETUP with 1234, change the PIN, wrong PIN 5 × | Setup opens; new PIN works, 1234 no longer; locked 60 s after 5 wrong tries |
-| 23 | Top bar badge | Shows "PROD · 0.5.1", so the installed build is never a guess |
+| 23 | Top bar badge | Shows "PROD · 0.6.0", so the installed build is never a guess |
 | 24 | ⋮ → Enter Code: a ZZ Note on a bill below its minimum, then add items past it | "Code accepted"; the ₹N off line appears by itself once the bill qualifies; paid; Odoo order has the reward line and the WhatsApp PDF shows it |
 | 25 | Sampling code on a 2-item bill | One unit of the cheaper item comes off |
 | 26 | At a store with a combo / Fugeno / free item (HQ27, KLJ, Club 125): the combo's two items; a free item tapped last | Discount line appears by itself; the free item comes off; ✕ takes an offer off and it stays off for this bill |
 | 27 | ZZ Cash reward and a ZZ Note on one bill | Only the larger whole-bill discount stays; the cashier is told |
-| 28 | Change a product's price (or a tax) in Odoo, wait a minute with the till open | Tile shows the new price; an open cart is repriced with "Prices updated from Odoo at …" |
+| 28 | Change a product's price in Odoo, wait 5 minutes with the till open (a tax: 15 minutes) | Tile shows the new price; an open cart is repriced with "Prices updated from Odoo at …" |
 | 29 | SALES in the top bar | Today from 6 AM: total, bills, first bill, payment methods, hour by hour; equals Odoo's Orders Analysis for the store |
 | 30 | Customer: type 2+ letters of a name, scroll | Every match A→Z, more load while scrolling |
 | 31 | Setup on a terminal for KLJ (or SWN, HQ27GGN, Club 125) | Card "Cards", UPI "UPI", Cash "Cash" picked by themselves, with the two notes; Start selling works |
 | 32 | At that store: one card, one UPI and one cash sale (tender more than the bill) | Change shown and handed back; Odoo orders have Cards / UPI / Cash lines equal to the bills; SALES "Paid by" shows them |
 | 33 | ZenZebra terminal updated from 0.4.0 to 0.5.0, without Setup | Card and UPI still on "Pine Labs E700 (A2A)"; Setup shows it on both |
 | 34 | SWN terminal still saved on "Pine Labs SWN", updated to 0.5.1 | Gold bar names "Pine Labs SWN"; sales still go through. SETUP → SWN: Card and UPI show "Pine Labs E700 (A2A)", Cash "Cash", with the "picked again" note; Start selling; bar gone; the next card / UPI sale is on method 22 in Odoo |
+| 35 | "+" with items on the bill, sell a second bill, tap the first chip | First bill waits as a chip; the second is paid; tapping the chip brings the first back, priced again, customer and code kept |
+| 36 | Three open bills, restart the app | All three come back as chips; nothing paid comes back |
+| 37 | Long-press a waiting bill → Remove bill; then CLOSE SESSION with one bill still waiting | Removed bill gone; close refused with "1 open bill(s) waiting" until it is paid or removed |
+| 38 | Customer search: the first 4 digits of a known mobile, then its last 4 | Both find the customer |
+| 39 | Fast double tap on PRINT AGAIN, on Split Charge, on Enter Code Apply | One bill printed; one terminal prompt; the coupon added once |
+| 40 | A day's selling, then Setup | "Odoo calls" about 2 a minute idle, no 429 today |
+| 41 | Restart the till (or reboot the E700) with a part-paid split bill open | No "Something went wrong"; the red part-paid bar is back; Setup shows no new crash report |
 
 ---
 
@@ -824,4 +889,5 @@ in the repo root (`ODOO_URL`, `ODOO_DB`, `ODOO_USER`, `ODOO_API_KEY`). Writes ne
 | `REVIEW.md` | External review checklist (2026-10-27): findings F1–F6 with fixes, endpoint map, identity/signing, commands run, blockers |
 | `AGENT_PROMPT_E700_A2A.md` | Prompt for an on-device AI agent (adb) to run and report the App-to-App flow safely |
 | `ROLLOUT_STORES.md` | Multi-store rollout checklist: per-store Odoo user and key, E700 and Cash methods, who closes the day, terminal Setup, checks under the store key |
+| `API_ENGINEERING.md` | How the till calls Odoo for 20 stores on one database and key: lanes, 429 handling, live-sync tiers, calls per sale, the budget, counters, next steps |
 | `CASE_2026-10-28_PINE_OVERPAY.md` | Case study: Odoo web POS took ₹42 by Pine on a ₹20 bill at HQ27GGN; why, the fix, and how the E700 till prevents it |
