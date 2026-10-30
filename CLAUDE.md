@@ -187,7 +187,7 @@ This lets the project build and test everywhere without distributing the proprie
 | **2** | Payments: Card / UPI / BQR / Cash, journal, GetStatus, reconciliation, Odoo sync + outbox, receipt | ✅ **in code — needs on-device UAT** |
 | **3** | Customer lookup by phone, ZZ Cash balance + redeem | ✅ **in code — needs on-device UAT** (3a balance + 3b redeem; see `docs/ZZ_CASH.md`) |
 | **4** | Session open/close from the till, Z-report print, Void | ✅ **in code — needs on-device UAT** — session close (I9) + Z-report; card Void on the terminal + automatic Odoo refund order. Refund of *settled* sales (Pine `REFUND`) not built |
-| **5** | Hardening: offline cache, kiosk mode, crash reporting, infosec checklist | ✅ **in code — needs on-device UAT** (offline *selling* deliberately not built, see Phase 5) |
+| **5** | Hardening: offline cache, kiosk mode, crash reporting, infosec checklist | ✅ **in code — needs on-device UAT** (offline selling from Odoo's saved prices since 0.7.0, see Phase 5) |
 
 **Where we are (2026-10-24):** all planned phases (0–5) are in code. Nothing has been run
 on the E700 yet, so the real gate is **UAT on device** (§10): build the signed UAT APK,
@@ -285,10 +285,17 @@ POS-manager only (`ir.model.access.csv`) and the E700 user is POS User (§12).
 **Phase 5 — Hardening** ✅ (needs on-device UAT)
 **Offline catalogue:** `CatalogCache` (JSON in private files, atomic write) saves config +
 products after each successful load; on `OdooException.Network` the till shows the cached
-catalogue with a yellow "No connection to Odoo" bar and Retry. **Offline selling is not
-built, on purpose:** every line must be priced by Odoo (I2, HARD RULE 2) and the server
-rejects paid ≠ total, so a cash sale priced offline would need local tax math. Revisit only
-with a verified way to reproduce `compute_all` (`round_per_line`) exactly.
+catalogue with a yellow "No connection to Odoo" bar and Retry. **Offline selling (0.7.0):** never
+with local tax math. The till reuses Odoo's own `compute_all` answers, saved in Room for the exact
+same taxes, price, qty and fiscal position under the tax stamp they were given under. So a cart Odoo
+priced before sells by cash, card or UPI while Odoo is out of reach. The guards:
+- refused when Odoo has not confirmed its taxes for 24 h;
+- refused while the pricelist hold is unread since start;
+- refused for an item Odoo never priced;
+- refused for ZZ Cash redemptions, Odoo-checked coupons and new customers.
+
+The order waits in the outbox; a total Odoo then refuses is REJECTED for a supervisor (see the
+2026-10-30 0.7.0 decisions).
 **Kiosk mode** (Setup switch, off by default): `BootReceiver` starts the till after boot;
 `Kiosk.apply` calls `startLockTask()` on resume only when `isLockTaskPermitted` — never the
 screen-pinning prompt. PAXSTORE must whitelist this app **and** `com.pinelabs.masterapp`
@@ -599,6 +606,49 @@ till kept booking card and UPI on 19 "Pine Labs SWN", the web POS's own Pine lin
   - **Decoding future reports:** keep each release's `mapping.txt` (`marketplace/mappings/`, not in git)
     to retrace them.
 - **Unchanged:** the money invariants. No Odoo-side change.
+
+### Decisions 2026-10-30 (fail-safe on Odoo's external API, 0.7.0)
+
+From Odoo's external API docs (18.0, 19.0 JSON-2):
+- each call is its own transaction (so every write is one idempotent call);
+- errors carry the exception `name`;
+- keys are generated and revoked programmatically, and expire within 3 months below administrator;
+- Odoo advises bot users with a key per integration;
+- `/web/version` and `fields_get` describe the database.
+
+Owner's choices: offline selling by cash, card and UPI; one bot user with a key per till; a status
+record per till in Odoo. Write-up: `docs/API_ENGINEERING.md`, "Fail-safe architecture".
+- **F1 error kinds** (`odoo/OdooErrors.kt`, probed read-only on the live database): UserError /
+  ValidationError 422, AccessDenied / AccessError 403, MissingError 404, LockError 409, any Python error
+  500 (an unknown field is `builtins.ValueError`, 500).
+
+  | Kind | Outbox and bars |
+  |---|---|
+  | TRANSIENT | Jittered backoff. |
+  | NO_SESSION | Waits without counting attempts; sent when a session opens; gold bar. |
+  | AUTH | Red bar; background calls pause and probe every 5 min. A 403 AccessError is no longer taken for a bad key. |
+  | REJECTED | Kept, retried hourly; red bar with Odoo's message and "Retry now"; still blocks close (I9). |
+
+  Room v5 adds `errorKind` (outbox, loyalty).
+- **F2 contract** (`odoo/OdooContract.kt`): every field the sync payloads write (asserted by the payload
+  tests) and the ones selling reads.
+  - **When:** once a day the till reads `GET /web/version`; on a new version it runs `fields_get`.
+  - **If a field is gone:** payments pause (fail closed) with a red bar naming it.
+  - **Today:** all 78 fields exist on the live database.
+- **F3 offline selling:** see Phase 5. `price_cache` (Room v5), cleared only when Odoo's tax stamp changes;
+  the client tracks the last answer from Odoo (out of reach after 3 min).
+- **F4 a key per till** (`odoo/KeyRotation.kt`):
+  - **Enroll:** Setup's "Enroll this till" turns the bot user's enrollment key into the till's own key,
+    valid 85 days.
+  - **Renewal:** 14 days before expiry, pending → verified → switched → old one revoked; crash-safe.
+  - **Expiry shown:** on Setup and in the status row; a gold bar 7 days before expiry if renewal fails.
+  - **Odoo side:** `base.enable_programmatic_api_keys` and `base.programmatic_api_keys_limit` (both unset
+    on 30 Oct): `tools/odoo/enable_till_keys.py`.
+- **F5 status record** (`odoo/TillStatus.kt`): each till writes its row in `x_e700_till` every 15 min,
+  in the background lane. The model is created by `tools/odoo/create_till_status_model.py`
+  (Point of Sale > Reporting > E700 Tills); until then the till skips it.
+- **`User-Agent`** names the till: `ZenZebraTill/<version> (<POS>; <serial>)`.
+- **The scripts:** dry run unless `--apply`, and run only on the owner's yes.
 ---
 
 ## 6. Odoo integration (verified against live DB, 2026-09-21)
@@ -792,6 +842,11 @@ company password manager + encrypted drive.
 | 39 | Fast double tap on PRINT AGAIN, on Split Charge, on Enter Code Apply | One bill printed; one terminal prompt; the coupon added once |
 | 40 | A day's selling, then Setup | "Odoo calls" about 2 a minute idle, no 429 today |
 | 41 | Restart the till (or reboot the E700) with a part-paid split bill open | No "Something went wrong"; the red part-paid bar is back; Setup shows no new crash report |
+| 42 | Sell a few items online; Wi-Fi off; sell the same items by cash and by card (Pine on its own network); an item never sold before | Amber "Odoo out of reach" bar; the known items sell, the till prints its own bill; the new item says it waits for Odoo; Wi-Fi on: orders reach Odoo, WhatsApp bills follow |
+| 43 | Close the session in Odoo with an offline order still on the till | Gold "wait for an open session" bar; open the next session: the order goes in by itself |
+| 44 | Revoke the till's key in Odoo | Red "Odoo rejected this till's API key" bar; sales stay on the till; enroll again in SETUP: everything goes through |
+| 45 | SETUP → paste the bot user's enrollment key → Enroll this till | "This till's own key (E700 <store> <serial>), valid until …"; the key is listed in Odoo under the bot user |
+| 46 | Point of Sale > Reporting > E700 Tills in Odoo (after the model is created) | One row per till, last seen within 15 min, versions, unsent and refused orders |
 
 ---
 

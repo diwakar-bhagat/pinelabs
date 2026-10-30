@@ -139,9 +139,83 @@ In this order:
 3. **Odoo.sh:** the dedicated hosting the policy names to lift the limit. It costs more, and was
    ruled out earlier for other reasons (CLAUDE.md §1).
 
+## Fail-safe architecture (0.7.0)
+
+Built on Odoo's external API docs (18.0, 19.0 JSON-2) and the live database.
+
+**Rules:**
+1. **Never lose, never double:** the journal, the outbox and the snapshot are unchanged (I3–I10).
+2. **Fail closed for money, open for selling:** Odoo changed under us → stop charging; Odoo only out of
+   reach → keep selling what Odoo already priced.
+3. **Every failure gets a kind and a behaviour.** Nothing is retried blindly forever without telling
+   anyone.
+4. **One write = one idempotent call:** JSON-2 gives each call its own transaction and cannot chain
+   them.
+   - `sync_from_ui` is deduplicated by the order uuid.
+   - Refunds use a uuid derived from the void.
+   - Loyalty booking is deduplicated by Odoo.
+   - A customer is looked up before being created.
+5. **Each till is known to Odoo:** its own key, its `User-Agent`, its status row.
+
+### Error kinds (`odoo/OdooErrors.kt`)
+
+| Odoo 19 answer | Kind | What the till does |
+|---|---|---|
+| Network, 408, 429, 502–504, `LockError` 409, serialization, a Wi-Fi login page | TRANSIENT | Backoff with jitter |
+| `UserError` "No open session available" (422) | NO_SESSION | Order waits, no attempt counted; sent when a session opens; gold bar |
+| 401, `AccessDenied` (403) | AUTH | Red bar; background calls probe every 5 min; sales stay on the till |
+| `UserError` / `ValidationError` 422, `AccessError` 403, `MissingError` / `NotFound` 404, Python errors 500 (`builtins.ValueError` for an unknown field) | REJECTED | Kept, retried hourly; red bar with Odoo's message and "Retry now"; blocks session close |
+
+### Contract check (`odoo/OdooContract.kt`)
+
+- **The list:** every field the sync payloads write (the payload tests fail if one is not listed) and
+  the ones selling reads.
+- **When:** once a day the till reads `GET /web/version`; a new version (Odoo Online upgrades in place)
+  triggers `fields_get` on 7 models.
+- **If a field or model is gone:** payments pause with a red bar naming it; browsing goes on.
+- **Today:** all 78 fields are present (30 Oct).
+
+### Selling while Odoo is out of reach
+
+- **The cache:** Odoo's `compute_all` answers are kept in Room (`price_cache`), keyed by applied taxes,
+  unit price, qty and fiscal position, and tagged with Odoo's tax stamp (newest `account.tax` and
+  `account.fiscal.position` `write_date`).
+- **When it clears:** only when the stamp changes.
+- **When Odoo is out of reach** (no answer for 3 min, or the saved catalogue on screen), a cart Odoo
+  priced before sells by cash, card or UPI. The order waits in the outbox and the till prints its own
+  bill.
+- **Refused offline:** taxes not confirmed for 24 h; the pricelist unread since start; an item Odoo never
+  priced; ZZ Cash redemptions and coupons; new customers.
+- **A tax changed during the outage** makes Odoo refuse the total: REJECTED, for a supervisor to book the
+  difference.
+
+### A key per till (`odoo/KeyRotation.kt`)
+
+- **Accounts:** one bot user (one Odoo seat), one key per till, named "E700 <store> <serial>".
+- **Enrollment:** Setup turns an enrollment key into the till's own key with
+  `res.users.apikeys.generate(scope="rpc", expiration_date=+85 days)`, checks it, and keeps only that one.
+- **Renewal:** 14 days before expiry: generate → save as pending → verify → switch → `revoke(old)` with
+  the new key. Any failed step leaves a working key.
+- **Odoo side:** `base.enable_programmatic_api_keys = True` and `base.programmatic_api_keys_limit = 50`
+  (`tools/odoo/enable_till_keys.py`).
+- **A lost till:** delete its key; the others keep working.
+
+### Status record (`odoo/TillStatus.kt`)
+
+- **What is written:** every 15 min, each till writes its row in `x_e700_till`:
+  - version and last seen;
+  - unsent and refused orders, payments to check, sales not sent at once;
+  - calls per minute, 429s today;
+  - last error and key expiry.
+- **Where to see it:** Odoo → Point of Sale → Reporting → E700 Tills (the model is created by
+  `tools/odoo/create_till_status_model.py`). Red marks refused orders or payments to check; amber marks
+  unsent orders.
+
 ## One shared key
 
 - **The limit:** keeping one key for every store is the owner's decision. It does not change the rate
   limit (see above).
 - **Still open:** an administrator key on every till, and every bill showing the same cashier. See
   CLAUDE.md §12–13 and `docs/ROLLOUT_STORES.md`.
+- **Since 0.7.0:** a key per till of one bot user replaces the shared key (Setup → "Enroll this till");
+  "Use this key" keeps a shared key working.
