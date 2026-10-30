@@ -286,6 +286,7 @@ fun SellScreen(vm: PosViewModel) {
         s.error?.let { Text(it, color = MaterialTheme.colorScheme.error, modifier = Modifier.padding(8.dp)) }
         s.notice?.let { Text(it, Modifier.fillMaxWidth().background(Zz.GoldSoft).padding(8.dp)) }
         s.methodWarning?.let { Text(it, Modifier.fillMaxWidth().background(Zz.GoldSoft).padding(8.dp)) }
+        OdooTroubleBars(vm)
         if (s.offersUnavailable) Text("Offers and codes could not be loaded from Odoo, so none apply now. The till tries again every minute.",
             Modifier.fillMaxWidth().background(Zz.GoldSoft).padding(8.dp))
         s.offlineCatalogSavedAt?.let { at ->
@@ -555,5 +556,30 @@ private fun MethodChips(methods: List<PaymentMethod>, selected: Int, onPick: (In
     if (methods.isEmpty()) { Text("None on this POS in Odoo", style = MaterialTheme.typography.bodySmall); return }
     Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
         methods.forEach { m -> FilterChip(selected == m.id, { onPick(m.id) }, label = { Text(m.name) }) }
+    }
+}
+
+/**
+ * What stops orders reaching Odoo, by kind (F1, 0.7.0): a rejected key and orders Odoo refused are
+ * red (a person must act); orders waiting for an open session are gold (they go by themselves).
+ */
+@Composable
+private fun OdooTroubleBars(vm: PosViewModel) {
+    val keyRejected by vm.odooKeyRejected.collectAsStateWithLifecycle()
+    val problems by vm.outboxProblems.collectAsStateWithLifecycle()
+    if (keyRejected) {
+        Text("Odoo rejected this till's API key. Sales are kept safely on the till, but nothing reaches Odoo until a supervisor enters a valid key in SETUP.",
+            Modifier.fillMaxWidth().background(Zz.Red).padding(8.dp), color = Zz.Cream)
+    }
+    problems.firstOrNull { it.kind == "REJECTED" }?.let { p ->
+        Row(Modifier.fillMaxWidth().background(Zz.Red).padding(8.dp), verticalAlignment = Alignment.CenterVertically) {
+            Text("${p.count} paid order(s) refused by Odoo: ${p.lastError ?: "no reason given"}. They are kept on the till; fix the cause in Odoo, then retry.",
+                Modifier.weight(1f), color = Zz.Cream)
+            OutlinedButton(onceIn { vm.retryRefusedOrders() }) { Text("Retry now", color = Zz.Cream) }
+        }
+    }
+    problems.firstOrNull { it.kind == "NO_SESSION" }?.let { p ->
+        Text("${p.count} paid order(s) wait for an open session in Odoo. They go through by themselves once a session is open.",
+            Modifier.fillMaxWidth().background(Zz.GoldSoft).padding(8.dp))
     }
 }

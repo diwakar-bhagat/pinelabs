@@ -48,6 +48,7 @@ import com.bohemian.odoo.pos.odoo.PosNote
 import com.bohemian.odoo.pos.odoo.FiscalPosition
 import com.bohemian.odoo.pos.odoo.OdooException
 import com.bohemian.odoo.pos.odoo.OdooLane
+import com.bohemian.odoo.pos.odoo.OdooErrorKind
 import com.bohemian.odoo.pos.odoo.PaidSale
 import com.bohemian.odoo.pos.odoo.ParkedBill
 import com.bohemian.odoo.pos.odoo.ParkedLine
@@ -403,6 +404,19 @@ class PosViewModel(private val c: AppContainer) : ViewModel() {
     ) = viewModelScope.launch(safety + context, block = block)
 
     val outboxCount: StateFlow<Int> = c.db.outbox().observeCount().stateIn(viewModelScope, SharingStarted.Eagerly, 0)
+
+    /** Outbox orders by how they failed (refused by Odoo, waiting for a session, key rejected), for the bars. */
+    val outboxProblems: StateFlow<List<com.bohemian.odoo.pos.data.OutboxProblem>> =
+        c.db.outbox().observeProblems().stateIn(viewModelScope, SharingStarted.Eagerly, emptyList())
+
+    /** Odoo refused this till's API key: nothing reaches Odoo until a supervisor fixes it in Setup. */
+    val odooKeyRejected: StateFlow<Boolean> = c.odoo.keyRejected
+
+    /** "Retry now" on the refused-orders bar: after a supervisor fixed the cause in Odoo. */
+    fun retryRefusedOrders() = launchSafe {
+        c.orderSync.retryNow(OdooErrorKind.REJECTED)
+        withContext(OdooLane.SALE) { c.orderSync.flushDue() }
+    }
     val unresolved: StateFlow<List<com.bohemian.odoo.pos.data.PaymentAttemptEntity>> =
         c.db.attempts().observeUnresolved().stateIn(viewModelScope, SharingStarted.Eagerly, emptyList())
 
@@ -819,6 +833,7 @@ class PosViewModel(private val c: AppContainer) : ViewModel() {
             PosLog.i("LIVE_CONFIG_CHANGED", "session_only" to sessionOnly, "session" to cfg.currentSessionId, "open" to cfg.sessionOpen)
             if (!sessionOnly) return reloadAll()
             _sell.update { if (catalogGeneration == generation) it.copy(config = cfg) else it }
+            if (cfg.sessionOpen) c.orderSync.retryNow(OdooErrorKind.NO_SESSION) // orders waiting for a session go now
             reloadLoyalty(cfg) // offers come per session
         } else if ((offersDay != null && offersDay != odooToday()) || (!offersLoaded && cfg.sessionOpen)) {
             reloadLoyalty(cfg) // a new day (today's combos in, yesterday's out), or the offers never loaded
@@ -1123,6 +1138,7 @@ class PosViewModel(private val c: AppContainer) : ViewModel() {
             _sell.update { it.copy(config = cfg ?: it.config, loading = false) }
             // Offers and ZZ Cash come per session: without this they stayed empty until the next full load.
             cfg?.let { reloadLoyalty(it) }
+            c.orderSync.retryNow(OdooErrorKind.NO_SESSION)
         } catch (e: Exception) {
             _sell.update { it.copy(loading = false, error = friendly(e)) }
         }

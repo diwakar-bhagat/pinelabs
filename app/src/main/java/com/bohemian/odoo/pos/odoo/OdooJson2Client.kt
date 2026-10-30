@@ -3,6 +3,9 @@ package com.bohemian.odoo.pos.odoo
 import com.bohemian.odoo.pos.core.PosLog
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.StateFlow
+import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.suspendCancellableCoroutine
 import kotlinx.coroutines.withContext
 import kotlinx.serialization.SerializationException
@@ -79,6 +82,13 @@ class OdooJson2Client(
     /** Until when every call from this till waits: Odoo said 429 (Too Many Requests) or 503. */
     @Volatile private var coolUntil = 0L
 
+    private val _keyRejected = MutableStateFlow(false)
+
+    /** Odoo refused this till's API key (401 / AccessDenied); cleared by the next call that gets through. */
+    val keyRejected: StateFlow<Boolean> = _keyRejected.asStateFlow()
+
+    @Volatile private var keyRejectedAt = 0L
+
     /**
      * One JSON-2 call, in the [OdooLane] of the caller's context. Odoo Online answers 429 (or 503)
      * when a database gets too many requests. A 429 is refused without running, so it is sent again
@@ -92,6 +102,10 @@ class OdooJson2Client(
         val started = now()
         val budget = throttle.budgetMs(lane)
         var attempt = 0
+        // A rejected key: background work waits for a probe every few minutes instead of failing every call.
+        if (lane == OdooLane.BACKGROUND && _keyRejected.value && now() - keyRejectedAt < KEY_PROBE_MS) {
+            throw OdooException.Auth("Odoo rejected this till's API key")
+        }
         while (true) {
             val cool = coolUntil - now()
             if (cool > 0) {
@@ -100,7 +114,13 @@ class OdooJson2Client(
             }
             val result = gate.run(lane) { send(model, method, body) }
             stats.record(lane, result.code)
-            if (result.code != 429 && (result.code != 503 || !retrySafe(method))) return result.value()
+            if (result.code != 429 && (result.code != 503 || !retrySafe(method))) {
+                val value = try { result.value() } catch (e: OdooException.Auth) {
+                    keyRejectedAt = now(); _keyRejected.value = true; throw e
+                }
+                _keyRejected.value = false
+                return value
+            }
             attempt++
             val wait = backoffMs(result.retryAfterMs, attempt)
             coolUntil = maxOf(coolUntil, now() + wait)
@@ -142,7 +162,9 @@ class OdooJson2Client(
             Sent(code, if (code == 429 || code == 503) retryAfterMs(retryAfter, now()) else null) {
                 when {
                     code in 200..299 -> parse(text, code)
-                    code == 401 || code == 403 -> throw OdooException.Auth(errorMessage(text) ?: "Unauthorized")
+                    // 403 is also AccessError (the user lacks rights on a model): that is Odoo refusing the request, not the key.
+                    code == 401 || (code == 403 && errorName(text)?.endsWith(".AccessError") != true) ->
+                        throw OdooException.Auth(errorMessage(text) ?: "Unauthorized")
                     code == 429 -> throw busy()
                     else -> throw OdooException.Server(code, errorName(text), errorMessage(text) ?: "HTTP $code")
                 }
@@ -201,6 +223,9 @@ class OdooJson2Client(
         )
 
         fun retrySafe(method: String) = method in SAFE_TO_REPEAT
+
+        /** While the key is rejected, background calls try again this often. */
+        const val KEY_PROBE_MS = 5 * 60_000L
 
         /** Retry-After in seconds or as an HTTP date (RFC 7231); null when absent or unreadable. */
         fun retryAfterMs(header: String?, nowMs: Long): Long? {

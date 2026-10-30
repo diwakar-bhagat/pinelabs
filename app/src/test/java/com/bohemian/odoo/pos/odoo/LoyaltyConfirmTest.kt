@@ -5,6 +5,7 @@ import com.bohemian.odoo.pos.data.LoyaltyConfirmDao
 import com.bohemian.odoo.pos.data.LoyaltyConfirmEntity
 import com.bohemian.odoo.pos.data.OutboxDao
 import com.bohemian.odoo.pos.data.OutboxEntity
+import com.bohemian.odoo.pos.data.OutboxProblem
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.test.runTest
@@ -30,9 +31,14 @@ private class MemOutbox : OutboxDao {
     override suspend fun count() = rows.size
     override suspend fun contains(uuid: String) = uuid in rows
     override suspend fun delete(uuid: String) { rows.remove(uuid) }
-    override suspend fun markFailed(uuid: String, error: String, next: Long) {
-        rows[uuid] = rows[uuid]!!.let { it.copy(attempts = it.attempts + 1, lastError = error, nextAttemptAt = next) }
+    override suspend fun markFailed(uuid: String, error: String, next: Long, kind: String) {
+        rows[uuid] = rows[uuid]!!.let { it.copy(attempts = it.attempts + 1, lastError = error, nextAttemptAt = next, errorKind = kind) }
     }
+    override suspend fun markWaiting(uuid: String, error: String, next: Long, kind: String) {
+        rows[uuid] = rows[uuid]!!.let { it.copy(lastError = error, nextAttemptAt = next, errorKind = kind) }
+    }
+    override suspend fun retryNow(kind: String) { rows.replaceAll { _, r -> if (r.errorKind == kind) r.copy(nextAttemptAt = 0) else r } }
+    override fun observeProblems(): Flow<List<OutboxProblem>> = MutableStateFlow(emptyList())
 }
 
 private class MemLoyalty : LoyaltyConfirmDao {
@@ -42,8 +48,8 @@ private class MemLoyalty : LoyaltyConfirmDao {
     override suspend fun due(now: Long) = rows.values.filter { it.nextAttemptAt <= now }
     override suspend fun count() = rows.size
     override suspend fun delete(uuid: String) { rows.remove(uuid) }
-    override suspend fun markFailed(uuid: String, error: String, next: Long) {
-        rows[uuid] = rows[uuid]!!.let { it.copy(attempts = it.attempts + 1, lastError = error, nextAttemptAt = next) }
+    override suspend fun markFailed(uuid: String, error: String, next: Long, kind: String) {
+        rows[uuid] = rows[uuid]!!.let { it.copy(attempts = it.attempts + 1, lastError = error, nextAttemptAt = next, errorKind = kind) }
     }
 }
 
@@ -130,6 +136,30 @@ class LoyaltyConfirmTest {
         assertTrue(!sync().submit(sale()))
         assertEquals(1, loyalty.rows.size)
         assertEquals(1, server.requestCount) // no confirm without the order
+    }
+
+    @Test fun `with no open session the order waits without counting attempts and goes once a session opens`() = runTest {
+        server.enqueue(MockResponse().setResponseCode(422).setBody(
+            """{"name": "odoo.exceptions.UserError", "message": "No open session available. Please open a new session to capture the order."}"""))
+        val sync = sync()
+        assertTrue(!sync.submit(sale(customer = null)))
+        val row = outbox.rows["order-1"]!!
+        assertEquals("NO_SESSION", row.errorKind)
+        assertEquals(0, row.attempts)
+        assertEquals(OrderSyncService.WAIT_MS, row.nextAttemptAt)
+        sync.retryNow(OdooErrorKind.NO_SESSION)
+        assertEquals(0L, outbox.rows["order-1"]!!.nextAttemptAt)
+    }
+
+    @Test fun `an order Odoo refuses is kept, counted and tried again hourly`() = runTest {
+        server.enqueue(MockResponse().setResponseCode(422).setBody(
+            """{"name": "odoo.exceptions.ValidationError", "message": "The paid amount is different from the total amount of the order."}"""))
+        assertTrue(!sync().submit(sale(customer = null)))
+        val row = outbox.rows["order-1"]!!
+        assertEquals("REJECTED", row.errorKind)
+        assertEquals(1, row.attempts)
+        assertEquals(OrderSyncService.REJECTED_RETRY_MS, row.nextAttemptAt)
+        assertEquals("The paid amount is different from the total amount of the order.", row.lastError)
     }
 
     @Test fun `walk-in sale books nothing`() = runTest {

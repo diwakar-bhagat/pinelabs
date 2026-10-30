@@ -105,7 +105,7 @@ class OrderSyncService(
             "limit" to 1,
         )).objects().firstOrNull()?.int("id")
         if (orderId == null) {
-            loyalty!!.markFailed(row.orderUuid, "order not in Odoo yet", clock() + backoff(row.attempts))
+            loyalty!!.markFailed(row.orderUuid, "order not in Odoo yet", clock() + backoff(row.attempts), OdooErrorKind.TRANSIENT.name)
             false
         } else {
             val data = odoo.json.parseToJsonElement(row.couponDataJson).jsonObject
@@ -115,8 +115,9 @@ class OrderSyncService(
             true
         }
     } catch (e: OdooException) {
-        loyalty!!.markFailed(row.orderUuid, e.message ?: "error", clock() + backoff(row.attempts))
-        PosLog.w("LOYALTY_CONFIRM_FAILED", "uuid" to row.orderUuid, "attempt" to (row.attempts + 1), "err" to e.message)
+        val kind = OdooErrors.kind(e)
+        loyalty!!.markFailed(row.orderUuid, e.message ?: "error", nextAttempt(kind, row.attempts), kind.name)
+        PosLog.w("LOYALTY_CONFIRM_FAILED", "uuid" to row.orderUuid, "attempt" to (row.attempts + 1), "kind" to kind, "err" to e.message)
         false
     }
 
@@ -153,6 +154,20 @@ class OrderSyncService(
         sent
     }
 
+    /**
+     * When a failed order (or loyalty booking) is tried again, by what kind of failure it was:
+     * passing trouble backs off; no session or a rejected key are waits, checked every 5 minutes;
+     * Odoo refusing it is retried hourly (Odoo's data may be fixed meanwhile) and shown to a supervisor.
+     */
+    private fun nextAttempt(kind: OdooErrorKind, attempts: Int): Long = clock() + when (kind) {
+        OdooErrorKind.TRANSIENT -> backoff(attempts)
+        OdooErrorKind.NO_SESSION, OdooErrorKind.AUTH -> WAIT_MS
+        OdooErrorKind.REJECTED -> REJECTED_RETRY_MS
+    }
+
+    /** "Retry now" on the refused-orders bar, or a session that just opened: those orders go on the next pass. */
+    suspend fun retryNow(kind: OdooErrorKind) = outbox.retryNow(kind.name)
+
     /** 30 s, 1, 2, 4, 8 min, then 15 min, ±25% so tills that failed together do not retry together. */
     private fun backoff(attempts: Int) =
         (minOf(15 * 60_000L, 30_000L shl minOf(attempts, 5)) * (0.75 + Math.random() * 0.5)).toLong()
@@ -184,8 +199,14 @@ class OrderSyncService(
             loyalty?.get(uuid)?.let { confirmLoyalty(it, reply?.let { r -> orderIdIn(r, uuid) }) }
             true
         } catch (e: OdooException) {
-            outbox.markFailed(uuid, e.message ?: e::class.simpleName ?: "error", clock() + backoff(attempts))
-            PosLog.w("ORDER_SYNC_FAILED", "uuid" to uuid, "attempt" to (attempts + 1), "err" to e.message)
+            val kind = OdooErrors.kind(e)
+            val error = e.message ?: e::class.simpleName ?: "error"
+            when (kind) {
+                // Not the order's fault: no attempt is counted, so its backoff does not grow while it waits.
+                OdooErrorKind.NO_SESSION, OdooErrorKind.AUTH -> outbox.markWaiting(uuid, error, nextAttempt(kind, attempts), kind.name)
+                else -> outbox.markFailed(uuid, error, nextAttempt(kind, attempts), kind.name)
+            }
+            PosLog.w("ORDER_SYNC_FAILED", "uuid" to uuid, "attempt" to (attempts + 1), "kind" to kind, "err" to e.message)
             false
         } finally {
             sending.remove(uuid)
@@ -195,6 +216,12 @@ class OrderSyncService(
     companion object {
         /** Outbox orders sent per background pass (every 30 s); session close sends them all. */
         const val MAX_PER_PASS = 10
+
+        /** No open session, or the key rejected: looked at again this often. */
+        const val WAIT_MS = 5 * 60_000L
+
+        /** An order Odoo refused: tried again this often (and at once on "Retry now"). */
+        const val REJECTED_RETRY_MS = 60 * 60_000L
 
         private const val KEEP_REPLIES = 8
 

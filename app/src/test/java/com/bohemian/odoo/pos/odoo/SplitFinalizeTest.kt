@@ -3,6 +3,7 @@ package com.bohemian.odoo.pos.odoo
 import com.bohemian.odoo.pos.core.Paise
 import com.bohemian.odoo.pos.data.OutboxDao
 import com.bohemian.odoo.pos.data.OutboxEntity
+import com.bohemian.odoo.pos.data.OutboxProblem
 import com.bohemian.odoo.pos.data.SaleSnapshotDao
 import com.bohemian.odoo.pos.data.SaleSnapshotEntity
 import com.bohemian.odoo.pos.payment.AttemptState
@@ -44,9 +45,14 @@ private class MemOutboxRows : OutboxDao {
     override suspend fun count() = rows.size
     override suspend fun contains(uuid: String) = uuid in rows
     override suspend fun delete(uuid: String) { rows.remove(uuid) }
-    override suspend fun markFailed(uuid: String, error: String, next: Long) {
-        rows[uuid] = rows[uuid]!!.let { it.copy(attempts = it.attempts + 1, lastError = error, nextAttemptAt = next) }
+    override suspend fun markFailed(uuid: String, error: String, next: Long, kind: String) {
+        rows[uuid] = rows[uuid]!!.let { it.copy(attempts = it.attempts + 1, lastError = error, nextAttemptAt = next, errorKind = kind) }
     }
+    override suspend fun markWaiting(uuid: String, error: String, next: Long, kind: String) {
+        rows[uuid] = rows[uuid]!!.let { it.copy(lastError = error, nextAttemptAt = next, errorKind = kind) }
+    }
+    override suspend fun retryNow(kind: String) { rows.replaceAll { _, r -> if (r.errorKind == kind) r.copy(nextAttemptAt = 0) else r } }
+    override fun observeProblems(): Flow<List<OutboxProblem>> = MutableStateFlow(emptyList())
 }
 
 /** A split bill: Card / UPI parts on the E700 (method 22) and cash (method 2) for the rest. */

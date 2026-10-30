@@ -39,7 +39,12 @@ data class OutboxEntity(
     val lastError: String?,
     val createdAt: Long,
     val nextAttemptAt: Long,
+    /** `OdooErrorKind` of the last failure (null until one): how it is retried and what the bar says. */
+    val errorKind: String? = null,
 )
+
+/** Outbox orders that failed the same way, for the bars: how many and Odoo's latest message. */
+data class OutboxProblem(val kind: String, val count: Int, val lastError: String?)
 
 /**
  * ZZ Cash points still to book for a synced sale (`pos.order.confirm_coupon_programs`).
@@ -53,6 +58,8 @@ data class LoyaltyConfirmEntity(
     val lastError: String?,
     val createdAt: Long,
     val nextAttemptAt: Long,
+    /** `OdooErrorKind` of the last failure. */
+    val errorKind: String? = null,
 )
 
 @Dao
@@ -72,8 +79,43 @@ interface LoyaltyConfirmDao {
     @Query("DELETE FROM loyalty_confirm WHERE orderUuid = :uuid")
     suspend fun delete(uuid: String)
 
-    @Query("UPDATE loyalty_confirm SET attempts = attempts + 1, lastError = :error, nextAttemptAt = :next WHERE orderUuid = :uuid")
-    suspend fun markFailed(uuid: String, error: String, next: Long)
+    @Query("UPDATE loyalty_confirm SET attempts = attempts + 1, lastError = :error, nextAttemptAt = :next, errorKind = :kind WHERE orderUuid = :uuid")
+    suspend fun markFailed(uuid: String, error: String, next: Long, kind: String)
+}
+
+/**
+ * Odoo's own answer to `account.tax.compute_all` for one line shape (F3, 0.7.0): kept on the till so
+ * a cart Odoo has priced before can still be sold while Odoo is unreachable (I2: reused, never
+ * reproduced). [taxStamp] is the newest tax / fiscal-position `write_date` it was priced under; any
+ * change there empties the table.
+ */
+@Entity(tableName = "price_cache", primaryKeys = ["taxKey", "unitPaise", "qty", "fposId"])
+data class PriceCacheEntity(
+    /** The applied tax ids, sorted, comma-joined. */
+    val taxKey: String,
+    val unitPaise: Long,
+    val qty: Int,
+    /** 0 = no fiscal position. */
+    val fposId: Int,
+    val inclPaise: Long,
+    val exclPaise: Long,
+    val taxStamp: String,
+    val savedAt: Long,
+)
+
+@Dao
+interface PriceCacheDao {
+    @Insert(onConflict = OnConflictStrategy.REPLACE)
+    suspend fun upsert(e: PriceCacheEntity)
+
+    @Query("SELECT * FROM price_cache")
+    suspend fun all(): List<PriceCacheEntity>
+
+    @Query("DELETE FROM price_cache WHERE taxStamp != :stamp")
+    suspend fun keepOnly(stamp: String)
+
+    @Query("DELETE FROM price_cache")
+    suspend fun clear()
 }
 
 /** A card Void on the terminal (Phase 4b). Never deleted: it is the audit trail of a reversal. */
@@ -171,8 +213,19 @@ interface OutboxDao {
     @Query("DELETE FROM order_outbox WHERE orderUuid = :uuid")
     suspend fun delete(uuid: String)
 
-    @Query("UPDATE order_outbox SET attempts = attempts + 1, lastError = :error, nextAttemptAt = :next WHERE orderUuid = :uuid")
-    suspend fun markFailed(uuid: String, error: String, next: Long)
+    @Query("UPDATE order_outbox SET attempts = attempts + 1, lastError = :error, nextAttemptAt = :next, errorKind = :kind WHERE orderUuid = :uuid")
+    suspend fun markFailed(uuid: String, error: String, next: Long, kind: String)
+
+    /** A wait that is not the order's fault (no session, key rejected): no attempt is counted. */
+    @Query("UPDATE order_outbox SET lastError = :error, nextAttemptAt = :next, errorKind = :kind WHERE orderUuid = :uuid")
+    suspend fun markWaiting(uuid: String, error: String, next: Long, kind: String)
+
+    /** "Retry now" (a supervisor), or a session just opened: these orders are sent on the next pass. */
+    @Query("UPDATE order_outbox SET nextAttemptAt = 0 WHERE errorKind = :kind")
+    suspend fun retryNow(kind: String)
+
+    @Query("SELECT errorKind AS kind, COUNT(*) AS count, MAX(lastError) AS lastError FROM order_outbox WHERE errorKind IS NOT NULL GROUP BY errorKind")
+    fun observeProblems(): Flow<List<OutboxProblem>>
 }
 
 /**
@@ -229,8 +282,8 @@ interface VoidAttemptDao {
 
 @Database(
     entities = [PaymentAttemptEntity::class, OutboxEntity::class, SaleSnapshotEntity::class, VoidAttemptEntity::class,
-        LoyaltyConfirmEntity::class, ParkedBillEntity::class],
-    version = 4, exportSchema = false,
+        LoyaltyConfirmEntity::class, ParkedBillEntity::class, PriceCacheEntity::class],
+    version = 5, exportSchema = false,
 )
 abstract class AppDatabase : RoomDatabase() {
     abstract fun attempts(): PaymentAttemptDao
@@ -239,6 +292,7 @@ abstract class AppDatabase : RoomDatabase() {
     abstract fun voids(): VoidAttemptDao
     abstract fun loyalty(): LoyaltyConfirmDao
     abstract fun parkedBills(): ParkedBillDao
+    abstract fun priceCache(): PriceCacheDao
 
     companion object {
         /** v2 (Phase 4b): void_attempt table. SQL matches Room's generated createAllTables. */
@@ -262,6 +316,20 @@ abstract class AppDatabase : RoomDatabase() {
             }
         }
 
+        /** v5 (0.7.0): error kinds on the outbox and loyalty rows; Odoo's saved prices for selling offline. */
+        val MIGRATION_4_5 = object : Migration(4, 5) {
+            override fun migrate(db: SupportSQLiteDatabase) {
+                db.execSQL("ALTER TABLE `order_outbox` ADD COLUMN `errorKind` TEXT")
+                db.execSQL("ALTER TABLE `loyalty_confirm` ADD COLUMN `errorKind` TEXT")
+                db.execSQL(PRICE_CACHE_DDL)
+            }
+        }
+
+        internal const val PRICE_CACHE_DDL = "CREATE TABLE IF NOT EXISTS `price_cache` (" +
+            "`taxKey` TEXT NOT NULL, `unitPaise` INTEGER NOT NULL, `qty` INTEGER NOT NULL, `fposId` INTEGER NOT NULL, " +
+            "`inclPaise` INTEGER NOT NULL, `exclPaise` INTEGER NOT NULL, `taxStamp` TEXT NOT NULL, `savedAt` INTEGER NOT NULL, " +
+            "PRIMARY KEY(`taxKey`, `unitPaise`, `qty`, `fposId`))"
+
         internal const val PARKED_BILL_DDL = "CREATE TABLE IF NOT EXISTS `parked_bill` (" +
             "`orderUuid` TEXT NOT NULL, `billJson` TEXT NOT NULL, `createdAt` INTEGER NOT NULL, " +
             "`activeAt` INTEGER NOT NULL, PRIMARY KEY(`orderUuid`))"
@@ -278,7 +346,7 @@ abstract class AppDatabase : RoomDatabase() {
         fun create(context: Context): AppDatabase =
             Room.databaseBuilder(context, AppDatabase::class.java, "bohemian-pos.db")
                 // Payment data must never be silently dropped: no destructive migrations.
-                .addMigrations(MIGRATION_1_2, MIGRATION_2_3, MIGRATION_3_4)
+                .addMigrations(MIGRATION_1_2, MIGRATION_2_3, MIGRATION_3_4, MIGRATION_4_5)
                 .build()
     }
 }
