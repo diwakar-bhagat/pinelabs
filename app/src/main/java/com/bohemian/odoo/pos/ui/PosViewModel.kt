@@ -409,14 +409,6 @@ class PosViewModel(private val c: AppContainer) : ViewModel() {
     val envLabel = BuildConfig.ENV_LABEL + if (BuildConfig.PINE_SDK_PRESENT) "" else " · NO PINE SDK"
     val isDebug = BuildConfig.DEBUG
 
-    init {
-        if (_configured.value) loadCatalog()
-        refreshPartlyPaid()
-        startLiveSync()
-        restoreOpenBills()
-        keepOpenBillSaved()
-    }
-
     // ------------------------------------------------------------------ setup
 
     fun saveApiKey(key: String) = launchSetup {
@@ -2483,6 +2475,21 @@ class PosViewModel(private val c: AppContainer) : ViewModel() {
     }
 
     private fun PayMode.label() = when (this) { PayMode.CARD -> "CARD"; PayMode.UPI -> "UPI"; PayMode.BHARAT_QR -> "BHARAT QR" }
+
+    /**
+     * Last in the class on purpose: Kotlin runs property initializers and init blocks in source order,
+     * so an init block above a property starts work that finds it still null. 0.5.0 had this one near
+     * the top: `refreshPartlyPaid()` captured `_partlyPaid` before it was set, waited on Room, then
+     * wrote to null (NullPointerException on every start; the part-paid bar was not restored).
+     * `PosViewModelOrderTest` keeps it here.
+     */
+    init {
+        if (_configured.value) loadCatalog()
+        refreshPartlyPaid()
+        startLiveSync()
+        restoreOpenBills()
+        keepOpenBillSaved()
+    }
 
     companion object {
         /** Tallest keypad key (dp), as before the keypad became resizable. */
