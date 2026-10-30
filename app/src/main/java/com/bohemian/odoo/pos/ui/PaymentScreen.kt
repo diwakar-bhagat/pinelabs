@@ -60,7 +60,7 @@ fun PaymentScreen(ui: SplitUi, vm: PosViewModel) {
                     Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                         OutlinedButton(vm::closeSplit, Modifier.weight(1f).height(56.dp), shape = RoundedCornerShape(6.dp),
                             enabled = ui.parts.values.none { it is PartState.Charging }) { Text("BACK") }
-                        Button(vm::splitValidate, Modifier.weight(1f).height(56.dp), shape = RoundedCornerShape(6.dp), enabled = ui.canValidate,
+                        Button(onceIn { vm.splitValidate() }, Modifier.weight(1f).height(56.dp), shape = RoundedCornerShape(6.dp), enabled = ui.canValidate,
                             colors = ButtonDefaults.buttonColors(containerColor = Zz.Black, contentColor = Zz.Cream)) {
                             Text("VALIDATE", style = ZzHeading)
                         }
@@ -109,7 +109,7 @@ private fun PaymentLineRow(line: SplitLine, ui: SplitUi, vm: PosViewModel) {
         Text(line.amount.format(), fontWeight = FontWeight.Bold, fontSize = 18.sp)
         Spacer(Modifier.width(8.dp))
         if (line.mode != null && part !is PartState.Paid && part !is PartState.Unconfirmed) {
-            Button({ vm.splitCharge(line.uuid) }, enabled = part != PartState.Charging && line.amount.isPositive, shape = RoundedCornerShape(6.dp),
+            Button(onceIn { vm.splitCharge(line.uuid) }, enabled = part != PartState.Charging && line.amount.isPositive, shape = RoundedCornerShape(6.dp),
                 colors = ButtonDefaults.buttonColors(containerColor = Zz.Red, contentColor = Zz.Cream)) { Text("CHARGE") }
         }
         if (!ui.isLocked(line.uuid)) TextButton({ vm.splitRemove(line.uuid) }) { Text("✕", fontSize = 18.sp, color = Zz.Muted) }

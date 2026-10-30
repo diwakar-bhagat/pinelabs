@@ -148,7 +148,7 @@ fun SetupScreen(vm: PosViewModel) {
                 Switch(s.useFake, { vm.setUseFake(it) }); Spacer(Modifier.width(8.dp))
                 Text("Use FAKE payment gateway (debug only — no real money)")
             }
-            Button({ vm.finishSetup() }, enabled = !s.busy) { Text("Start selling") }
+            Button(onceIn { vm.finishSetup() }, enabled = !s.busy) { Text("Start selling") }
         }
 
         val activity = LocalContext.current as Activity
@@ -277,7 +277,7 @@ fun SellScreen(vm: PosViewModel) {
             if (outbox > 0) Badge(containerColor = Zz.Red) { Text("$outbox not synced to Odoo", color = Zz.Cream) }
             if (unresolved.isNotEmpty()) { Spacer(Modifier.width(8.dp)); Badge(containerColor = Zz.Gold) { Text("${unresolved.size} payment(s) to check", color = Zz.Black) } }
             Spacer(Modifier.width(12.dp))
-            IconButton({ vm.reloadFromOdoo() }) { MdiIcon(R.drawable.mdi_refresh, "Reload menu and photos from Odoo", Zz.Cream) }
+            IconButton(onceIn { vm.reloadFromOdoo() }) { MdiIcon(R.drawable.mdi_refresh, "Reload menu and photos from Odoo", Zz.Cream) }
             TextButton({ vm.openSales() }) { Text("SALES", color = Zz.Cream, style = ZzHeading) }
             TextButton({ vm.startVoid() }) { Text("VOID", color = Zz.Cream, style = ZzHeading) }
             if (s.config?.sessionOpen == true) TextButton({ vm.startClose() }) { Text("CLOSE SESSION", color = Zz.Cream, style = ZzHeading) }
@@ -293,7 +293,7 @@ fun SellScreen(vm: PosViewModel) {
                 Text("Catalogue not refreshed (${s.catalogStaleReason ?: "No connection to Odoo"}) — showing the complete one from " +
                     SimpleDateFormat("dd-MMM HH:mm", Locale("en", "IN")).format(Date(at)) +
                     ". Prices and payment need Odoo. ", Modifier.weight(1f))
-                OutlinedButton({ vm.reloadFromOdoo() }) { Text("Retry") }
+                OutlinedButton(onceIn { vm.reloadFromOdoo() }) { Text("Retry") }
             }
         }
         if (s.config != null && !s.config!!.sessionOpen && s.offlineCatalogSavedAt == null) {
@@ -359,7 +359,7 @@ private fun VoidBar(v: VoidAttemptEntity, vm: PosViewModel) {
             }
             VoidState.VOIDED.name -> {
                 Text("Sale ${v.saleRef} voided ($amount) — Odoo refund still missing. ", Modifier.weight(1f))
-                OutlinedButton({ vm.retryOdooRefund(v.billingRef) }) { Text("Create Odoo refund") }
+                OutlinedButton(onceIn { vm.retryOdooRefund(v.billingRef) }) { Text("Create Odoo refund") }
                 Spacer(Modifier.width(6.dp))
                 OutlinedButton({ vm.confirmOdooRefund(v.billingRef) }) { Text("Supervisor: refunded in Odoo") }
             }
@@ -395,7 +395,7 @@ private fun VoidDialog(ui: VoidUi, vm: PosViewModel) {
             }
         },
         confirmButton = {
-            if (ui.confirm != null) Button({ vm.confirmVoid() }, enabled = !ui.busy) { Text("VOID ON TERMINAL") }
+            if (ui.confirm != null) Button(onceIn { vm.confirmVoid() }, enabled = !ui.busy) { Text("VOID ON TERMINAL") }
             else Button({ vm.dismissVoid() }, enabled = !ui.busy) { Text(if (ui.message != null) "DONE" else "CLOSE") }
         },
         dismissButton = {
@@ -536,7 +536,7 @@ private fun PaymentDialog(pay: PayUi, vm: PosViewModel) {
             AlertDialog(
                 onDismissRequest = { vm.dismissPayResult() },
                 confirmButton = { Button({ vm.dismissPayResult() }) { Text(if (pay.isPaid) "NEW BILL" else "BACK TO CART") } },
-                dismissButton = if (pay.isPaid && pay.printed == false) ({ OutlinedButton({ vm.printAgain() }) { Text("PRINT AGAIN") } }) else null,
+                dismissButton = if (pay.isPaid && pay.printed == false) ({ OutlinedButton(onceIn { vm.printAgain() }) { Text("PRINT AGAIN") } }) else null,
                 title = { Text(title, fontWeight = FontWeight.Bold) },
                 text = { Text(body + printedNote) },
             )

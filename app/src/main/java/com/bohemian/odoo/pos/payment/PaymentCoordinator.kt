@@ -67,6 +67,8 @@ class PaymentCoordinator(
      * Charge [amount] for [orderUuid]. [orderTotal] is the bill; a split bill is paid in several
      * attempts, each its own `billing_reference_id` (HARD RULE 8), until they cover it. A single
      * payment has `orderTotal == amount`, so any paid attempt refuses a second charge as before.
+     * [expectedPaid] is what the screen saw paid when the cashier asked for this part: if more is paid
+     * by the time it runs (a second tap queued behind the first), it is refused, never charged again.
      */
     suspend fun pay(
         orderUuid: String,
@@ -74,6 +76,7 @@ class PaymentCoordinator(
         mode: PayMode,
         customerMobile: String? = null,
         orderTotal: Paise = amount,
+        expectedPaid: Paise? = null,
     ): PaymentOutcome =
         withContext(NonCancellable) { // a payment is never abandoned half-way because a screen closed
             val first = mutex.withLock {
@@ -84,6 +87,7 @@ class PaymentCoordinator(
                     val paidSum = paid.fold(Paise.ZERO) { acc, p -> acc + p.amount }
                     // Never more than the bill: a second charge only for what is still due.
                     paid.lastOrNull()?.takeIf { paidSum + amount > orderTotal }?.let { return@withLock Step.Done(PaymentOutcome.AlreadyPaid(it)) }
+                    paid.lastOrNull()?.takeIf { expectedPaid != null && paidSum > expectedPaid }?.let { return@withLock Step.Done(PaymentOutcome.AlreadyPaid(it)) }
                     previous.firstOrNull { it.state.blocksNewCharge }?.let { return@withLock Step.Done(PaymentOutcome.Blocked(it)) }
                 }
 

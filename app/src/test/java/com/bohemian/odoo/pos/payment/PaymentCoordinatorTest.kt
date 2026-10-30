@@ -252,6 +252,19 @@ class PaymentCoordinatorTest {
         assertEquals(2, journal.rows.keys.toSet().size) // a new billing ref per part (HARD RULE 8)
     }
 
+    @Test fun `split bill - a second tap on the same part, queued behind the first, is never charged`() = runTest {
+        val total = Paise(50000)
+        gw.saleResults += GatewayResult.Approved(TxnDetails(rrn = "1", amountPaise = 20000))
+        val c = coordinator()
+        // Both taps saw nothing paid; the first charges, the second would still fit under the total.
+        assertTrue(c.pay("o1", Paise(20000), PayMode.UPI, orderTotal = total, expectedPaid = Paise.ZERO) is PaymentOutcome.Paid)
+        assertTrue(c.pay("o1", Paise(20000), PayMode.UPI, orderTotal = total, expectedPaid = Paise.ZERO) is PaymentOutcome.AlreadyPaid)
+        assertEquals(1, gw.saleCalls)
+        // The next part, asked for after the screen showed ₹200 paid, goes through.
+        gw.saleResults += GatewayResult.Approved(TxnDetails(rrn = "2", amountPaise = 30000))
+        assertTrue(c.pay("o1", Paise(30000), PayMode.CARD, orderTotal = total, expectedPaid = Paise(20000)) is PaymentOutcome.Paid)
+    }
+
     @Test fun `split bill - an unresolved part blocks the next one`() = runTest {
         val total = Paise(50000)
         gw.saleResults += GatewayResult.Ambiguous("Timeout", null) // card part outcome unknown

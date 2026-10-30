@@ -304,7 +304,7 @@ private fun PointsRow(s: SellState, vm: PosViewModel, onRewards: () -> Unit) {
                 ZzLookup.NO_CARD -> Text("No card yet: earns +${s.zzEarned.toPlainString()} on this sale", fontSize = 13.sp, color = Zz.Muted)
                 ZzLookup.FAILED -> {
                     Text("Couldn't load", fontSize = 13.sp, color = Zz.Red)
-                    TextButton({ vm.retryZzCash() }, contentPadding = PaddingValues(horizontal = 8.dp)) { Text("Retry") }
+                    TextButton(onceIn { vm.retryZzCash() }, contentPadding = PaddingValues(horizontal = 8.dp)) { Text("Retry") }
                 }
                 else -> Text("Loading…", fontSize = 13.sp, color = Zz.Muted)
             }
@@ -313,7 +313,7 @@ private fun PointsRow(s: SellState, vm: PosViewModel, onRewards: () -> Unit) {
         if (s.zzRules == null) {
             // Without the earning rules this bill would count as earning 0 and no reward would fit.
             Text("${bal.points.toPlainString()} · earning rules not loaded", fontSize = 13.sp, color = Zz.Red)
-            TextButton({ vm.retryZzCash() }, contentPadding = PaddingValues(horizontal = 8.dp)) { Text("Retry") }
+            TextButton(onceIn { vm.retryZzCash() }, contentPadding = PaddingValues(horizontal = 8.dp)) { Text("Retry") }
             return@Row
         }
         val earned = s.zzEarned
@@ -636,7 +636,7 @@ private fun CustomerDialog(s: SellState, vm: PosViewModel, onDismiss: () -> Unit
                             keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Text, imeAction = ImeAction.Search),
                             keyboardActions = KeyboardActions(onSearch = { vm.lookupCustomer() }))
                         Spacer(Modifier.width(8.dp))
-                        OutlinedButton({ vm.lookupCustomer() }, Modifier.height(56.dp), enabled = !s.customerBusy,
+                        OutlinedButton(onceIn { vm.lookupCustomer() }, Modifier.height(56.dp), enabled = !s.customerBusy,
                             shape = RoundedCornerShape(6.dp)) { Text("Find") }
                     }
                     CustomerMatches(s, vm)
@@ -647,7 +647,7 @@ private fun CustomerDialog(s: SellState, vm: PosViewModel, onDismiss: () -> Unit
                         OutlinedTextField(s.customerName, vm::setCustomerName, Modifier.weight(1f), singleLine = true,
                             enabled = !s.customerBusy, label = { Text("Name") })
                         Spacer(Modifier.width(8.dp))
-                        Button({ vm.saveNewCustomer() }, Modifier.height(56.dp), shape = RoundedCornerShape(6.dp),
+                        Button(onceIn { vm.saveNewCustomer() }, Modifier.height(56.dp), shape = RoundedCornerShape(6.dp),
                             enabled = !s.customerBusy && s.customerName.isNotBlank() && s.phone.count { it.isDigit() } >= 10,
                             colors = ButtonDefaults.buttonColors(containerColor = Zz.Black, contentColor = Zz.Cream)) { Text("Save") }
                     }

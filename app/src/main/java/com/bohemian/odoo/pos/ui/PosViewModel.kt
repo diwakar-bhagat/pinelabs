@@ -433,6 +433,7 @@ class PosViewModel(private val c: AppContainer) : ViewModel() {
     fun setUseFake(v: Boolean) = _setup.update { it.copy(useFake = v) }
 
     fun finishSetup() {
+        if (_configured.value) return // a second tap on Start selling: the first already started the load
         val s = _setup.value
         val cfg = s.selectedConfig ?: return _setup.update { it.copy(error = "Choose a POS") }
         if (s.cardMethodId == 0 && s.upiMethodId == 0 && s.cashMethodId == 0) {
@@ -1004,7 +1005,7 @@ class PosViewModel(private val c: AppContainer) : ViewModel() {
     fun enterCode(raw: String) = launchSafe {
         val code = raw.trim()
         val s = _sell.value
-        if (code.isEmpty() || s.pay is PayUi.Working || lockedByPartPayment()) return@launchSafe
+        if (code.isEmpty() || s.pay is PayUi.Working || lockedByPartPayment() || checkingCode) return@launchSafe
         if (!offersLoaded) return@launchSafe _sell.update { it.copy(error = "Offers are not loaded from Odoo yet. Check the connection, then try the code again.") }
         when (val check = Offers.ruleForCode(offerPrograms, code, odooToday(), s.offers)) {
             is Offers.CodeCheck.Rule -> {
@@ -1017,8 +1018,10 @@ class PosViewModel(private val c: AppContainer) : ViewModel() {
             Offers.CodeCheck.NoRule -> {
                 if (s.offers.scanned.any { it.code == code }) return@launchSafe _sell.update { it.copy(error = "That coupon code has already been scanned and activated.") }
                 val cfg = s.config ?: return@launchSafe
+                checkingCode = true // Apply, Done and a scan of the same code wait for this answer
                 val answer = try { c.offers.useCouponCode(cfg.id, code, SalesService.utc(System.currentTimeMillis()), s.customer?.id) }
                     catch (e: CancellationException) { throw e } catch (e: Exception) { return@launchSafe _sell.update { it.copy(error = "Could not check the code: ${friendly(e)}") } }
+                    finally { checkingCode = false }
                 when (answer) {
                     is CouponCodeResult.Refused -> _sell.update { it.copy(error = answer.message) }
                     is CouponCodeResult.Accepted -> {
@@ -1027,6 +1030,7 @@ class PosViewModel(private val c: AppContainer) : ViewModel() {
                             return@launchSafe _sell.update { it.copy(error = "${program?.name ?: "This coupon"} is not supported on this till yet (gift cards and eWallets: use the web POS).") }
                         }
                         PosLog.i("COUPON_ACCEPTED", "program" to program.id, "card" to answer.coupon.cardId)
+                        if (_sell.value.offers.scanned.any { it.code == code }) return@launchSafe // already on the bill
                         _sell.update { it.copy(offers = it.offers.copy(scanned = it.offers.scanned + answer.coupon), totals = null, error = null,
                             notice = "Coupon accepted: ${program.name}. Pick its reward under Reward if it does not apply by itself.") }
                         reprice()
@@ -1035,6 +1039,9 @@ class PosViewModel(private val c: AppContainer) : ViewModel() {
             }
         }
     }
+
+    /** A coupon code is with Odoo now: Enter Code waits for its answer before taking another. */
+    private var checkingCode = false
 
     /** Reward dialog: put this offer on the bill ([productId]: the free item picked). */
     fun claimOffer(offer: Claimable, productId: Int? = null) {
@@ -1264,6 +1271,7 @@ class PosViewModel(private val c: AppContainer) : ViewModel() {
     fun chooseVoid(sale: PaymentAttempt?) = _voiding.update { it?.copy(confirm = sale, message = null) }
 
     fun confirmVoid() = launchSafe {
+        if (_voiding.value?.busy == true) return@launchSafe // a second tap: the first void is running
         val sale = _voiding.value?.confirm ?: return@launchSafe
         _voiding.update { it?.copy(busy = true, message = null) }
         val msg = when (val o = c.payments.void(sale.billingRef)) {
@@ -1289,9 +1297,17 @@ class PosViewModel(private val c: AppContainer) : ViewModel() {
     }
 
     /** Red-bar retry for a voided sale whose Odoo refund was not created yet. */
+    /** Voids whose Odoo refund is being created now, so a second tap does not create it again. */
+    private val refunding = mutableSetOf<String>()
+
     fun retryOdooRefund(ref: String) = launchSafe {
-        val v = c.voidJournal.get(ref) ?: return@launchSafe
-        _sell.update { it.copy(error = recordRefund(v)) }
+        if (!refunding.add(ref)) return@launchSafe
+        try {
+            val v = c.voidJournal.get(ref) ?: return@launchSafe
+            _sell.update { it.copy(error = recordRefund(v)) }
+        } finally {
+            refunding.remove(ref)
+        }
     }
 
     /**
@@ -1423,6 +1439,7 @@ class PosViewModel(private val c: AppContainer) : ViewModel() {
      * new-customer form when nobody has it.
      */
     fun lookupCustomer() = launchSafe {
+        if (_sell.value.customerBusy) return@launchSafe // Find and the keyboard's Search together, or a double tap
         // Find on a name searches at once instead of after the typing pause.
         if (!CustomerService.isPhoneQuery(_sell.value.phone)) return@launchSafe searchCustomers(_sell.value.phone, debounce = false)
         val e164 = c.customers.normalizeIndianMobile(_sell.value.phone)
@@ -1477,7 +1494,13 @@ class PosViewModel(private val c: AppContainer) : ViewModel() {
     }
 
     /** Pick a customer from the search results, an exact lookup, or a just-saved new customer. */
+    /** The last customer picked and when: the same row tapped twice within a second is one pick. */
+    private var lastPick: Pair<Int, Long>? = null
+
     fun pickCustomer(customer: Customer) {
+        val now = android.os.SystemClock.uptimeMillis()
+        if (lastPick?.let { it.first == customer.id && now - it.second < 1_000 } == true) return
+        lastPick = customer.id to now
         phoneSearchJob?.cancel() // a late search result must not reopen the list
         val changed = _sell.value.customer?.id != customer.id
         _sell.update { it.copy(
@@ -1541,7 +1564,10 @@ class PosViewModel(private val c: AppContainer) : ViewModel() {
             ?: c.zzCash.rewards(programId).also { rewardsCache = programId to it }
 
     /** "Retry" on the ZZ Cash row after a failed lookup. */
-    fun retryZzCash() { _sell.value.customer?.let { refreshZzCash(it) } }
+    fun retryZzCash() {
+        if (_sell.value.zzLookup == ZzLookup.LOADING) return // already reading the card
+        _sell.value.customer?.let { refreshZzCash(it) }
+    }
 
     /**
      * Apply a ZZ Cash reward to this sale. It is priced by Odoo on the next reprice (split over the
@@ -1913,12 +1939,15 @@ class PosViewModel(private val c: AppContainer) : ViewModel() {
         val mode = line.mode ?: return@launchSafe
         if (ui.isLocked(uuid) || ui.parts.values.any { it is PartState.Charging } || _sell.value.pay is PayUi.Working) return@launchSafe
         if (!line.amount.isPositive) { _split.update { it?.copy(message = "Enter the amount for this part first.") }; return@launchSafe }
-        val snap = c.finalizer.load(ui.orderUuid)
-            ?: return@launchSafe _split.update { it?.copy(message = "This bill was not saved. Close and press SPLIT again.") }
+        // Charging is set before anything waits, so a second tap finds it and stops here.
+        val seenPaid = _sell.value.partPaid
         _split.update { it?.copy(parts = it.parts + (uuid to PartState.Charging), message = null) }
+        val snap = c.finalizer.load(ui.orderUuid) ?: return@launchSafe _split.update {
+            it?.copy(parts = it.parts - uuid, message = "This bill was not saved. Close and press SPLIT again.")
+        }
         _sell.update { it.copy(pay = PayUi.Working(mode.label(), "Complete ${line.amount.format()} on the terminal…")) }
         val outcome = try {
-            c.payments.pay(ui.orderUuid, line.amount, mode, snap.customerPhone?.takeLast(10), orderTotal = ui.split.total)
+            c.payments.pay(ui.orderUuid, line.amount, mode, snap.customerPhone?.takeLast(10), orderTotal = ui.split.total, expectedPaid = seenPaid)
         } finally {
             _sell.update { it.copy(pay = PayUi.Idle) }
         }
@@ -1928,7 +1957,7 @@ class PosViewModel(private val c: AppContainer) : ViewModel() {
             is PaymentOutcome.NotSent -> PartState.Failed(outcome.reason)
             is PaymentOutcome.Unresolved -> PartState.Unconfirmed(outcome.attempt)
             is PaymentOutcome.Blocked -> PartState.Failed("Another part of this bill is not confirmed yet. Resolve it on the yellow bar first.")
-            is PaymentOutcome.AlreadyPaid -> PartState.Failed("That is more than this bill still needs.")
+            is PaymentOutcome.AlreadyPaid -> PartState.Failed("That is more than this bill still needs, or another part was just paid. Check the amounts.")
         }
         PosLog.i("SPLIT_PART", "order" to ui.orderUuid, "mode" to mode, "amount" to line.amount, "outcome" to outcome::class.simpleName)
         _split.update { it?.copy(parts = it.parts + (uuid to state)) }
@@ -1943,13 +1972,14 @@ class PosViewModel(private val c: AppContainer) : ViewModel() {
      */
     fun splitValidate() = launchSafe {
         val ui = _split.value ?: return@launchSafe
+        if (ui.busy) return@launchSafe // a second tap while the first is saving
         if (!ui.canValidate) {
             _split.update { it?.copy(message = if (!ui.terminalLinesPaid) "Charge every Card / UPI part first." else "The payments do not cover the bill yet.") }
             return@launchSafe
         }
-        val snap = c.finalizer.load(ui.orderUuid)
-            ?: return@launchSafe _split.update { it?.copy(message = "This bill was not saved. Close and press SPLIT again.") }
         _split.update { it?.copy(busy = true, message = null) }
+        val snap = c.finalizer.load(ui.orderUuid)
+            ?: return@launchSafe _split.update { it?.copy(busy = false, message = "This bill was not saved. Close and press SPLIT again.") }
         _sell.update { it.copy(pay = PayUi.Working("SPLIT", "Saving order…")) }
         val sale = try { c.finalizer.finalizeSplit(snap) } catch (e: CancellationException) { throw e } catch (e: Exception) {
             PosLog.e("SPLIT_FINALIZE_FAILED", e, "order" to ui.orderUuid)
@@ -2130,7 +2160,10 @@ class PosViewModel(private val c: AppContainer) : ViewModel() {
     }
 
     /** "Print again" after a failed print (paper out): the same bill, marked REPRINT. */
-    fun printAgain() { lastBill?.let { (sale, label, attempts) -> printInBackground(sale, label, attempts, reprint = true) } }
+    fun printAgain() {
+        if ((_sell.value.pay as? PayUi.Done)?.printing == true) return // a second tap: one bill is printing
+        lastBill?.let { (sale, label, attempts) -> printInBackground(sale, label, attempts, reprint = true) }
+    }
 
     /** Company id → "street, street2, city zip", read with the catalogue, for the bill header. */
     private var companyAddress: Pair<Int, String>? = null
