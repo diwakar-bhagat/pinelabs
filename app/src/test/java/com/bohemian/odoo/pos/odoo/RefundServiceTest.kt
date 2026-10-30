@@ -93,6 +93,11 @@ class RefundServiceTest {
     private fun payload(): JsonObject =
         (RefundService.buildPayload(order(), void, sessionId = 33, paymentMethodId = 8, cardLast4 = "4242", nowMillis = 0)["orders"] as JsonArray)[0].jsonObject
 
+    @Test fun `every key the refund sends is in the Odoo contract`() {
+        assertEquals(emptyList<String>(), OdooContract.uncovered(
+            RefundService.buildPayload(order(), void, sessionId = 33, paymentMethodId = 8, cardLast4 = "4242", nowMillis = 0)))
+    }
+
     @Test fun `refund order is negative, flagged, and linked line by line`() {
         val o = payload()
         assertEquals("true", o["is_refund"].toString())

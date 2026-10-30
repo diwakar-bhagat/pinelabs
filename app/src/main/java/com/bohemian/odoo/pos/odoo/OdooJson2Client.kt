@@ -52,6 +52,8 @@ class OdooJson2Client(
     val json: Json = Json { ignoreUnknownKeys = true; explicitNulls = false },
     private val throttle: Throttle = Throttle(),
     private val now: () -> Long = System::currentTimeMillis,
+    /** "ZenZebraTill/0.7.0 (SWN; 1340055807)": Odoo's docs ask for a User-Agent that names the integration. */
+    private val userAgent: () -> String = { "ZenZebraTill" },
 ) {
     /**
      * How long each lane may wait out Odoo's 429 / 503 before it gives up, and the backoff when Odoo
@@ -129,6 +131,21 @@ class OdooJson2Client(
         }
     }
 
+    /**
+     * Odoo's server version ("19.0+e"; Odoo Online upgrades show "saas~19.1+e"), from `GET /web/version`,
+     * Odoo 19's replacement for `version()`. Null when it cannot be read.
+     */
+    suspend fun serverVersion(): String? = runCatching {
+        gate.run(OdooLane.current()) {
+            withContext(Dispatchers.IO) {
+                val req = Request.Builder().url("$baseUrl/web/version").header("User-Agent", userAgent()).get().build()
+                val (code, text, _) = http.newCall(req).await()
+                stats.record(OdooLane.current(), code)
+                if (code in 200..299) json.parseToJsonElement(text).jsonObject["version"]?.jsonPrimitive?.contentOrNull else null
+            }
+        }
+    }.getOrNull()
+
     /** At least what Odoo asked (plus up to 25%), else 2 / 4 / 8 … s up to a minute, ±25%. */
     private fun backoffMs(retryAfterMs: Long?, attempt: Int): Long {
         val own = (throttle.firstBackoffMs shl (attempt - 1).coerceAtMost(20)).coerceAtMost(throttle.maxBackoffMs)
@@ -149,7 +166,7 @@ class OdooJson2Client(
                 .url("$baseUrl/json/2/$model/$method")
                 .header("Authorization", "bearer $key")
                 .header("X-Odoo-Database", database)
-                .header("User-Agent", "BohemianOdooPOS/Android")
+                .header("User-Agent", userAgent())
                 .post(body.toString().toRequestBody(JSON))
                 .build()
             val started = System.currentTimeMillis()
@@ -217,7 +234,7 @@ class OdooJson2Client(
          * `pos.session.create`), which would make a second record.
          */
         private val SAFE_TO_REPEAT = setOf(
-            "search_read", "read", "search", "search_count", "formatted_read_group", "read_group", "context_get",
+            "search_read", "read", "search", "search_count", "formatted_read_group", "read_group", "context_get", "fields_get",
             "compute_all", "load_data", "get_closing_control_data", "validate_coupon_programs",
             "sync_from_ui", "confirm_coupon_programs",
         )

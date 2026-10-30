@@ -10,6 +10,7 @@ import com.bohemian.odoo.pos.data.RoomPaymentJournal
 import com.bohemian.odoo.pos.data.RoomVoidJournal
 import com.bohemian.odoo.pos.odoo.CatalogService
 import com.bohemian.odoo.pos.odoo.CustomerService
+import com.bohemian.odoo.pos.odoo.OdooContractCheck
 import com.bohemian.odoo.pos.odoo.OdooJson2Client
 import com.bohemian.odoo.pos.odoo.OrderSyncService
 import com.bohemian.odoo.pos.odoo.PendingWork
@@ -46,7 +47,15 @@ class AppContainer(context: Context) {
     val crashLog = com.bohemian.odoo.pos.core.CrashLog(java.io.File(context.filesDir, "crash"), build = com.bohemian.odoo.pos.BuildInfo.label)
     val db = AppDatabase.create(context)
 
-    val odoo = OdooJson2Client(BuildConfig.ODOO_BASE_URL, BuildConfig.ODOO_DB, apiKey = { settings.odooApiKey })
+    /** The E700's serial (PayDroid 7.1 still gives Build.SERIAL without a permission). */
+    @Suppress("DEPRECATION")
+    val terminalSerial: String = android.os.Build.SERIAL?.takeIf { it.isNotBlank() && it != android.os.Build.UNKNOWN } ?: "unknown"
+
+    val odoo = OdooJson2Client(BuildConfig.ODOO_BASE_URL, BuildConfig.ODOO_DB, apiKey = { settings.odooApiKey },
+        userAgent = { "ZenZebraTill/${BuildConfig.VERSION_NAME} (${settings.posConfigName.ifBlank { "no POS" }}; $terminalSerial)" })
+
+    /** F2: Odoo's fields checked when its version changes; payments stop if one the till needs is gone. */
+    val contract = OdooContractCheck(odoo)
     val catalog = CatalogService(odoo)
     val catalogCache = com.bohemian.odoo.pos.odoo.CatalogCache(java.io.File(context.filesDir, "catalog/catalog.json"))
     val productImages = com.bohemian.odoo.pos.ui.ProductImages(java.io.File(context.filesDir, "img"), appScope) { ids -> catalog.images(ids) }

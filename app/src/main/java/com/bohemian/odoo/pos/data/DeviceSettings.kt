@@ -45,6 +45,11 @@ class DeviceSettings(context: Context) : PinStore {
         get() = read("pos_config_name") { prefs.getString("pos_config_name", "") ?: "" }
         set(v) = write("pos_config_name", v) { putString("pos_config_name", v) }
 
+    /** The Odoo server version ("19.0+e") the field contract last passed under (F2); checked again when it changes. */
+    var odooVerifiedVersion: String?
+        get() = read("odoo_verified_version") { prefs.getString("odoo_verified_version", null) }
+        set(v) = write("odoo_verified_version", v) { putString("odoo_verified_version", v) }
+
     /** Before 0.5.0: the one Odoo pos.payment.method for Card and UPI. Card and UPI fall back to it. */
     var terminalPaymentMethodId: Int
         get() = read("terminal_pm_id") { prefs.getInt("terminal_pm_id", 0) }

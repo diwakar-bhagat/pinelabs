@@ -567,6 +567,8 @@ private fun MethodChips(methods: List<PaymentMethod>, selected: Int, onPick: (In
 private fun OdooTroubleBars(vm: PosViewModel) {
     val keyRejected by vm.odooKeyRejected.collectAsStateWithLifecycle()
     val problems by vm.outboxProblems.collectAsStateWithLifecycle()
+    val contract by vm.contractProblem.collectAsStateWithLifecycle()
+    contract?.let { Text(it, Modifier.fillMaxWidth().background(Zz.Red).padding(8.dp), color = Zz.Cream) }
     if (keyRejected) {
         Text("Odoo rejected this till's API key. Sales are kept safely on the till, but nothing reaches Odoo until a supervisor enters a valid key in SETUP.",
             Modifier.fillMaxWidth().background(Zz.Red).padding(8.dp), color = Zz.Cream)

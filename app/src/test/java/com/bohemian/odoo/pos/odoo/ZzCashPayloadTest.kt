@@ -80,4 +80,8 @@ class ZzCashPayloadTest {
     @Test fun `unpriced reward is refused before sync`() {
         assertThrows(IllegalArgumentException::class.java) { order(sale(redemption(incl = null, excl = null))) }
     }
+
+    @Test fun `every key it sends is in the Odoo contract`() {
+        assertEquals(emptyList<String>(), OdooContract.uncovered(OrderSyncService.buildPayload(sale())))
+    }
 }

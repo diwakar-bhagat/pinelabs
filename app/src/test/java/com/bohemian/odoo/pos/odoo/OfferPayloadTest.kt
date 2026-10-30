@@ -103,4 +103,8 @@ class OfferPayloadTest {
         val old = """{"orderUuid":"u0","sessionId":1,"configName":"ZenZebra","companyName":"ZenZebra","lines":[],"totalInclPaise":0,"totalExclPaise":0}"""
         assertNull(Json { ignoreUnknownKeys = true }.decodeFromString<SaleSnapshot>(old).appliedOffers())
     }
+
+    @Test fun `every key it sends is in the Odoo contract`() {
+        assertEquals(emptyList<String>(), OdooContract.uncovered(OrderSyncService.buildPayload(sale())))
+    }
 }

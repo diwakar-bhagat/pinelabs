@@ -49,6 +49,7 @@ import com.bohemian.odoo.pos.odoo.FiscalPosition
 import com.bohemian.odoo.pos.odoo.OdooException
 import com.bohemian.odoo.pos.odoo.OdooLane
 import com.bohemian.odoo.pos.odoo.OdooErrorKind
+import com.bohemian.odoo.pos.odoo.OdooContractCheck
 import com.bohemian.odoo.pos.odoo.PaidSale
 import com.bohemian.odoo.pos.odoo.ParkedBill
 import com.bohemian.odoo.pos.odoo.ParkedLine
@@ -412,6 +413,39 @@ class PosViewModel(private val c: AppContainer) : ViewModel() {
     /** Odoo refused this till's API key: nothing reaches Odoo until a supervisor fixes it in Setup. */
     val odooKeyRejected: StateFlow<Boolean> = c.odoo.keyRejected
 
+    private val _contractProblem = MutableStateFlow<String?>(null)
+
+    /** F2: Odoo was upgraded and lost a field the till needs. Payments are refused until it is fixed. */
+    val contractProblem: StateFlow<String?> = _contractProblem.asStateFlow()
+
+    private var contractCheckedAt = 0L
+
+    /**
+     * Odoo's version, once a day and after the first full load: when it changed since the last pass,
+     * every field the till sends or relies on is checked (`OdooContractCheck`). Fail closed: if one is
+     * gone, no money is taken that Odoo could not record; browsing goes on.
+     */
+    private fun checkContractIfDue() {
+        if (System.currentTimeMillis() - contractCheckedAt < CONTRACT_EVERY_MS) return
+        contractCheckedAt = System.currentTimeMillis()
+        launchSafe {
+            when (val r = withContext(OdooLane.BACKGROUND) { c.contract.run(c.settings.odooVerifiedVersion) }) {
+                is OdooContractCheck.Result.Ok -> {
+                    if (c.settings.odooVerifiedVersion != r.version) PosLog.i("ODOO_CONTRACT_OK", "version" to r.version)
+                    c.settings.odooVerifiedVersion = r.version
+                    _contractProblem.value = null
+                }
+                is OdooContractCheck.Result.Broken -> {
+                    PosLog.w("ODOO_CONTRACT_BROKEN", "version" to r.version, "missing" to r.missing.joinToString(","))
+                    _contractProblem.value = "Odoo was upgraded (${r.version}) and no longer has " +
+                        r.missing.take(3).joinToString() + (if (r.missing.size > 3) " and ${r.missing.size - 3} more" else "") +
+                        ". Payments are paused so no money is taken that Odoo could not record. Browsing still works; call support."
+                }
+                OdooContractCheck.Result.Unknown -> contractCheckedAt = 0L // try again on the next pass
+            }
+        }
+    }
+
     /** "Retry now" on the refused-orders bar: after a supervisor fixed the cause in Odoo. */
     fun retryRefusedOrders() = launchSafe {
         c.orderSync.retryNow(OdooErrorKind.REJECTED)
@@ -673,6 +707,7 @@ class PosViewModel(private val c: AppContainer) : ViewModel() {
             c.pricing.clearCache()
             rewardsCache = null
             completeCatalogAt = System.currentTimeMillis()
+            checkContractIfDue()
             loadFailures = 0
             nextReloadAt = 0L
             _sell.update {
@@ -794,6 +829,7 @@ class PosViewModel(private val c: AppContainer) : ViewModel() {
                 try {
                     withContext(OdooLane.BACKGROUND) { liveSyncOnce() }
                     lastLiveOkAt = System.currentTimeMillis()
+                    checkContractIfDue()
                 } catch (e: CancellationException) {
                     throw e
                 } catch (e: Exception) {
@@ -2001,6 +2037,7 @@ class PosViewModel(private val c: AppContainer) : ViewModel() {
         val mode = line.mode ?: return@launchSafe
         if (ui.isLocked(uuid) || ui.parts.values.any { it is PartState.Charging } || _sell.value.pay is PayUi.Working) return@launchSafe
         if (!line.amount.isPositive) { _split.update { it?.copy(message = "Enter the amount for this part first.") }; return@launchSafe }
+        _contractProblem.value?.let { why -> _split.update { it?.copy(message = why) }; return@launchSafe } // F2: fail closed
         // Charging is set before anything waits, so a second tap finds it and stops here.
         val seenPaid = _sell.value.partPaid
         _split.update { it?.copy(parts = it.parts + (uuid to PartState.Charging), message = null) }
@@ -2071,6 +2108,7 @@ class PosViewModel(private val c: AppContainer) : ViewModel() {
     private suspend fun prepareSnapshot(split: Boolean = false): SaleSnapshot? {
         val s = _sell.value
         if (s.pay is PayUi.Working) return null
+        _contractProblem.value?.let { why -> _sell.update { it.copy(error = why) }; return null } // F2: fail closed
         val totals = s.totals ?: run { _sell.update { it.copy(error = "Prices not confirmed by Odoo yet") }; return null }
         val cfg = s.config ?: return null
         if (!cfg.sessionOpen || cfg.currentSessionId == null) {
@@ -2510,6 +2548,9 @@ class PosViewModel(private val c: AppContainer) : ViewModel() {
     companion object {
         /** Tallest keypad key (dp), as before the keypad became resizable. */
         const val MAX_KEY_DP = 48
+
+        /** Odoo's version is looked at this often (the fields only when it changed). */
+        private const val CONTRACT_EVERY_MS = 24 * 60 * 60_000L
 
         /** Open bills on one till, the one on screen included. */
         const val MAX_OPEN_BILLS = 10
