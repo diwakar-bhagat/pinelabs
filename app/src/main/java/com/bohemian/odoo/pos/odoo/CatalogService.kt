@@ -200,7 +200,7 @@ class CatalogService(private val odoo: OdooJson2Client) {
         }
 
     companion object {
-        const val PAGE_SIZE = 500
+        const val PAGE_SIZE = 1000 // 2,421 products in 3 pages, fewer calls per load (0.7.1)
 
         private val PRODUCT_FIELDS = listOf(
             "display_name", "lst_price", "barcode", "default_code", "taxes_id", "l10n_in_hsn_code", "pos_categ_ids", "write_date",

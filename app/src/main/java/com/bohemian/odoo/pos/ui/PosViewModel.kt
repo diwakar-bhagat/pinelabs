@@ -659,37 +659,23 @@ class PosViewModel(private val c: AppContainer) : ViewModel() {
                 _sell.update { it.copy(config = null, loading = false, error = problem) }
                 return@launchSafe
             }
-            // Everything below depends only on the config: ask Odoo for it all at once, not in a row.
+            // Two steps, so the till sells as soon as it can (0.7.1): what selling needs first (prices,
+            // taxes, offers, pricelist, methods), then the menu tabs, notes, bill text and ZZ Cash rules
+            // in the background. At about one Odoo call a second, waiting for everything took ~35 s.
             val fposIds = (cfg.fiscalPositionIds + listOfNotNull(cfg.defaultFiscalPositionId)).distinct()
-            val loaded = coroutineScope {
-                // Live sync's starting point is read before the products, so a change made while they
-                // load is seen on the next pass instead of being missed.
-                val stampsJob = async { runCatching { c.liveSync.read() }.onFailure { PosLog.w("LIVE_STAMPS_FAILED", "err" to it.message) }.getOrNull() }
+            val a = coroutineScope {
+                // Live sync's starting point is read before the data it guards, so a change made while it
+                // loads is seen on the next pass instead of being missed.
+                val stampsJob = async { runCatching { c.liveSync.read(LiveSync.SELLING) }.onFailure { PosLog.w("LIVE_STAMPS_FAILED", "err" to it.message) }.getOrNull() }
                 // Mapping and sorting 2,400+ products runs off the screen thread.
                 val productsJob = async(Dispatchers.Default) { stampsJob.await(); c.catalog.products(cfg) }
                 val fposJob = async { c.fiscalPositions.load(fposIds) }
                 // The store's offers as Odoo's POS loader gives them to this session; ZZ Cash is one of them
-                // where Odoo gives it to this store.
+                // where Odoo gives it to this store. A bill is priced with them, so they come first.
                 val offersJob = async {
                     odooTz = runCatching { c.sales.timeZone() }.onFailure { PosLog.w("ODOO_TZ_FAILED", "err" to it.message) }.getOrNull() ?: odooTz
                     loadOffers(cfg)
                 }
-                // ZZ Cash is optional: a failed lookup hides the balance, it never blocks a sale here.
-                val zzJob = async {
-                    val offers = offersJob.await()
-                    val program = if (offers != null) zzProgramOf(offers) else if (offersLoaded) zzProgramOf(offerPrograms) else try { c.zzCash.program(cfg) } catch (e: Exception) {
-                        PosLog.w("ZZ_CASH_PROGRAM_LOOKUP_FAILED", "err" to e.message); null
-                    }
-                    program to program?.let { p ->
-                        runCatching { c.zzCash.rules(p.id) }.onFailure { PosLog.w("ZZ_RULES_LOAD_FAILED", "err" to it.message) }.getOrNull()
-                    }
-                }
-                val categoriesJob = async { runCatching { c.catalog.categories(cfg) }.onFailure { PosLog.w("MENU_LOAD_FAILED", "err" to it.message) }.getOrDefault(emptyList()) }
-                val notesJob = async { runCatching { c.catalog.notes(cfg.noteIds) }.getOrDefault(emptyList()) }
-                val addressJob = async {
-                    cfg.companyId?.let { id -> runCatching { c.bills.companyAddress(id) }.onFailure { PosLog.w("BILL_ADDRESS_FAILED", "err" to it.message) }.getOrNull() }
-                }
-                val billTextJob = async { runCatching { c.billText.load() }.onFailure { PosLog.w("BILL_TEXT_FAILED", "err" to it.message) }.getOrNull() }
                 // Products the store's pricelist prices differently from the list price: not sold here.
                 // Like the products, a failed read fails the load (never sell without knowing).
                 val pricelistJob = async { c.pricelists.hold(cfg, SalesService.utc(System.currentTimeMillis())) }
@@ -699,34 +685,25 @@ class PosViewModel(private val c: AppContainer) : ViewModel() {
                         .onFailure { PosLog.w("PAYMENT_METHODS_READ_FAILED", "err" to it.message) }.getOrNull()
                 }
                 val products = productsJob.await()
-                val taxIds = products.flatMap { it.taxIds }.toSet()
-                val primeJob = async { c.fiscalPositions.primeTaxFiscalPositions(taxIds.toList()) }
-                val taxNamesJob = async { runCatching { c.bills.taxNames(taxIds) }.getOrDefault(emptyMap()) }
+                val primeJob = async { c.fiscalPositions.primeTaxFiscalPositions(products.flatMap { it.taxIds }.distinct()) }
                 val positions = fposJob.await()
                 primeJob.await()
-                Loaded(products, positions, zzJob.await(), categoriesJob.await(), notesJob.await(), addressJob.await(), taxNamesJob.await(),
-                    stampsJob.await(), billTextJob.await(), offersJob.await(), pricelistJob.await(), methodsJob.await())
+                SellNeeds(products, positions, stampsJob.await(), offersJob.await(), pricelistJob.await(), methodsJob.await())
             }
             if (generation != catalogGeneration) return@launchSafe // a newer load owns the screen
-            val (products, positions, zz, categories, notes, address, names) = loaded
-            liveStamps = loaded.stamps
-            loaded.stamps?.let { st -> val at = System.currentTimeMillis(); st.byModel.keys.forEach { stampsReadAt[it] = at } }
-            loaded.billText?.let { billText = it }
-            usePricelistHold(loaded.pricelist)
-            loaded.methods?.let { m -> paymentMethodNames = m.associate { it.id to it.name } }
-            useOffers(loaded.offers)
-            fiscalPositionsById = positions
-            zzProgram = zz.first
-            taxNames = names
-            cfg.companyId?.let { id ->
-                // Keep the last address only for the same company; another company's never prints.
-                if (address != null) companyAddress = id to address
-                else if (companyAddress?.first != id) companyAddress = null
-            }
-            useCatalog(products, categories)
+            val products = a.products
+            liveStamps = a.stamps
+            a.stamps?.let { st -> val at = System.currentTimeMillis(); st.byModel.keys.forEach { stampsReadAt[it] = at } }
+            usePricelistHold(a.pricelist)
+            a.methods?.let { m -> paymentMethodNames = m.associate { it.id to it.name } }
+            useOffers(a.offers)
+            fiscalPositionsById = a.positions
+            // ZZ Cash comes with the offers; only without them is it looked up (in the background step).
+            zzProgram = if (a.offers != null) zzProgramOf(a.offers) else if (offersLoaded) zzProgramOf(offerPrograms) else zzProgram
+            useCatalog(products, _sell.value.categories)
             // Saved prices stay while Odoo's taxes are unchanged (a new price is a new key anyway); a tax
             // change empties them. Unknown stamps keep them, since Odoo refuses a wrong total later anyway.
-            loaded.stamps?.taxStamp?.let { stamp -> c.pricing.useTaxStamp(stamp); c.settings.taxStampConfirmedAt = System.currentTimeMillis() }
+            a.stamps?.taxStamp?.let { stamp -> c.pricing.useTaxStamp(stamp); c.settings.taxStampConfirmedAt = System.currentTimeMillis() }
             rewardsCache = null
             completeCatalogAt = System.currentTimeMillis()
             checkContractIfDue()
@@ -735,27 +712,18 @@ class PosViewModel(private val c: AppContainer) : ViewModel() {
             _sell.update {
                 it.copy(
                     config = cfg, products = products, loading = false, offlineCatalogSavedAt = null, catalogStaleReason = null,
-                    zzRules = zz.second, categories = categories, notes = notes,
-                    // The cashier's tab survives a reload; All when it is gone or none was chosen.
-                    selectedCateg = it.selectedCateg?.takeIf { id -> categories.any { c -> c.id == id } },
                     fiscalPosition = fiscalPositionsById[cfg.defaultFiscalPositionId],
-                    methodWarning = if (loaded.methods != null) c.paymentRoles().unbookableWarning(loaded.methods) else it.methodWarning,
+                    methodWarning = if (a.methods != null) c.paymentRoles().unbookableWarning(a.methods) else it.methodWarning,
                     keyWarning = c.keys.daysLeft()?.takeIf { d -> d <= KeyRotation.WARN_DAYS }?.let { d ->
                         "This till's Odoo key expires in ${d.coerceAtLeast(0)} day(s) and could not renew itself. A supervisor should enroll it again in SETUP."
                     },
                 ).regrid()
             }
             _sell.value.methodWarning?.let { PosLog.w("PAYMENT_METHOD_UNBOOKABLE", "roles" to c.paymentRoles().ids) }
-            // Only a complete catalogue is cached, so a later failure never falls back to a partial one.
-            launchSafe(Dispatchers.IO) {
-                runCatching { c.catalogCache.save(cfg, products, categories = categories, notes = notes) }
-                    .onFailure { PosLog.w("CATALOG_CACHE_SAVE_FAILED", "err" to it.message) }
-            }
             catalogLoadedAt = System.currentTimeMillis()
             // New prices, taxes or offers: an open cart is priced again (a bill with a paid part keeps its own).
             if (_sell.value.lines.isNotEmpty() && _sell.value.pay == PayUi.Idle) reprice()
-            // Photos of the menu tabs in the background; the rest load as their tiles appear.
-            launchSafe { c.productImages.prefetch(products.filter { it.categIds.isNotEmpty() }, products) }
+            loadTheRest(cfg, generation)
         } catch (e: CancellationException) {
             throw e
         } catch (e: Exception) {
@@ -797,23 +765,73 @@ class PosViewModel(private val c: AppContainer) : ViewModel() {
     }
 
     /** What one catalogue load brought back from Odoo. */
-    private data class Loaded(
+    /** What selling needs from one catalogue load (its first step). */
+    private data class SellNeeds(
         val products: List<Product>,
         val positions: Map<Int, FiscalPosition>,
-        val zz: Pair<ZzCashProgram?, List<LoyaltyRule>?>,
-        val categories: List<PosCategory>,
-        val notes: List<PosNote>,
-        val address: String?,
-        val taxNames: Map<Int, String>,
         /** Null when they could not be read: the first live-sync pass reads them instead. */
         val stamps: LiveStamps?,
-        val billText: BillText?,
         /** Null when Odoo's loader could not be read: no offers, ZZ Cash found the old way. */
         val offers: List<OfferProgram>?,
         val pricelist: PricelistHold,
         /** The methods this terminal books on; null when they could not be read (the last warning stays). */
         val methods: List<PaymentMethod>?,
     )
+
+    /**
+     * The second step of a catalogue load, in the background once the till can sell: the menu tabs,
+     * note tags, company address, bill text, tax names and ZZ Cash rules, each after its change stamp.
+     * One after another, never ahead of the cashier. Then the complete catalogue is saved on the till.
+     */
+    private fun loadTheRest(cfg: PosConfig, generation: Long) = launchSafe {
+        withContext(OdooLane.BACKGROUND) {
+            val stamps = runCatching { c.liveSync.read(LiveSync.WATCHED.keys - LiveSync.SELLING) }
+                .onFailure { PosLog.w("LIVE_STAMPS_FAILED", "err" to it.message) }.getOrNull()
+            val categories = runCatching { c.catalog.categories(cfg) }.onFailure { PosLog.w("MENU_LOAD_FAILED", "err" to it.message) }.getOrNull()
+            val notes = runCatching { c.catalog.notes(cfg.noteIds) }.getOrNull()
+            val address = cfg.companyId?.let { id ->
+                runCatching { c.bills.companyAddress(id) }.onFailure { PosLog.w("BILL_ADDRESS_FAILED", "err" to it.message) }.getOrNull()
+            }
+            val text = runCatching { c.billText.load() }.onFailure { PosLog.w("BILL_TEXT_FAILED", "err" to it.message) }.getOrNull()
+            val taxIds = _sell.value.products.flatMap { it.taxIds }.toSet()
+            val names = runCatching { c.bills.taxNames(taxIds) }.getOrDefault(emptyMap())
+            // ZZ Cash is optional: a failed lookup hides the balance, it never blocks a sale here.
+            val program = zzProgram ?: if (!offersLoaded) runCatching { c.zzCash.program(cfg) }
+                .onFailure { PosLog.w("ZZ_CASH_PROGRAM_LOOKUP_FAILED", "err" to it.message) }.getOrNull() else null
+            val rules = program?.let { p -> runCatching { c.zzCash.rules(p.id) }.onFailure { PosLog.w("ZZ_RULES_LOAD_FAILED", "err" to it.message) }.getOrNull() }
+            if (generation != catalogGeneration) return@withContext // a newer load owns the screen
+            stamps?.let { st ->
+                liveStamps = liveStamps?.let { st.over(it) } ?: st
+                val at = System.currentTimeMillis()
+                st.byModel.keys.forEach { stampsReadAt[it] = at }
+            }
+            text?.let { billText = it }
+            if (names.isNotEmpty()) taxNames = names
+            zzProgram = program
+            cfg.companyId?.let { id ->
+                // Keep the last address only for the same company; another company's never prints.
+                if (address != null) companyAddress = id to address
+                else if (companyAddress?.first != id) companyAddress = null
+            }
+            val shownCategories = categories ?: _sell.value.categories
+            useCatalog(_sell.value.products, shownCategories)
+            _sell.update {
+                it.copy(
+                    categories = shownCategories, notes = notes ?: it.notes, zzRules = rules ?: it.zzRules,
+                    // The cashier's tab survives a reload; All when it is gone or none was chosen.
+                    selectedCateg = it.selectedCateg?.takeIf { id -> shownCategories.any { c -> c.id == id } },
+                ).regrid()
+            }
+            val products = _sell.value.products
+            // Only a complete catalogue is cached, so a later failure never falls back to a partial one.
+            runCatching { withContext(Dispatchers.IO) { c.catalogCache.save(cfg, products, categories = shownCategories, notes = _sell.value.notes) } }
+                .onFailure { PosLog.w("CATALOG_CACHE_SAVE_FAILED", "err" to it.message) }
+            PosLog.i("CATALOG_REST_LOADED", "tabs" to shownCategories.size, "zz_rules" to (rules?.size ?: -1))
+        }
+        // Photos of the menu tabs in the background; the rest load as their tiles appear.
+        val products = _sell.value.products
+        c.productImages.prefetch(products.filter { it.categIds.isNotEmpty() }, products)
+    }
 
     // ------------------------------------------------------------------ live Odoo data
 

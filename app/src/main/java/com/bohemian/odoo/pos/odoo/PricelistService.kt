@@ -1,8 +1,5 @@
 package com.bohemian.odoo.pos.odoo
 
-import kotlinx.coroutines.async
-import kotlinx.coroutines.awaitAll
-import kotlinx.coroutines.coroutineScope
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.intOrNull
 import kotlinx.serialization.json.jsonArray
@@ -38,15 +35,13 @@ class PricelistService(private val odoo: OdooJson2Client) {
         )).objects().filter { r -> r.str("date_end")?.let { it >= nowUtc } ?: true }
         val domains = rules.map(::ruleDomain)
         if (domains.any { it == null }) return PricelistHold(pricelistId, everything = true)
-        // Odoo resolves each rule's products itself (category trees with child_of).
-        val ids = coroutineScope {
-            domains.filterNotNull().distinct().map { d ->
-                async {
-                    odoo.call("product.product", "search", jsonOf("domain" to d + listOf(listOf("available_in_pos", "=", true))))
-                        .jsonArray.mapNotNull { it.jsonPrimitive.intOrNull }
-                }
-            }.awaitAll().flatten().toSet()
-        }
+        val terms = domains.filterNotNull().flatten().distinct()
+        if (terms.isEmpty()) return PricelistHold(pricelistId)
+        // One search for every rule (Odoo's prefix "|" between them), not one per rule: a catalogue load
+        // makes one call here instead of eight. Odoo still resolves category trees itself (child_of).
+        val domain = List(terms.size - 1) { "|" } + terms + listOf(listOf("available_in_pos", "=", true))
+        val ids = odoo.call("product.product", "search", jsonOf("domain" to domain))
+            .jsonArray.mapNotNull { it.jsonPrimitive.intOrNull }.toSet()
         return PricelistHold(pricelistId, productIds = ids)
     }
 

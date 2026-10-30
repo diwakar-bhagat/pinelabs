@@ -55,6 +55,20 @@ class PricelistServiceTest {
         assertFalse(hold.holds(27857))
     }
 
+    @Test fun `every rule is asked in one search`() = runTest {
+        var searches = 0
+        answer("""[{"id": 2, "applied_on": "1_product", "product_tmpl_id": [30237, "Shelf Rental"], "product_id": false, "categ_id": false, "date_end": false},
+                    {"id": 9, "applied_on": "2_product_category", "product_tmpl_id": false, "product_id": false, "categ_id": [12, "Beverages"], "date_end": false},
+                    {"id": 4, "applied_on": "0_product_variant", "product_tmpl_id": false, "product_id": [8625, "Coffee"], "date_end": false}]""") { body ->
+            searches++
+            assertTrue(body, body.contains("[\"|\",\"|\",[\"product_tmpl_id\",\"=\",30237],[\"categ_id\",\"child_of\",12],[\"id\",\"=\",8625],[\"available_in_pos\",\"=\",true]]"))
+            "[8625, 8626]"
+        }
+        val hold = service().hold(klj, "2026-10-28 11:00:00")
+        assertEquals(1, searches)
+        assertEquals(setOf(8625, 8626), hold.productIds)
+    }
+
     @Test fun `a global rule holds back every product`() = runTest {
         answer("""[{"id": 10, "applied_on": "3_global", "product_tmpl_id": false, "product_id": false, "categ_id": false, "date_end": false}]""") { "[]" }
         assertTrue(service().hold(klj, "2026-10-28 11:00:00").holds(1))

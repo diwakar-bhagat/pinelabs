@@ -60,6 +60,15 @@ class LiveSync(private val odoo: OdooJson2Client) {
             "product.pricelist.item" to LiveArea.PRICELIST,
         )
 
+        /**
+         * The models whose data selling needs at a catalogue load (prices, taxes, offers, pricelist): their
+         * stamps are read in the load's first step; the rest (menu, notes, company, bill text) in the second.
+         */
+        val SELLING: Set<String> = setOf(
+            "product.product", "product.template", "account.tax", "account.fiscal.position",
+            "loyalty.program", "loyalty.rule", "loyalty.reward", "product.pricelist.item",
+        )
+
         /** Prices reach the till within 5 minutes; menu, taxes, offers, notes, company and bill text within 15. */
         fun everyMs(model: String): Long = if (model == "product.product" || model == "product.template") 5 * 60_000L else 15 * 60_000L
 
