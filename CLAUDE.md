@@ -557,7 +557,7 @@ till kept booking card and UPI on 19 "Pine Labs SWN", the web POS's own Pine lin
   - Live sync was 13 calls a minute per till, 12 of them at once.
   - A catalogue load was 31–40 calls in seconds.
   - A 429 during a load counted as offline, so live sync reloaded everything every minute.
-  - Odoo's guidance is about 1 call a second with no parallel calls, counted per database, not per key.
+  - Odoo's guidance is about 1 call a second with no parallel calls. Whether it counts per database or per key is not published; we budget for one shared limit (the worst case).
 - **Lanes** (`odoo/OdooGate.kt`): SALE > TAP > BACKGROUND, at most 2 calls in flight per till. Background
   calls run alone, at most one a second. A 429 waits Retry-After in full (seconds or a date) plus jitter,
   and each lane gives up after its budget (cashier 10 s, sale 20 s then outbox, background 2 min). A 503

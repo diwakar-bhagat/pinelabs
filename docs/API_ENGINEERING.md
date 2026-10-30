@@ -9,8 +9,11 @@ HTTP 429 "Too Many Requests". Written 2026-10-30, after SWN's till got 429s on 2
   treats about one call a second as acceptable, unsustained and with no parallel calls. Heavier
   unthrottled API use can get the subscription suspended. Odoo.sh dedicated hosting is the way to
   lift the limit.
-- **What the limit counts:** the database, not the API key. One shared key or twenty keys make no
-  difference to 429s; only the number of calls and how many arrive at once do.
+- **What the limit counts: not published.** Odoo's policy speaks of calls to its systems, so we budget
+  as if every till on the database shared one limit (the worst case). Whether a 429 is counted per
+  database, per key or per address is not documented.
+  - **How we'll find out:** the E700 Tills list in Odoo shows each till's 429s. If they drop once tills
+    have their own keys (0.7.0 enrollment), the limit is per key.
 - **How Odoo enforces it:** it answers 429, usually with a `Retry-After`, and does not run the
   request.
 - **Unknowns:** Odoo publishes no exact threshold, so we budget for the guidance and measure on the
@@ -211,10 +214,27 @@ Built on Odoo's external API docs (18.0, 19.0 JSON-2) and the live database.
   `tools/odoo/create_till_status_model.py`). Red marks refused orders or payments to check; amber marks
   unsent orders.
 
+## Pacing and the catalogue load (0.7.1)
+
+A rush-hour simulation (`PeakHourSimulation.kt`, run only with `PEAK_SIM=1`) used a fake Odoo
+modelled as about 1 call a second with bursts of 3 per database. That limit is an estimate. It showed
+the refusals came from short bursts, not overall volume.
+- **Pacing:** each till now starts about one Odoo call a second, two at once after a quiet spell
+  (`OdooGate`). A short planned wait costs less than a 429 and its 2 s backoff.
+- **The fallback bill read:** one call at a time.
+- **The cost:** a full catalogue load (~35 calls) would keep the till from selling for ~35 s. So the
+  load comes in two steps:
+  - **First, what selling needs:** config, products in pages of 1000, taxes and fiscal positions,
+    offers, the pricelist hold in one combined search, and the payment methods. The till sells once
+    these are in.
+  - **Then, in the background:** menu tabs, notes, address, bill text, tax names and ZZ Cash rules.
+- **Tuning:** the pace is a constant (`Throttle.perSecond` / `burst`). Raise it once the E700 Tills list
+  shows real Odoo answers without 429s.
+
 ## One shared key
 
-- **The limit:** keeping one key for every store is the owner's decision. It does not change the rate
-  limit (see above).
+- **The limit:** keeping one key for every store is the owner's decision. If Odoo counts per key, a
+  shared key also means a shared limit; if per database, it makes no difference (see above).
 - **Still open:** an administrator key on every till, and every bill showing the same cashier. See
   CLAUDE.md §12–13 and `docs/ROLLOUT_STORES.md`.
 - **Since 0.7.0:** a key per till of one bot user replaces the shared key (Setup → "Enroll this till");
