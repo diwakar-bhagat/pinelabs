@@ -35,6 +35,11 @@ class FiscalPositionService(private val odoo: OdooJson2Client) {
             "fields" to listOf("name", "tax_map", "tax_ids"),
         )).objects()
 
+        return fromRecords(rows)
+    }
+
+    /** Positions from records that carry name, tax_map and tax_ids (a read, or the POS loader's, 0.8.0). */
+    suspend fun fromRecords(rows: List<JsonObject>): Map<Int, FiscalPosition> {
         val positions = rows.associate { row ->
             val id = row.int("id")!!
             val taxIds = row.ids("tax_ids")
@@ -81,6 +86,9 @@ class FiscalPositionService(private val odoo: OdooJson2Client) {
         PosLog.i("FPOS_TAX_MAP_FALLBACK", "entries" to out.size)
         return out
     }
+
+    /** The taxes that carry their own fiscal positions, from the POS loader's account.tax records (0.8.0). */
+    fun useTaxFiscalPositions(taxIds: Set<Int>) { taxesWithFiscalPosition = taxIds }
 
     /** Cache which taxes carry their own fiscal positions; needed for the empty-tax_ids branch. */
     suspend fun primeTaxFiscalPositions(taxIds: List<Int>) {

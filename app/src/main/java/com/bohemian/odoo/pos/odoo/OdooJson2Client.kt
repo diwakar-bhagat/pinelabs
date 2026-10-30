@@ -106,7 +106,16 @@ class OdooJson2Client(
      * when repeating it is harmless ([retrySafe]). A lane gives up after its budget: the cashier sees
      * "Odoo is busy", a sale goes to the outbox, live sync tries on its next pass.
      */
-    suspend fun call(model: String, method: String, body: JsonObject = JsonObject(emptyMap())): JsonElement {
+    suspend fun call(model: String, method: String, body: JsonObject = JsonObject(emptyMap())): JsonElement = answer(model, method, body).value
+
+    /** Odoo's answer and the server's clock when it answered (the HTTP Date header), when it sent one. */
+    class Answer(val value: JsonElement, val serverTimeMs: Long?)
+
+    /** [call], with the server's clock: the POS loader moves its "since" by Odoo's time, not the till's. */
+    suspend fun callWithServerTime(model: String, method: String, body: JsonObject = JsonObject(emptyMap())): Answer =
+        answer(model, method, body)
+
+    private suspend fun answer(model: String, method: String, body: JsonObject): Answer {
         val lane = OdooLane.current()
         val started = now()
         val budget = throttle.budgetMs(lane)
@@ -129,12 +138,12 @@ class OdooJson2Client(
                 }
                 _keyRejected.value = false
                 if (result.code in 200..299) lastOkAt = now()
-                return value
+                return Answer(value, result.serverTimeMs)
             }
             attempt++
             val wait = backoffMs(result.retryAfterMs, attempt)
             coolUntil = maxOf(coolUntil, now() + wait)
-            if (now() + wait - started > budget) return result.value()
+            if (now() + wait - started > budget) return Answer(result.value(), result.serverTimeMs)
             PosLog.w("ODOO_THROTTLED", "m" to "$model.$method", "http" to result.code, "lane" to lane, "attempt" to attempt, "wait_ms" to wait)
         }
     }
@@ -147,9 +156,9 @@ class OdooJson2Client(
         gate.run(OdooLane.current()) {
             withContext(Dispatchers.IO) {
                 val req = Request.Builder().url("$baseUrl/web/version").header("User-Agent", userAgent()).get().build()
-                val (code, text, _) = http.newCall(req).await()
-                stats.record(OdooLane.current(), code)
-                if (code in 200..299) json.parseToJsonElement(text).jsonObject["version"]?.jsonPrimitive?.contentOrNull else null
+                val raw = http.newCall(req).await()
+                stats.record(OdooLane.current(), raw.code)
+                if (raw.code in 200..299) json.parseToJsonElement(raw.text).jsonObject["version"]?.jsonPrimitive?.contentOrNull else null
             }
         }
     }.getOrNull()
@@ -165,7 +174,10 @@ class OdooJson2Client(
     private fun busy() = OdooException.Server(429, "TooManyRequests", "Odoo is busy (too many requests). Wait a moment and retry.")
 
     /** An answer, or the HTTP error to throw; [retryAfterMs] when Odoo said how long to wait. */
-    private class Sent(val code: Int, val retryAfterMs: Long?, val value: () -> JsonElement)
+    private class Sent(val code: Int, val retryAfterMs: Long?, val serverTimeMs: Long?, val value: () -> JsonElement)
+
+    /** One HTTP response as read: status, body, Retry-After and Date headers. */
+    private class Raw(val code: Int, val text: String, val retryAfter: String?, val date: String?)
 
     private suspend fun send(model: String, method: String, body: JsonObject): Sent =
         withContext(Dispatchers.IO) {
@@ -178,13 +190,15 @@ class OdooJson2Client(
                 .post(body.toString().toRequestBody(JSON))
                 .build()
             val started = System.currentTimeMillis()
-            val (code, text, retryAfter) = try {
+            val raw = try {
                 http.newCall(req).await()
             } catch (e: IOException) {
                 throw OdooException.Network(e)
             }
+            val code = raw.code
+            val text = raw.text
             PosLog.d("ODOO_CALL", "m" to "$model.$method", "http" to code, "ms" to (System.currentTimeMillis() - started))
-            Sent(code, if (code == 429 || code == 503) retryAfterMs(retryAfter, now()) else null) {
+            Sent(code, if (code == 429 || code == 503) retryAfterMs(raw.retryAfter, now()) else null, httpDateMs(raw.date)) {
                 when {
                     code in 200..299 -> parse(text, code)
                     // 403 is also AccessError (the user lacks rights on a model): that is Odoo refusing the request, not the key.
@@ -211,7 +225,7 @@ class OdooJson2Client(
      * a timeout or a screen that moved on really stops waiting (a blocking execute() cannot be
      * stopped). Re-sent writes are safe: orders and loyalty are deduplicated by Odoo (I7).
      */
-    private suspend fun Call.await(): Triple<Int, String, String?> = suspendCancellableCoroutine { cont ->
+    private suspend fun Call.await(): Raw = suspendCancellableCoroutine { cont ->
         cont.invokeOnCancellation { runCatching { cancel() } }
         enqueue(object : Callback {
             override fun onFailure(call: Call, e: IOException) {
@@ -219,7 +233,7 @@ class OdooJson2Client(
             }
 
             override fun onResponse(call: Call, response: Response) {
-                val read = runCatching { response.use { Triple(it.code, it.body?.string().orEmpty(), it.header("Retry-After")) } }
+                val read = runCatching { response.use { Raw(it.code, it.body?.string().orEmpty(), it.header("Retry-After"), it.header("Date")) } }
                 if (!cont.isActive) return
                 read.fold(
                     { cont.resume(it) },
@@ -256,10 +270,15 @@ class OdooJson2Client(
         fun retryAfterMs(header: String?, nowMs: Long): Long? {
             val h = header?.trim()?.takeIf { it.isNotEmpty() } ?: return null
             h.toLongOrNull()?.let { return (it * 1000).coerceAtLeast(0) }
+            return httpDateMs(h)?.let { it - nowMs }?.coerceAtLeast(0)
+        }
+
+        /** An HTTP date ("Sat, 31 Oct 2026 07:28:00 GMT") as epoch ms; null when absent or unreadable. */
+        fun httpDateMs(header: String?): Long? {
+            val h = header?.trim()?.takeIf { it.isNotEmpty() } ?: return null
             return runCatching {
-                SimpleDateFormat("EEE, dd MMM yyyy HH:mm:ss zzz", Locale.US).apply { timeZone = TimeZone.getTimeZone("GMT") }
-                    .parse(h)!!.time - nowMs
-            }.getOrNull()?.coerceAtLeast(0)
+                SimpleDateFormat("EEE, dd MMM yyyy HH:mm:ss zzz", Locale.US).apply { timeZone = TimeZone.getTimeZone("GMT") }.parse(h)!!.time
+            }.getOrNull()
         }
 
         fun defaultHttp(): OkHttpClient = OkHttpClient.Builder()

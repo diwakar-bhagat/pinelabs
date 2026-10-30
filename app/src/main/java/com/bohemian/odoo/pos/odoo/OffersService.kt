@@ -29,6 +29,11 @@ class OffersService(private val odoo: OdooJson2Client) {
     suspend fun load(sessionId: Int): List<OfferProgram> {
         val data = odoo.call("pos.session", "load_data", jsonOf("ids" to listOf(sessionId), "models_to_load" to MODELS))
             as? JsonObject ?: return emptyList()
+        return fromReply(data)
+    }
+
+    /** The offers in a `load_data` reply the till already has (the POS loader's, 0.8.0): no second load. */
+    suspend fun fromReply(data: JsonObject): List<OfferProgram> {
         // The web POS works out which products a cheapest / specific discount covers from the reward's
         // product domain itself (`computeDiscountProductIds`); the till asks Odoo to read the domain.
         val domains = discountDomains(data)

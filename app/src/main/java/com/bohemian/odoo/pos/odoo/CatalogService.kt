@@ -160,10 +160,7 @@ class CatalogService(private val odoo: OdooJson2Client) {
         )).objects().map {
             PosCategory(it.int("id")!!, it.str("name") ?: "?", it.m2oId("parent_id"), it.int("sequence") ?: 0, it.int("color") ?: 0)
         }
-        if (!cfg.limitCategories || cfg.availableCategIds.isEmpty()) return all
-        val tree = MenuTree(all)
-        val allowed = cfg.availableCategIds.flatMap { tree.subtree(it) }.toSet()
-        return all.filter { it.id in allowed }
+        return limitedTo(cfg, all)
     }
 
     /** Note tags; an empty [ids] (pos.config.note_ids unset) means every tag, as in the web POS. */
@@ -200,6 +197,14 @@ class CatalogService(private val odoo: OdooJson2Client) {
         }
 
     companion object {
+        /** A POS that limits its categories shows only those and everything below them. */
+        fun limitedTo(cfg: PosConfig, all: List<PosCategory>): List<PosCategory> {
+            if (!cfg.limitCategories || cfg.availableCategIds.isEmpty()) return all
+            val tree = MenuTree(all)
+            val allowed = cfg.availableCategIds.flatMap { tree.subtree(it) }.toSet()
+            return all.filter { it.id in allowed }
+        }
+
         const val PAGE_SIZE = 1000 // 2,421 products in 3 pages, fewer calls per load (0.7.1)
 
         private val PRODUCT_FIELDS = listOf(
