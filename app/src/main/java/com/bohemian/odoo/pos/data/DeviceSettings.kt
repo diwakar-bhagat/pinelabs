@@ -45,6 +45,11 @@ class DeviceSettings(context: Context) : PinStore {
         get() = read("pos_config_name") { prefs.getString("pos_config_name", "") ?: "" }
         set(v) = write("pos_config_name", v) { putString("pos_config_name", v) }
 
+    /** When Odoo last confirmed the tax stamp the saved prices were given under (F3): offline selling trusts them 24 h. */
+    var taxStampConfirmedAt: Long
+        get() = read("tax_stamp_confirmed_at") { prefs.getLong("tax_stamp_confirmed_at", 0L) }
+        set(v) = write("tax_stamp_confirmed_at", v) { putLong("tax_stamp_confirmed_at", v) }
+
     /** The Odoo server version ("19.0+e") the field contract last passed under (F2); checked again when it changes. */
     var odooVerifiedVersion: String?
         get() = read("odoo_verified_version") { prefs.getString("odoo_verified_version", null) }

@@ -16,6 +16,9 @@ data class LiveStamps(val byModel: Map<String, String?>) {
     /** The last look at every model: these newer reads over [old]'s. */
     fun over(old: LiveStamps): LiveStamps = LiveStamps(old.byModel + byModel)
 
+    /** Odoo's newest change to taxes and fiscal positions: the saved prices are valid under this stamp only. */
+    val taxStamp: String? get() = byModel["account.tax"]?.let { tax -> tax + "|" + byModel["account.fiscal.position"].orEmpty() }
+
     /** Products are fetched from here on: the older of the two product stamps of the last look. */
     val productsSince: String? get() = listOfNotNull(byModel["product.product"], byModel["product.template"]).minOrNull()
 }

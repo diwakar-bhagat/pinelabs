@@ -4,6 +4,7 @@ import android.content.Context
 import com.bohemian.odoo.pos.BuildConfig
 import com.bohemian.odoo.pos.core.BillingRefGenerator
 import com.bohemian.odoo.pos.core.PosLog
+import com.bohemian.odoo.pos.data.PriceCacheEntity
 import com.bohemian.odoo.pos.data.AppDatabase
 import com.bohemian.odoo.pos.data.DeviceSettings
 import com.bohemian.odoo.pos.data.RoomPaymentJournal
@@ -60,7 +61,15 @@ class AppContainer(context: Context) {
     val catalogCache = com.bohemian.odoo.pos.odoo.CatalogCache(java.io.File(context.filesDir, "catalog/catalog.json"))
     val productImages = com.bohemian.odoo.pos.ui.ProductImages(java.io.File(context.filesDir, "img"), appScope) { ids -> catalog.images(ids) }
     val fiscalPositions = com.bohemian.odoo.pos.odoo.FiscalPositionService(odoo)
-    val pricing = PricingService(odoo, fiscalPositions)
+    /** Odoo's price answers, kept in Room so a cart Odoo priced before still sells while Odoo is out of reach (F3). */
+    val pricing = PricingService(odoo, fiscalPositions, store = object : PricingService.PriceStore {
+        override suspend fun all() = db.priceCache().all().map {
+            PricingService.PriceStore.Saved(it.taxKey, it.unitPaise, it.qty, it.fposId, it.inclPaise, it.exclPaise, it.taxStamp)
+        }
+        override suspend fun save(s: PricingService.PriceStore.Saved) = db.priceCache().upsert(
+            PriceCacheEntity(s.taxKey, s.unitPaise, s.qty, s.fposId, s.incl, s.excl, s.stamp, System.currentTimeMillis()))
+        override suspend fun keepOnly(stamp: String) = db.priceCache().keepOnly(stamp)
+    })
     val sessions = SessionService(odoo, pendingWork = {
         PendingWork(
             unresolvedAttempts = journal.unresolved().size,

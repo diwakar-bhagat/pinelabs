@@ -49,6 +49,7 @@ import com.bohemian.odoo.pos.odoo.FiscalPosition
 import com.bohemian.odoo.pos.odoo.OdooException
 import com.bohemian.odoo.pos.odoo.OdooLane
 import com.bohemian.odoo.pos.odoo.OdooErrorKind
+import com.bohemian.odoo.pos.odoo.OdooErrors
 import com.bohemian.odoo.pos.odoo.OdooContractCheck
 import com.bohemian.odoo.pos.odoo.PaidSale
 import com.bohemian.odoo.pos.odoo.ParkedBill
@@ -703,8 +704,9 @@ class PosViewModel(private val c: AppContainer) : ViewModel() {
                 else if (companyAddress?.first != id) companyAddress = null
             }
             useCatalog(products, categories)
-            // A fresh catalogue may carry new prices, taxes or rewards: drop what was cached from the last one.
-            c.pricing.clearCache()
+            // Saved prices stay while Odoo's taxes are unchanged (a new price is a new key anyway); a tax
+            // change empties them. Unknown stamps keep them, since Odoo refuses a wrong total later anyway.
+            loaded.stamps?.taxStamp?.let { stamp -> c.pricing.useTaxStamp(stamp); c.settings.taxStampConfirmedAt = System.currentTimeMillis() }
             rewardsCache = null
             completeCatalogAt = System.currentTimeMillis()
             checkContractIfDue()
@@ -879,6 +881,11 @@ class PosViewModel(private val c: AppContainer) : ViewModel() {
         val readAt = System.currentTimeMillis()
         val due = LiveSync.due(stampsReadAt, readAt).takeIf { it.isNotEmpty() } ?: return
         val now = c.liveSync.read(due)
+        // Odoo just confirmed (or changed) its taxes: the saved prices are valid under this stamp (F3).
+        if ("account.tax" in due) now.over(old).taxStamp?.let { stamp ->
+            c.pricing.useTaxStamp(stamp)
+            c.settings.taxStampConfirmedAt = System.currentTimeMillis()
+        }
         val changed = now.changedSince(old)
         if (changed.isNotEmpty()) {
             PosLog.i("LIVE_CHANGES", "areas" to changed.joinToString(","))
@@ -951,8 +958,7 @@ class PosViewModel(private val c: AppContainer) : ViewModel() {
             printerLogo = null // read again at the next bill
         }
         if (LiveArea.TAXES in changed) {
-            // Same tax ids with a new rate would hit the cache: drop it, and read the positions again.
-            c.pricing.clearCache()
+            // The saved prices were emptied by the new tax stamp (liveSyncOnce); read the positions again.
             fiscalPositionsById = c.fiscalPositions.load((cfg.fiscalPositionIds + listOfNotNull(cfg.defaultFiscalPositionId)).distinct())
             val taxIds = _sell.value.products.flatMap { it.taxIds }.toSet()
             c.fiscalPositions.primeTaxFiscalPositions(taxIds.toList())
@@ -994,9 +1000,33 @@ class PosViewModel(private val c: AppContainer) : ViewModel() {
     /** Products whose price the store's Odoo pricelist sets: the till charges list prices only (`PricelistService`). */
     private var pricelistHold = PricelistHold.NONE
 
+    /** The pricelist hold was read from Odoo in this run (offline, an unread hold could let a held product through). */
+    private var pricelistHoldKnown = false
+
     private fun usePricelistHold(hold: PricelistHold) {
         if (hold != pricelistHold) PosLog.i("PRICELIST_HOLD", "pricelist" to hold.pricelistId, "all" to hold.everything, "products" to hold.productIds.size)
         pricelistHold = hold
+        pricelistHoldKnown = true
+    }
+
+    /** Odoo has not answered this till for a while (or the catalogue on screen is the saved one). */
+    private fun odooOutOfReach(): Boolean =
+        _sell.value.offlineCatalogSavedAt != null || System.currentTimeMillis() - c.odoo.lastOkAt > OFFLINE_AFTER_MS
+
+    /**
+     * F3: why a sale cannot be taken from Odoo's saved prices now, or null. Only while Odoo is out of
+     * reach: saved prices are trusted for a day after Odoo last confirmed its taxes, and never for a
+     * store whose pricelist hold was not read.
+     */
+    private fun offlineRefusal(cfg: PosConfig): String? {
+        if (!odooOutOfReach()) return null
+        return when {
+            System.currentTimeMillis() - c.settings.taxStampConfirmedAt > OFFLINE_TRUST_MS ->
+                "Odoo has been out of reach for over a day, so its saved prices are too old to charge. Sales can be taken again once Odoo is back."
+            cfg.pricelistId != null && !pricelistHoldKnown ->
+                "This store's pricelist has not been read from Odoo since the till started, so nothing can be charged offline yet."
+            else -> null
+        }
     }
 
     private fun pricelistRefusal(p: Product): String? =
@@ -1821,7 +1851,10 @@ class PosViewModel(private val c: AppContainer) : ViewModel() {
                 throw e
             } catch (e: Exception) {
                 if (generation == priceGeneration) {
-                    _sell.update { it.copy(pricing = false, error = "Could not get prices from Odoo: ${friendly(e)}") }
+                    val why = if (OdooErrors.kind(e) == OdooErrorKind.TRANSIENT)
+                        "Odoo is out of reach and has never priced one of these items, so it can be sold once Odoo is back. Items Odoo priced before still sell."
+                    else "Could not get prices from Odoo: ${friendly(e)}"
+                    _sell.update { it.copy(pricing = false, error = why) }
                 }
             }
         }
@@ -2111,6 +2144,7 @@ class PosViewModel(private val c: AppContainer) : ViewModel() {
         _contractProblem.value?.let { why -> _sell.update { it.copy(error = why) }; return null } // F2: fail closed
         val totals = s.totals ?: run { _sell.update { it.copy(error = "Prices not confirmed by Odoo yet") }; return null }
         val cfg = s.config ?: return null
+        offlineRefusal(cfg)?.let { why -> _sell.update { it.copy(error = why) }; return null }
         if (!cfg.sessionOpen || cfg.currentSessionId == null) {
             _sell.update { it.copy(error = "No open Odoo session for ${cfg.name}. Open a session first.") }; return null
         }
@@ -2548,6 +2582,12 @@ class PosViewModel(private val c: AppContainer) : ViewModel() {
     companion object {
         /** Tallest keypad key (dp), as before the keypad became resizable. */
         const val MAX_KEY_DP = 48
+
+        /** No answer from Odoo for this long counts as out of reach (live sync asks every 2 minutes). */
+        private const val OFFLINE_AFTER_MS = 3 * 60_000L
+
+        /** Saved prices are trusted this long after Odoo last confirmed its taxes. */
+        private const val OFFLINE_TRUST_MS = 24 * 60 * 60_000L
 
         /** Odoo's version is looked at this often (the fields only when it changed). */
         private const val CONTRACT_EVERY_MS = 24 * 60 * 60_000L

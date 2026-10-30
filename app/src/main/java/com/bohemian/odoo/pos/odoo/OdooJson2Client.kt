@@ -91,6 +91,10 @@ class OdooJson2Client(
 
     @Volatile private var keyRejectedAt = 0L
 
+    /** The last call Odoo answered (2xx): how long Odoo has been out of reach for this till. */
+    @Volatile var lastOkAt = 0L
+        private set
+
     /**
      * One JSON-2 call, in the [OdooLane] of the caller's context. Odoo Online answers 429 (or 503)
      * when a database gets too many requests. A 429 is refused without running, so it is sent again
@@ -121,6 +125,7 @@ class OdooJson2Client(
                     keyRejectedAt = now(); _keyRejected.value = true; throw e
                 }
                 _keyRejected.value = false
+                if (result.code in 200..299) lastOkAt = now()
                 return value
             }
             attempt++

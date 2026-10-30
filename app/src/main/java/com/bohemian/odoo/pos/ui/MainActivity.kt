@@ -291,9 +291,9 @@ fun SellScreen(vm: PosViewModel) {
             Modifier.fillMaxWidth().background(Zz.GoldSoft).padding(8.dp))
         s.offlineCatalogSavedAt?.let { at ->
             Row(Modifier.fillMaxWidth().background(Zz.GoldSoft).padding(8.dp), verticalAlignment = Alignment.CenterVertically) {
-                Text("Catalogue not refreshed (${s.catalogStaleReason ?: "No connection to Odoo"}) — showing the complete one from " +
+                Text("Odoo out of reach (${s.catalogStaleReason ?: "No connection to Odoo"}): selling from Odoo's saved prices, catalogue from " +
                     SimpleDateFormat("dd-MMM HH:mm", Locale("en", "IN")).format(Date(at)) +
-                    ". Prices and payment need Odoo. ", Modifier.weight(1f))
+                    ". Orders wait on the till and reach Odoo once it is back; items Odoo never priced wait too. ", Modifier.weight(1f))
                 OutlinedButton(onceIn { vm.reloadFromOdoo() }) { Text("Retry") }
             }
         }
