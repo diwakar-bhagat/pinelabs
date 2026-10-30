@@ -99,6 +99,19 @@ class LoyaltyConfirmTest {
         assertTrue(loyalty.rows.isEmpty())
     }
 
+    @Test fun `the order id in Odoo's sync reply books the points without a search`() = runTest {
+        server.enqueue(MockResponse().setBody("""{"pos.order": [{"id": 7002, "uuid": "order-1"}], "pos.order.line": [], "pos.payment": []}"""))
+        server.enqueue(MockResponse().setBody("""{"coupon_updates": []}"""))
+        val sync = sync()
+        assertTrue(sync.submit(sale()))
+        assertEquals("sync_from_ui", path())
+        val confirm = server.takeRequest()
+        assertEquals("confirm_coupon_programs", confirm.path!!.substringAfterLast('/'))
+        assertEquals(7002, Json.parseToJsonElement(confirm.body.readUtf8()).jsonObject["ids"]!!.jsonArray.single().jsonPrimitive.int)
+        assertEquals(2, server.requestCount)
+        assertEquals(7002, OrderSyncService.orderIdIn(sync.syncReply("order-1")!!, "order-1"))
+    }
+
     @Test fun `a failed confirm keeps the row and the next flush books it`() = runTest {
         server.enqueue(MockResponse().setBody("""{"pos.order": []}"""))
         server.enqueue(MockResponse().setBody("""[{"id": 7001}]"""))

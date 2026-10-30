@@ -70,7 +70,62 @@ fun formatBillDate(utc: String, tz: TimeZone): String {
 fun formatBillMillis(millis: Long, tz: TimeZone = TimeZone.getDefault()): String =
     SimpleDateFormat("dd MMM yyyy, hh:mm a", Locale("en", "IN")).apply { timeZone = tz }.format(java.util.Date(millis))
 
+/** Names the till already knows, for the ids in Odoo's sync reply. */
+data class KnownNames(
+    val storeName: String,
+    val customerName: String?,
+    val customerPhone: String?,
+    val taxNames: Map<Int, String>,
+    val methodNames: Map<Int, String>,
+)
+
 class BillService(private val odoo: OdooJson2Client) {
+
+    /**
+     * The bill from Odoo's answer to `sync_from_ui` ([reply]: `read_pos_data`, i.e. `pos.order` and
+     * `pos.payment` with every field and `pos.order.line` with the POS fields, links as plain ids;
+     * checked against a live order, 2026-10-30), so a sale costs no read-back. Names the reply only has
+     * as ids come from [known]. The ZZ Cash texts are read once, after the loyalty booking, and only
+     * for a customer's bill. Null when the reply lacks anything the bill needs: then [bill] reads it.
+     */
+    suspend fun billFromReply(uuid: String, reply: JsonObject, known: KnownNames): OdooBill? {
+        val o = reply["pos.order"]?.objects()?.firstOrNull { it.str("uuid") == uuid } ?: return null
+        val orderId = o.int("id") ?: return null
+        val lines = reply["pos.order.line"]?.objects().orEmpty().filter { it.int("order_id") == orderId }.sortedBy { it.int("id") }
+        val payments = reply["pos.payment"]?.objects().orEmpty().filter { it.int("pos_order_id") == orderId }.sortedBy { it.int("id") }
+        if (lines.isEmpty() || payments.isEmpty()) return null
+        val partnerId = o.int("partner_id")
+        if (partnerId != null && known.customerName == null) return null
+        val billLines = lines.map { l ->
+            OdooBillLine(
+                name = l.str("full_product_name")?.takeIf { it.isNotBlank() } ?: return null,
+                qty = l.decimal("qty"),
+                discount = l.decimal("discount"),
+                taxNames = l.ids("tax_ids").map { known.taxNames[it] ?: return null }.filter { it.isNotBlank() },
+                totalIncl = l.money("price_subtotal_incl"),
+            )
+        }
+        val billPayments = payments.map { p ->
+            OdooBillPayment(known.methodNames[p.int("payment_method_id")] ?: return null, p.money("amount"))
+        }
+        val zz = if (partnerId == null) null else runCatching { zzCash(orderId) }
+            .onFailure { PosLog.w("BILL_ZZ_UNREADABLE", "uuid" to uuid, "err" to it.message) }.getOrNull()
+        return OdooBill(
+            name = o.str("name") ?: return null,
+            posReference = o.str("pos_reference"),
+            dateOrderUtc = o.str("date_order") ?: return null,
+            storeName = known.storeName,
+            customerName = if (partnerId == null) null else known.customerName,
+            customerPhone = if (partnerId == null) null else known.customerPhone,
+            cashier = o.str("cashier"),
+            lines = billLines,
+            amountTotal = o.money("amount_total"),
+            amountTax = o.money("amount_tax"),
+            payments = billPayments,
+            accessToken = o.str("access_token")?.takeIf { it.isNotBlank() },
+            zzCash = zz,
+        )
+    }
 
     /**
      * The bill of the order with [uuid], or null when Odoo does not have the order yet (outbox).

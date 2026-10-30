@@ -97,8 +97,9 @@ class OrderSyncService(
      * Safe to retry: Odoo drops coupon data for an order that already has a loyalty.history line
      * (`_remove_duplicate_coupon_data`). The row stays until Odoo answers, and blocks session close (I9).
      */
-    private suspend fun confirmLoyalty(row: LoyaltyConfirmEntity): Boolean = try {
-        val orderId = odoo.call("pos.order", "search_read", jsonOf(
+    private suspend fun confirmLoyalty(row: LoyaltyConfirmEntity, knownOrderId: Int? = null): Boolean = try {
+        // Right after a sync the id comes from Odoo's reply; a retry later looks the order up.
+        val orderId = knownOrderId ?: odoo.call("pos.order", "search_read", jsonOf(
             "domain" to listOf(listOf("uuid", "=", row.orderUuid)),
             "fields" to listOf("id"),
             "limit" to 1,
@@ -162,13 +163,25 @@ class OrderSyncService(
      */
     private val sending: MutableSet<String> = ConcurrentHashMap.newKeySet()
 
+    /**
+     * Odoo's answer to the latest syncs (`read_pos_data`: the order, its lines and payments), kept for
+     * the bill so it needs no read-back. Only the last few; memory only.
+     */
+    private val replies = object : LinkedHashMap<String, JsonObject>() {
+        override fun removeEldestEntry(eldest: MutableMap.MutableEntry<String, JsonObject>?) = size > KEEP_REPLIES
+    }
+
+    /** Odoo's reply to the sync of [uuid], while it is one of the last few synced from this till. */
+    fun syncReply(uuid: String): JsonObject? = synchronized(replies) { replies[uuid] }
+
     private suspend fun trySend(uuid: String, payload: JsonObject, attempts: Int = 0): Boolean {
         if (!sending.add(uuid)) return false
         return try {
-            odoo.call("pos.order", "sync_from_ui", payload)
+            val reply = odoo.call("pos.order", "sync_from_ui", payload) as? JsonObject
             outbox.delete(uuid)
             PosLog.i("ORDER_SYNCED", "uuid" to uuid)
-            loyalty?.get(uuid)?.let { confirmLoyalty(it) }
+            if (reply != null) synchronized(replies) { replies[uuid] = reply }
+            loyalty?.get(uuid)?.let { confirmLoyalty(it, reply?.let { r -> orderIdIn(r, uuid) }) }
             true
         } catch (e: OdooException) {
             outbox.markFailed(uuid, e.message ?: e::class.simpleName ?: "error", clock() + backoff(attempts))
@@ -182,6 +195,12 @@ class OrderSyncService(
     companion object {
         /** Outbox orders sent per background pass (every 30 s); session close sends them all. */
         const val MAX_PER_PASS = 10
+
+        private const val KEEP_REPLIES = 8
+
+        /** The pos.order id of [uuid] in a sync_from_ui reply, or null when the reply does not carry it. */
+        internal fun orderIdIn(reply: JsonObject, uuid: String): Int? =
+            runCatching { reply["pos.order"]?.objects()?.firstOrNull { it.str("uuid") == uuid }?.int("id") }.getOrNull()
 
         private fun odooUtc(millis: Long): String =
             SimpleDateFormat("yyyy-MM-dd HH:mm:ss", Locale.ROOT).apply { timeZone = TimeZone.getTimeZone("UTC") }.format(Date(millis))

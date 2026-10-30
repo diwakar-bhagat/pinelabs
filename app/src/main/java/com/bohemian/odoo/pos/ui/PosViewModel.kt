@@ -40,6 +40,7 @@ import com.bohemian.odoo.pos.odoo.ZzCashRedemption
 import com.bohemian.odoo.pos.odoo.ZzCashRules
 import com.bohemian.odoo.pos.odoo.LoyaltyPoints
 import com.bohemian.odoo.pos.odoo.LoyaltyRule
+import com.bohemian.odoo.pos.odoo.KnownNames
 import com.bohemian.odoo.pos.odoo.LineNote
 import com.bohemian.odoo.pos.odoo.MenuTree
 import com.bohemian.odoo.pos.odoo.PosCategory
@@ -546,6 +547,9 @@ class PosViewModel(private val c: AppContainer) : ViewModel() {
     /** account.tax id → name, for the tax line under each item on the bill (read with the catalogue). */
     private var taxNames: Map<Int, String> = emptyMap()
 
+    /** pos.payment.method id → name of this till's methods (read with the catalogue), for "Paid via" on the bill. */
+    private var paymentMethodNames: Map<Int, String> = emptyMap()
+
     /**
      * Start of the day: show the last complete catalogue at once (read off the screen thread) while
      * Odoo is asked. Browsing only: without a fresh config nothing can be sold until the refresh
@@ -631,6 +635,7 @@ class PosViewModel(private val c: AppContainer) : ViewModel() {
             loaded.stamps?.let { st -> val at = System.currentTimeMillis(); st.byModel.keys.forEach { stampsReadAt[it] = at } }
             loaded.billText?.let { billText = it }
             usePricelistHold(loaded.pricelist)
+            loaded.methods?.let { m -> paymentMethodNames = m.associate { it.id to it.name } }
             useOffers(loaded.offers)
             fiscalPositionsById = positions
             zzProgram = zz.first
@@ -2152,8 +2157,16 @@ class PosViewModel(private val c: AppContainer) : ViewModel() {
         // An order still in the outbox is not in Odoo: print the till's copy at once, no Odoo wait.
         // A synced one is read back, but a slow Odoo never holds the paid customer longer than this.
         val inOutbox = runCatching { c.db.outbox().contains(sale.orderUuid) }.getOrDefault(false)
+        // Odoo's reply to the sync already holds the bill (no read-back); without it, or when the
+        // reply lacks a name the till does not know, the bill is read from Odoo as before.
+        val known = KnownNames(_sell.value.config?.name ?: c.settings.posConfigName, sale.customer?.name, sale.customer?.phone,
+            taxNames, paymentMethodNames)
         val bill = if (inOutbox) null else runCatching {
-            withTimeoutOrNull(BILL_READ_TIMEOUT_MS) { c.bills.bill(sale.orderUuid, knownPhone = sale.customer?.phone, knownTaxNames = taxNames) }
+            withTimeoutOrNull(BILL_READ_TIMEOUT_MS) {
+                c.orderSync.syncReply(sale.orderUuid)
+                    ?.let { reply -> runCatching { c.bills.billFromReply(sale.orderUuid, reply, known) }.getOrNull() }
+                    ?: c.bills.bill(sale.orderUuid, knownPhone = sale.customer?.phone, knownTaxNames = taxNames)
+            }
         }
             .onFailure { PosLog.w("BILL_READ_FAILED", "order" to sale.orderUuid, "err" to it.message) }.getOrNull()
         val eBill = bill?.accessToken?.let { runCatching { TicketQr.ticketUrl(BuildConfig.ODOO_BASE_URL, it) }.getOrNull() }
