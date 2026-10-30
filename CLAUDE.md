@@ -877,6 +877,12 @@ company password manager + encrypted drive.
 
 ## 13. Open items
 
+- [ ] 0.7.0 Odoo side, each only on the owner's yes:
+  - `tools/odoo/create_till_status_model.py --apply` creates the E700 Tills list.
+  - Create one bot user "E700 Integration" (one seat), then run `tools/odoo/enable_till_keys.py --apply`.
+  - Make one enrollment key and enroll every till (Setup → Enroll this till).
+  - Then revoke the enrollment key and the shared administrator key.
+- [ ] On device: UAT 42–46 (offline selling, no-session wait, revoked key, enrollment, the till list)
 - [x] PROD Pine Application ID issued 2026-10-27 (`d0b34dd1…0186`); first signed prod APK built (v1+v2, cert SHA-256 `5062f7cf…cbda`)
 - [ ] Confirm `bank_code = "01"` for ZenZebra's acquirer (UAT case 8)
 - [ ] Void on SDK 2.0 sends `invoice_number = null`. Confirm at UAT case 8 whether MasterApp needs the sale's InvoiceNo, and where it comes from. `PINE_RESULT_META_KEYS` in logcat lists the extra result fields the terminal returns
