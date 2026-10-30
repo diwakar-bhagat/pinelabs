@@ -24,32 +24,33 @@ class CustomerService(private val odoo: OdooJson2Client) {
     suspend fun findByPhone(e164: String): Customer? = search(listOf("phone_sanitized", "=", e164))
 
     /**
-     * "Name or mobile" in the customer dialog: [MIN_DIGITS]+ digits search the phone's last digits,
-     * [MIN_LETTERS]+ letters search the name. One page of [limit] from [offset], A→Z, so every match
-     * can be reached by scrolling. Empty when too little is typed.
+     * "Name or mobile" in the customer dialog: [MIN_DIGITS]+ digits search the mobile's first or last
+     * digits, [MIN_LETTERS]+ letters search the name. One page of [limit] from [offset], A→Z, so every
+     * match can be reached by scrolling. Empty when too little is typed.
      */
     suspend fun search(query: String, offset: Int = 0, limit: Int = PAGE): List<Customer> =
-        if (isPhoneQuery(query)) searchByPhoneSuffix(query, offset, limit) else searchByName(query, offset, limit)
+        if (isPhoneQuery(query)) searchByPhone(query, offset, limit) else searchByName(query, offset, limit)
 
     /**
-     * Search by the last N digits of the phone number (minimum 4).
-     * Cashiers remember the last few digits; this lets them find the customer without
-     * typing the full number.
-     *
-     * Uses Odoo's `=ilike` operator: `phone_sanitized =ilike %<digits>` matches phones
-     * ending with those digits.
+     * Search by the first or the last digits of the mobile (minimum 4): cashiers remember either end.
+     * One call: `phone_sanitized` (E.164, "+919910605187") ends with the digits, or its Indian number
+     * starts with them. A full number typed with 91 / 0 in front is searched without it.
      */
-    suspend fun searchByPhoneSuffix(digits: String, offset: Int = 0, limit: Int = PAGE): List<Customer> {
-        val clean = digits.filter { it.isDigit() }
+    suspend fun searchByPhone(digits: String, offset: Int = 0, limit: Int = PAGE): List<Customer> {
+        val clean = nationalDigits(digits)
         if (clean.length < MIN_DIGITS) return emptyList()
-        return page(listOf(listOf("phone_sanitized", "=ilike", "%$clean")), offset, limit)
+        return page(phoneDomain(clean), offset, limit)
     }
 
-    /** Customers whose name (or email) contains [text], A→Z: "ra" lists every Rahul, Ravi and Sara. */
+    /**
+     * Customers whose name (or email) contains [text], A→Z, those whose name starts with it first in each
+     * page: "ra" lists Rahul and Ravi, then Sara.
+     */
     suspend fun searchByName(text: String, offset: Int = 0, limit: Int = PAGE): List<Customer> {
         val q = text.trim()
         if (q.count { it.isLetter() } < MIN_LETTERS) return emptyList()
         return page(listOf("|", listOf("name", "ilike", q), listOf("email", "ilike", q)), offset, limit)
+            .sortedBy { if (it.name.startsWith(q, ignoreCase = true)) 0 else 1 }
     }
 
     private suspend fun page(domain: List<Any?>, offset: Int, limit: Int): List<Customer> =
@@ -134,6 +135,20 @@ class CustomerService(private val odoo: OdooJson2Client) {
         const val PAGE = 20
         const val MIN_DIGITS = 4
         const val MIN_LETTERS = 2
+
+        /** The digits typed, without the 91 or 0 of a full Indian number ("+91 99106 05187" → "9910605187"). */
+        fun nationalDigits(typed: String): String {
+            val d = typed.filter { it.isDigit() }
+            return when {
+                d.length >= 12 && d.startsWith("91") -> d.drop(2)
+                d.length == 11 && d.startsWith("0") -> d.drop(1)
+                else -> d
+            }
+        }
+
+        /** A mobile ending with [digits], or whose Indian number starts with them. */
+        fun phoneDomain(digits: String): List<Any> =
+            listOf("|", listOf("phone_sanitized", "=ilike", "%$digits"), listOf("phone_sanitized", "=ilike", "+91$digits%"))
 
         /** Typed text is a mobile (digits, spaces, +), not a name. */
         fun isPhoneQuery(query: String): Boolean = query.any { it.isDigit() } && query.none { it.isLetter() }

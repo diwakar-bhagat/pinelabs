@@ -2272,7 +2272,7 @@ class PosViewModel(private val c: AppContainer) : ViewModel() {
         private const val SEARCH_DEBOUNCE_MS = 120L
 
         /** The customer search asks Odoo once typing pauses this long. */
-        private const val CUSTOMER_SEARCH_DEBOUNCE_MS = 300L
+        private const val CUSTOMER_SEARCH_DEBOUNCE_MS = 400L
 
         /** Taps closer together than this are priced once, together. */
         private const val REPRICE_DEBOUNCE_MS = 150L

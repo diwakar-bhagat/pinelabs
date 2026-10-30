@@ -19,7 +19,7 @@ class CustomerSearchTest {
 
     private fun service() = CustomerService(OdooJson2Client(server.url("/").toString().trimEnd('/'), "test", apiKey = { "k" }))
 
-    @Test fun `letters search the name or email, A to Z, from the given offset`() = runTest {
+    @Test fun `letters search the name or email, A to Z, names starting with them first`() = runTest {
         // What the live DB answered for "diw" on 2026-10-28 (phones made up).
         server.enqueue(MockResponse().setBody("""[
             {"id": 501, "name": "Astha diwedi", "phone": "+91 90000 00001"},
@@ -27,7 +27,7 @@ class CustomerSearchTest {
             {"id": 502, "name": "Diwan", "phone": false},
             {"id": 503, "name": "Diwas", "phone": "+91 90000 00003"}]"""))
         val found = service().search("diw", offset = 20)
-        assertEquals(listOf("Astha diwedi", "Diwakar", "Diwan", "Diwas"), found.map { it.name })
+        assertEquals(listOf("Diwakar", "Diwan", "Diwas", "Astha diwedi"), found.map { it.name })
         val req = server.takeRequest()
         assertEquals("/json/2/res.partner/search_read", req.path)
         val body = req.body.readUtf8()
@@ -35,12 +35,21 @@ class CustomerSearchTest {
         assertTrue(body, "\"offset\":20" in body && "\"limit\":20" in body && "\"order\":\"name, id\"" in body)
     }
 
-    @Test fun `digits search the last digits of the mobile, in the same order and pages`() = runTest {
+    @Test fun `digits search the first or the last digits of the mobile, in one call`() = runTest {
         server.enqueue(MockResponse().setBody("[]"))
-        service().search("3210")
+        service().search("9910")
         val body = server.takeRequest().body.readUtf8()
-        assertTrue(body, "[\"phone_sanitized\",\"=ilike\",\"%3210\"]" in body)
+        assertTrue(body, "[\"|\",[\"phone_sanitized\",\"=ilike\",\"%9910\"],[\"phone_sanitized\",\"=ilike\",\"+919910%\"]]" in body)
         assertTrue(body, "\"offset\":0" in body && "\"order\":\"name, id\"" in body)
+        assertEquals(1, server.requestCount)
+    }
+
+    @Test fun `a full number typed with 91 or 0 is searched as the 10-digit mobile`() {
+        assertEquals("9910605187", CustomerService.nationalDigits("+91 99106 05187"))
+        assertEquals("9910605187", CustomerService.nationalDigits("919910605187"))
+        assertEquals("9910605187", CustomerService.nationalDigits("09910605187"))
+        assertEquals("605187", CustomerService.nationalDigits("605187"))
+        assertEquals("9191", CustomerService.nationalDigits("9191")) // a short 91… is the mobile's own digits
     }
 
     @Test fun `too little typed asks Odoo nothing`() = runTest {
