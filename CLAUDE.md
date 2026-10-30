@@ -649,6 +649,22 @@ record per till in Odoo. Write-up: `docs/API_ENGINEERING.md`, "Fail-safe archite
   (Point of Sale > Reporting > E700 Tills); until then the till skips it.
 - **`User-Agent`** names the till: `ZenZebraTill/<version> (<POS>; <serial>)`.
 - **The scripts:** dry run unless `--apply`, and run only on the owner's yes.
+
+### Decisions 2026-10-30 (pacing and the two-step load, 0.7.1 and 0.7.2)
+
+- **0.7.1** (another session, `65c752a`): a rush-hour simulation against a fake Odoo
+  (`PeakHourSimulation.kt`, only with `PEAK_SIM=1`; limit modelled as about 1 call a second, bursts of 3,
+  per database, an estimate) found that short bursts, not volume, caused the 429s.
+  - **Pacing:** each till paces itself at about one call a second, two after a quiet spell (`OdooGate`).
+  - **The fallback bill read:** one call at a time.
+- **0.7.2:** pacing made a full catalogue load (~35 calls) block selling for ~35 s, so the load now comes
+  in two steps.
+  - **Step 1, what selling needs:** config, products in pages of 1000, taxes, offers, the pricelist hold
+    in one combined search, and the payment methods. The till sells once these are in.
+  - **Step 2, in the background:** menu tabs, notes, address, bill text, tax names and ZZ Cash rules.
+  - **Docs:** they no longer claim the limit is counted per database; Odoo does not publish it. The E700
+    Tills list shows it once tills have their own keys.
+  - **Version:** 0.7.1 (code 10) was already built and pushed, so this is 0.7.2 (code 11).
 ---
 
 ## 6. Odoo integration (verified against live DB, 2026-09-21)
@@ -847,6 +863,7 @@ company password manager + encrypted drive.
 | 44 | Revoke the till's key in Odoo | Red "Odoo rejected this till's API key" bar; sales stay on the till; enroll again in SETUP: everything goes through |
 | 45 | SETUP → paste the bot user's enrollment key → Enroll this till | "This till's own key (E700 <store> <serial>), valid until …"; the key is listed in Odoo under the bot user |
 | 46 | Point of Sale > Reporting > E700 Tills in Odoo (after the model is created) | One row per till, last seen within 15 min, versions, unsent and refused orders |
+| 47 | Restart the till (or tap Retry) with Odoo reachable | Selling works within about 15 s; menu tabs, notes and ZZ Cash rules fill in a little after; Setup's call rate stays near 1 a minute when idle |
 
 ---
 
