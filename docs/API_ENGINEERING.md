@@ -231,6 +231,42 @@ the refusals came from short bursts, not overall volume.
 - **Tuning:** the pace is a constant (`Throttle.perSecond` / `burst`). Raise it once the E700 Tills list
   shows real Odoo answers without 429s.
 
+## Odoo's POS loader (0.8.0)
+
+The web POS hardly calls Odoo: it loads everything once with `pos.session.load_data`, then asks only for
+what changed (`pos_last_server_date`). Since 0.8.0 the till does the same whenever a session is open
+(`odoo/PosLoad.kt`).
+
+**Measured live** (31 Oct, read-only, ZenZebra session):
+
+| Call | Size | Time |
+|---|---|---|
+| Full load, 16 models | 3.4 MB | 2.0 s |
+| Changes in the last 24 h | 138 KB | 0.4 s |
+| A quiet 2-minute poll | 30 KB | 0.3 s |
+
+- **Same products as before:** built from the loader, the till's products (2,510 at ZenZebra and SWN) equal
+  its own reads exactly: ids, prices, taxes, tabs, HSN, barcodes, codes and names
+  (`LiveLoaderCheck`, run by hand with `LIVE_ODOO_ENV`).
+- **A catalogue load:** one loader call gives config, products, taxes, fiscal positions, offers, ZZ Cash
+  rules, menu, notes and payment methods.
+  - **Extra calls:** the pricelist hold adds 2 when the store has a pricelist. The company's second
+    address line and the bill template follow in the background.
+  - **The result:** 2–4 calls instead of ~25.
+- **Live sync:** one loader call per pass, every 2 minutes (every 15 outside the sales day).
+  - **What it replaces:** the config read and every change stamp.
+  - **Within 2 minutes:** prices, taxes, offers, menu and payment methods (was 5–15).
+  - **Every 15 minutes:** the sellable product ids drop products archived or taken out of the POS. The
+    loader never sends those.
+  - **Every hour:** the bill template.
+- **The "since":** Odoo's clock (HTTP `Date`) less 5 minutes. Odoo echoes the date sent instead of moving
+  `_data_server_date`. Records seen twice merge by id, and a record equal to the one held is no change.
+- **Taxes:** a fingerprint of Odoo's tax definitions keeps the saved prices (F3) valid.
+- **A new Odoo day:** a full load, which brings in today's dated offers.
+- **No open session, or the loader refuses:** the separate reads of 0.7.x take over, unchanged. After a
+  refusal (anything but a network error, a rejected key or HTTP 429) they serve for an hour.
+- **Idle budget per till:** about 0.6 calls a minute (0.7.x: ~1.6; 0.5.x: 13), about 0.9 MB an hour of data.
+
 ## One shared key
 
 - **The limit:** keeping one key for every store is the owner's decision. If Odoo counts per key, a

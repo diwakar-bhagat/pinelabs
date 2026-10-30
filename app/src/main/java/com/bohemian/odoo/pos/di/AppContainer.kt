@@ -14,6 +14,7 @@ import com.bohemian.odoo.pos.odoo.CustomerService
 import com.bohemian.odoo.pos.odoo.OdooContractCheck
 import com.bohemian.odoo.pos.odoo.KeyRotation
 import com.bohemian.odoo.pos.odoo.OdooJson2Client
+import com.bohemian.odoo.pos.odoo.PosLoad
 import kotlin.random.Random
 import kotlinx.coroutines.withContext
 import kotlinx.coroutines.flow.first
@@ -75,6 +76,9 @@ class AppContainer(context: Context) {
 
     /** The key's name in Odoo (Preferences > Account Security lists it), so a lost till's key is easy to find. */
     fun keyName(): String = "E700 ${settings.posConfigName.ifBlank { "till" }} $terminalSerial"
+
+    /** Odoo's own POS loader (0.8.0): the catalogue and live sync in one call each while a session is open. */
+    val posLoad = PosLoad(odoo)
 
     /** F2: Odoo's fields checked when its version changes; payments stop if one the till needs is gone. */
     val contract = OdooContractCheck(odoo)

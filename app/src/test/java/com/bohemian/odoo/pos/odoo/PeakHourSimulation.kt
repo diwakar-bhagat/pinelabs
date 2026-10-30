@@ -50,7 +50,7 @@ class PeakHourSimulation {
 
     private class Sample(val lane: OdooLane, val ms: Long, val ok: Boolean)
 
-    private data class Result(val stores: Int, val bills: Int, val billWaitsMs: List<Long>, val samples: List<Sample>, val served: Int, val refused: Int, val failedSales: Int)
+    private data class Result(val model: String, val stores: Int, val bills: Int, val billWaitsMs: List<Long>, val samples: List<Sample>, val served: Int, val refused: Int, val failedSales: Int)
 
     private suspend fun timed(client: OdooJson2Client, lane: OdooLane, method: String, out: MutableList<Sample>): Long {
         val t = System.currentTimeMillis()
@@ -60,7 +60,7 @@ class PeakHourSimulation {
         return ms
     }
 
-    private fun scenario(stores: Int, minutes: Int, billsPerHour: Int): Result = runBlocking {
+    private fun scenario(model: String, stores: Int, minutes: Int, billsPerHour: Int): Result = runBlocking {
         val odoo = FakeOdoo(perSecond = 1.0, burst = 3.0, latencyMs = 250)
         val server = MockWebServer().apply { dispatcher = odoo; start() }
         val samples = Collections.synchronizedList(ArrayList<Sample>())
@@ -70,11 +70,15 @@ class PeakHourSimulation {
         coroutineScope {
             repeat(stores) { s ->
                 val client = OdooJson2Client(server.url("/").toString().trimEnd('/'), "sim", apiKey = { "k" }, userAgent = { "PeakSim/$s" })
-                // Background: live sync (0.7.0 schedule: 2 product stamps every 5 min, 9 others every 15) and a health report a minute.
+                // Background, a minute at a time. 0.7: live sync's stamps (2 product stamps every 5 min, 9 others
+                // every 15) and a health report a minute. 0.8: Odoo's POS loader every 2 min (1 call), the sellable
+                // product ids every 15 min and the bill template every hour.
                 launch {
                     var tick = 0
                     while (isActive && System.currentTimeMillis() < endAt) {
-                        repeat(1 + (if (tick % 5 == 0) 2 else 0) + (if (tick % 15 == 0) 9 else 0)) { timed(client, OdooLane.BACKGROUND, "search_read", samples) }
+                        val calls = if (model == "0.7") 1 + (if (tick % 5 == 0) 2 else 0) + (if (tick % 15 == 0) 9 else 0)
+                            else (if (tick % 2 == 0) 1 else 0) + (if (tick % 15 == 0) 1 else 0) + (if (tick % 60 == 0) 1 else 0)
+                        repeat(calls) { timed(client, OdooLane.BACKGROUND, if (model == "0.7") "search_read" else "load_data", samples) }
                         tick++; delay(60_000)
                     }
                 }
@@ -106,7 +110,7 @@ class PeakHourSimulation {
             coroutineContext.cancelChildrenSafe()
         }
         server.shutdown()
-        Result(stores, waits.size, waits.toList(), samples.toList(), odoo.served.get(), odoo.refused.get(), failedSales.get())
+        Result(model, stores, waits.size, waits.toList(), samples.toList(), odoo.served.get(), odoo.refused.get(), failedSales.get())
     }
 
     private fun kotlin.coroutines.CoroutineContext.cancelChildrenSafe() = this[kotlinx.coroutines.Job]?.children?.forEach { it.cancel() }
@@ -117,12 +121,15 @@ class PeakHourSimulation {
         assumeTrue(System.getenv("PEAK_SIM") == "1")
         val minutes = System.getenv("PEAK_SIM_MINUTES")?.toInt() ?: 5
         val storeCounts = (System.getenv("PEAK_SIM_STORES") ?: "1,3,5,8").split(",").map { it.trim().toInt() }
-        val results = runBlocking { storeCounts.map { n -> async(kotlinx.coroutines.Dispatchers.IO) { scenario(n, minutes, 80) } }.awaitAll() }
+        val models = (System.getenv("PEAK_SIM_MODELS") ?: "0.8").split(",").map { it.trim() }
+        val results = runBlocking {
+            models.flatMap { m -> storeCounts.map { n -> async(kotlinx.coroutines.Dispatchers.IO) { scenario(m, n, minutes, 80) } } }.awaitAll()
+        }
         val report = buildString {
-            appendLine("stores,bills,bill_wait_p50_ms,bill_wait_p95_ms,bill_wait_max_ms,tap_p95_ms,sale_p95_ms,bg_p95_ms,calls_ok,http_429,failed_calls_tap,failed_calls_sale,failed_calls_bg,sales_not_sent_at_once")
+            appendLine("model,stores,bills,bill_wait_p50_ms,bill_wait_p95_ms,bill_wait_max_ms,tap_p95_ms,sale_p95_ms,bg_p95_ms,calls_ok,http_429,failed_calls_tap,failed_calls_sale,failed_calls_bg,sales_not_sent_at_once")
             for (r in results) {
                 fun lane(l: OdooLane) = r.samples.filter { it.lane == l }
-                appendLine(listOf(r.stores, r.bills, pct(r.billWaitsMs, .5), pct(r.billWaitsMs, .95), r.billWaitsMs.maxOrNull() ?: 0,
+                appendLine(listOf(r.model, r.stores, r.bills, pct(r.billWaitsMs, .5), pct(r.billWaitsMs, .95), r.billWaitsMs.maxOrNull() ?: 0,
                     pct(lane(OdooLane.TAP).map { it.ms }, .95), pct(lane(OdooLane.SALE).map { it.ms }, .95), pct(lane(OdooLane.BACKGROUND).map { it.ms }, .95),
                     r.served, r.refused, lane(OdooLane.TAP).count { !it.ok }, lane(OdooLane.SALE).count { !it.ok }, lane(OdooLane.BACKGROUND).count { !it.ok },
                     r.failedSales).joinToString(","))

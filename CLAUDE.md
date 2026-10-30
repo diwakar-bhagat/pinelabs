@@ -665,6 +665,32 @@ record per till in Odoo. Write-up: `docs/API_ENGINEERING.md`, "Fail-safe archite
   - **Docs:** they no longer claim the limit is counted per database; Odoo does not publish it. The E700
     Tills list shows it once tills have their own keys.
   - **Version:** 0.7.1 (code 10) was already built and pushed, so this is 0.7.2 (code 11).
+
+### Decisions 2026-10-31 (Odoo's POS loader, 0.8.0)
+
+How Odoo's own web POS handles requests (Odoo 19 source): one `pos.session.load_data` at start, then only
+what changed (`pos_last_server_date`); taxes worked out in the browser; one `sync_from_ui` per order, one at
+a time; an offline queue; pushes over the bus. The till now loads the same way while a session is open
+(`odoo/PosLoad.kt`, `PosCatalog`).
+- **Live measurements:** full load 3.4 MB in 2 s; a quiet poll 30 KB in 0.3 s. The till's products built
+  from it are identical to its own reads at ZenZebra and SWN (2,510; `LiveLoaderCheck`, run by hand, reads
+  only).
+- **A catalogue load:** one loader call (+2 for a pricelist) instead of ~25. The company's `street2` and the
+  bill template load in the background.
+- **Live sync:** one loader call per pass (every 2 min). Sellable ids every 15 min (removals); the bill
+  template hourly; a new Odoo day reloads. The config and session come with each reply.
+- **The "since":** Odoo's HTTP Date less 5 min (Odoo echoes the date sent). Records merge by id, and an equal
+  record is no change (Odoo always re-sends its special products).
+- **Products** come from templates (`list_price`, taxes, tabs, HSN) and variants (barcode, code, name). Only
+  templates available in POS become tiles.
+- **Pricelist:** the config's `pricelist_id` is unset when the POS does not use pricelists, as in the web
+  POS; the hold then holds nothing.
+- **The tax stamp** is now a fingerprint of the tax definitions (account.tax has no write_date in the loader).
+- **Fallback:** no open session, or a loader answer the till cannot use, means the 0.7.x separate reads.
+  A refused loader call (not a network error, a rejected key or HTTP 429) keeps the till on the separate
+  reads for an hour, so a refusing loader is never asked every pass.
+- **Not changed:** `compute_all` per line (I2), `sync_from_ui`, the outbox, error kinds, contract check,
+  lanes and pacing.
 ---
 
 ## 6. Odoo integration (verified against live DB, 2026-09-21)
@@ -864,6 +890,9 @@ company password manager + encrypted drive.
 | 45 | SETUP → paste the bot user's enrollment key → Enroll this till | "This till's own key (E700 <store> <serial>), valid until …"; the key is listed in Odoo under the bot user |
 | 46 | Point of Sale > Reporting > E700 Tills in Odoo (after the model is created) | One row per till, last seen within 15 min, versions, unsent and refused orders |
 | 47 | Restart the till (or tap Retry) with Odoo reachable | Selling works within about 15 s; menu tabs, notes and ZZ Cash rules fill in a little after; Setup's call rate stays near 1 a minute when idle |
+| 48 | With a session open, restart the till; change a product's price in Odoo | Selling within a few seconds; the new price on the tile within 2 minutes; Setup's call rate about 0.5–1 a minute idle |
+| 49 | Archive a product (or untick Available in POS) in Odoo | It leaves the till within 15 minutes |
+| 50 | Close the session in Odoo, then open the next one from the till | The till keeps working on the separate reads with no session, and goes back to Odoo's loader once the new session is open |
 
 ---
 
