@@ -37,6 +37,16 @@ class DeviceSettings(context: Context) : PinStore {
         get() = read("odoo_api_key") { prefs.getString("odoo_api_key", null) }
         set(v) = write("odoo_api_key", v) { putString("odoo_api_key", v) }
 
+    /** Odoo's expiry of [odooApiKey] ("2027-01-23") when the till generated it (F4); null for a key entered by hand. */
+    var apiKeyExpiresOn: String?
+        get() = read("api_key_expires_on") { prefs.getString("api_key_expires_on", null) }
+        set(v) = write("api_key_expires_on", v) { putString("api_key_expires_on", v) }
+
+    /** A key generated during rotation and not yet switched to (kept so a crash never loses it). */
+    var pendingApiKey: String?
+        get() = read("pending_api_key") { prefs.getString("pending_api_key", null) }
+        set(v) = write("pending_api_key", v) { putString("pending_api_key", v) }
+
     var posConfigId: Int
         get() = read("pos_config_id") { prefs.getInt("pos_config_id", 0) }
         set(v) = write("pos_config_id", v) { putInt("pos_config_id", v) }

@@ -104,9 +104,14 @@ fun SetupScreen(vm: PosViewModel) {
                 placeholder = { Text(if (s.apiKeyEntered) "saved — enter to replace" else "paste API key") },
                 visualTransformation = PasswordVisualTransformation())
             Spacer(Modifier.width(8.dp))
-            Button({ vm.saveApiKey(key) }, enabled = key.isNotBlank() && !s.busy) { Text("Save & connect") }
+            Button(onceIn { vm.enrollKey(key) }, enabled = key.isNotBlank() && !s.busy) { Text("Enroll this till") }
+            Spacer(Modifier.width(8.dp))
+            OutlinedButton(onceIn { vm.saveApiKey(key) }, enabled = key.isNotBlank() && !s.busy) { Text("Use this key") }
             if (s.apiKeyEntered) { Spacer(Modifier.width(8.dp)); OutlinedButton({ vm.loadConfigs() }) { Text("Reload POS list") } }
         }
+        Text("Enroll: paste the bot user's enrollment key; the till makes and keeps a key of its own, renewed by itself. " +
+            "Use this key: the key is used as it is.", style = MaterialTheme.typography.bodySmall)
+        s.keyInfo?.let { Text(it, style = MaterialTheme.typography.bodySmall) }
 
         if (s.configs.isNotEmpty()) {
             Text("2. Which Odoo Point of Sale is this terminal?")
@@ -286,6 +291,7 @@ fun SellScreen(vm: PosViewModel) {
         s.error?.let { Text(it, color = MaterialTheme.colorScheme.error, modifier = Modifier.padding(8.dp)) }
         s.notice?.let { Text(it, Modifier.fillMaxWidth().background(Zz.GoldSoft).padding(8.dp)) }
         s.methodWarning?.let { Text(it, Modifier.fillMaxWidth().background(Zz.GoldSoft).padding(8.dp)) }
+        s.keyWarning?.let { Text(it, Modifier.fillMaxWidth().background(Zz.GoldSoft).padding(8.dp)) }
         OdooTroubleBars(vm)
         if (s.offersUnavailable) Text("Offers and codes could not be loaded from Odoo, so none apply now. The till tries again every minute.",
             Modifier.fillMaxWidth().background(Zz.GoldSoft).padding(8.dp))

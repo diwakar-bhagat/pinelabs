@@ -50,6 +50,7 @@ import com.bohemian.odoo.pos.odoo.OdooException
 import com.bohemian.odoo.pos.odoo.OdooLane
 import com.bohemian.odoo.pos.odoo.OdooErrorKind
 import com.bohemian.odoo.pos.odoo.OdooErrors
+import com.bohemian.odoo.pos.odoo.KeyRotation
 import com.bohemian.odoo.pos.odoo.OdooContractCheck
 import com.bohemian.odoo.pos.odoo.PaidSale
 import com.bohemian.odoo.pos.odoo.ParkedBill
@@ -150,6 +151,8 @@ data class SetupState(
     val crashReports: List<String> = emptyList(),
     /** This till's Odoo traffic and 429s ([OdooStats]), so a store visit shows whether it is within budget. */
     val odooRate: String? = null,
+    /** Whose key this till uses and until when (F4). */
+    val keyInfo: String? = null,
     val busy: Boolean = false,
     val error: String? = null,
     /** Result of "Change PIN" on the Setup screen. */
@@ -305,6 +308,8 @@ data class SellState(
     val methodWarning: String? = null,
     /** "Bill 3": this bill's number in the till's queue of open bills (the chip label without a customer). */
     val billNumber: Int = 1,
+    /** F4: the till's Odoo key expires soon and could not renew itself. */
+    val keyWarning: String? = null,
 ) {
     // Derived values are computed once per state, not on every read while the screen is drawn.
 
@@ -356,7 +361,9 @@ class PosViewModel(private val c: AppContainer) : ViewModel() {
 
     private fun SetupState.withCrashes(): SetupState {
         val reports = c.crashLog.reports()
-        return copy(crashReports = reports.mapNotNull { f -> runCatching { f.readText() }.getOrNull() }, odooRate = odooRateText())
+        return copy(crashReports = reports.mapNotNull { f -> runCatching { f.readText() }.getOrNull() }, odooRate = odooRateText(),
+            keyInfo = c.settings.apiKeyExpiresOn?.let { "This till's own key (\"${c.keyName()}\"), valid until $it. It renews itself ${KeyRotation.ROTATE_DAYS} days before." }
+                ?: "Key entered by hand: the till does not know when it expires and cannot renew it. Enroll to give the till its own key.")
     }
 
     /** "Odoo calls: 1.4 a minute (sale 3, cashier 9, background 2 in the last 10 min) · 429s today: 0". */
@@ -462,8 +469,21 @@ class PosViewModel(private val c: AppContainer) : ViewModel() {
 
     fun saveApiKey(key: String) = launchSetup {
         c.settings.odooApiKey = key.trim()
+        // A key entered by hand: Odoo did not tell the till when it expires, so it is not renewed here.
+        c.settings.apiKeyExpiresOn = null
+        c.settings.pendingApiKey = null
         val configs = c.catalog.configs() // also validates the key
-        _setup.update { it.copy(apiKeyEntered = true, configs = configs) }
+        _setup.update { it.copy(apiKeyEntered = true, configs = configs).withCrashes() }
+    }
+
+    /**
+     * F4: the pasted key is the bot user's enrollment key; the till makes its own key from it (named for
+     * this till, renewed by itself before it expires) and keeps only that one.
+     */
+    fun enrollKey(enrollmentKey: String) = launchSetup {
+        c.keys.enroll(enrollmentKey.trim(), c.keyName())
+        val configs = c.catalog.configs()
+        _setup.update { it.copy(apiKeyEntered = true, configs = configs).withCrashes() }
     }
 
     fun loadConfigs() = launchSetup { _setup.update { it.copy(configs = c.catalog.configs()) } }
@@ -720,6 +740,9 @@ class PosViewModel(private val c: AppContainer) : ViewModel() {
                     selectedCateg = it.selectedCateg?.takeIf { id -> categories.any { c -> c.id == id } },
                     fiscalPosition = fiscalPositionsById[cfg.defaultFiscalPositionId],
                     methodWarning = if (loaded.methods != null) c.paymentRoles().unbookableWarning(loaded.methods) else it.methodWarning,
+                    keyWarning = c.keys.daysLeft()?.takeIf { d -> d <= KeyRotation.WARN_DAYS }?.let { d ->
+                        "This till's Odoo key expires in ${d.coerceAtLeast(0)} day(s) and could not renew itself. A supervisor should enroll it again in SETUP."
+                    },
                 ).regrid()
             }
             _sell.value.methodWarning?.let { PosLog.w("PAYMENT_METHOD_UNBOOKABLE", "roles" to c.paymentRoles().ids) }

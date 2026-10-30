@@ -12,6 +12,7 @@ import com.bohemian.odoo.pos.data.RoomVoidJournal
 import com.bohemian.odoo.pos.odoo.CatalogService
 import com.bohemian.odoo.pos.odoo.CustomerService
 import com.bohemian.odoo.pos.odoo.OdooContractCheck
+import com.bohemian.odoo.pos.odoo.KeyRotation
 import com.bohemian.odoo.pos.odoo.OdooJson2Client
 import kotlin.random.Random
 import kotlinx.coroutines.withContext
@@ -60,6 +61,20 @@ class AppContainer(context: Context) {
 
     val odoo = OdooJson2Client(BuildConfig.ODOO_BASE_URL, BuildConfig.ODOO_DB, apiKey = { settings.odooApiKey },
         userAgent = { "ZenZebraTill/${BuildConfig.VERSION_NAME} (${settings.posConfigName.ifBlank { "no POS" }}; $terminalSerial)" })
+
+    /** F4: this till's own Odoo key: enrolled once at Setup, renewed before it expires. */
+    val keys = KeyRotation(
+        clientFor = { key -> OdooJson2Client(BuildConfig.ODOO_BASE_URL, BuildConfig.ODOO_DB, apiKey = { key },
+            userAgent = { "ZenZebraTill/${BuildConfig.VERSION_NAME} (${settings.posConfigName.ifBlank { "no POS" }}; $terminalSerial)" }) },
+        store = object : KeyRotation.KeyStore {
+            override var key: String? by settings::odooApiKey
+            override var expiresOn: String? by settings::apiKeyExpiresOn
+            override var pending: String? by settings::pendingApiKey
+        },
+    )
+
+    /** The key's name in Odoo (Preferences > Account Security lists it), so a lost till's key is easy to find. */
+    fun keyName(): String = "E700 ${settings.posConfigName.ifBlank { "till" }} $terminalSerial"
 
     /** F2: Odoo's fields checked when its version changes; payments stop if one the till needs is gone. */
     val contract = OdooContractCheck(odoo)
@@ -156,6 +171,14 @@ class AppContainer(context: Context) {
                 delay(30_000)
             }
         }
+        // F4: renew this till's key before it expires (once a day; nothing for a key entered by hand).
+        appScope.launch {
+            delay(5 * 60_000 + Random.nextLong(10 * 60_000))
+            while (isActive) {
+                if (settings.isConfigured) runCatching { withContext(OdooLane.BACKGROUND) { keys.rotateIfDue(keyName()) } }
+                delay(24 * 60 * 60_000L)
+            }
+        }
         // F5: this till's row in Odoo's till list, every 15 minutes (first within 1–2 minutes of start).
         appScope.launch {
             delay(60_000 + Random.nextLong(60_000))
@@ -179,7 +202,7 @@ class AppContainer(context: Context) {
             outbox = db.outbox().count(), rejected = refused?.count ?: 0,
             unresolved = db.attempts().observeUnresolved().first().size, notSentAtOnce = orderSync.notSentAtOnceToday,
             callsPerMinute = rate.perMinute, throttledToday = rate.throttledToday,
-            lastError = refused?.lastError ?: problems.firstOrNull()?.lastError, keyExpires = null,
+            lastError = refused?.lastError ?: problems.firstOrNull()?.lastError, keyExpires = settings.apiKeyExpiresOn,
         )
     }
 }
