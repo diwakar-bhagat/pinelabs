@@ -49,6 +49,11 @@ import com.bohemian.odoo.pos.odoo.FiscalPosition
 import com.bohemian.odoo.pos.odoo.OdooException
 import com.bohemian.odoo.pos.odoo.OdooLane
 import com.bohemian.odoo.pos.odoo.PaidSale
+import com.bohemian.odoo.pos.odoo.ParkedBill
+import com.bohemian.odoo.pos.odoo.ParkedLine
+import com.bohemian.odoo.pos.data.ParkedBillEntity
+import kotlinx.serialization.json.Json
+import kotlinx.serialization.json.jsonObject
 import com.bohemian.odoo.pos.odoo.PaymentLineData
 import com.bohemian.odoo.pos.odoo.PaymentMethod
 import com.bohemian.odoo.pos.odoo.PaymentRoles
@@ -88,6 +93,11 @@ import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.flow.update
+import kotlinx.coroutines.flow.distinctUntilChanged
+import kotlinx.coroutines.flow.debounce
+import kotlinx.coroutines.flow.first
+import kotlinx.coroutines.flow.map
+import kotlinx.coroutines.FlowPreview
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withTimeoutOrNull
 import java.text.SimpleDateFormat
@@ -202,6 +212,8 @@ sealed interface PayUi {
         /** Null until the bill has been tried; [printing] while it is being read from Odoo and printed. */
         val printed: Boolean? = null,
         val printing: Boolean = false,
+        /** The order this result is for, when it may not be the bill on screen (resolved from the bar). */
+        val orderUuid: String? = null,
     ) : PayUi {
         val isPaid: Boolean get() = paidByCash || splitSummary != null || outcome is PaymentOutcome.Paid
     }
@@ -288,6 +300,8 @@ data class SellState(
     val offersUnavailable: Boolean = false,
     /** A tender is set to a method the till must not book on (`PaymentRoles.unbookableWarning`); sales go on. */
     val methodWarning: String? = null,
+    /** "Bill 3": this bill's number in the till's queue of open bills (the chip label without a customer). */
+    val billNumber: Int = 1,
 ) {
     // Derived values are computed once per state, not on every read while the screen is drawn.
 
@@ -399,6 +413,8 @@ class PosViewModel(private val c: AppContainer) : ViewModel() {
         if (_configured.value) loadCatalog()
         refreshPartlyPaid()
         startLiveSync()
+        restoreOpenBills()
+        keepOpenBillSaved()
     }
 
     // ------------------------------------------------------------------ setup
@@ -1031,6 +1047,10 @@ class PosViewModel(private val c: AppContainer) : ViewModel() {
                         }
                         PosLog.i("COUPON_ACCEPTED", "program" to program.id, "card" to answer.coupon.cardId)
                         if (_sell.value.offers.scanned.any { it.code == code }) return@launchSafe // already on the bill
+                        if (_sell.value.orderUuid != s.orderUuid) return@launchSafe // another bill is on screen now
+                        _parked.value.firstOrNull { b -> b.offers.scanned.any { it.code == code } }?.let { other ->
+                            return@launchSafe _sell.update { it.copy(error = "That coupon is already on ${other.label}.") }
+                        }
                         _sell.update { it.copy(offers = it.offers.copy(scanned = it.offers.scanned + answer.coupon), totals = null, error = null,
                             notice = "Coupon accepted: ${program.name}. Pick its reward under Reward if it does not apply by itself.") }
                         reprice()
@@ -1124,6 +1144,9 @@ class PosViewModel(private val c: AppContainer) : ViewModel() {
     /** Sync the outbox like the web POS does, then load Odoo's closing figures. */
     fun startClose() = launchSafe {
         if (_closing.value != null) return@launchSafe // dialog already open
+        if (_parked.value.isNotEmpty()) {
+            return@launchSafe _sell.update { it.copy(error = "${_parked.value.size} open bill(s) waiting on this till: pay or remove them before closing.") }
+        }
         val sessionId = _sell.value.config?.currentSessionId ?: return@launchSafe
         _closing.value = ClosingUi(busy = true)
         runCatching { c.orderSync.flushAll() }.onFailure { PosLog.w("CLOSE_FLUSH_FAILED", "err" to it.message) }
@@ -1515,15 +1538,23 @@ class PosViewModel(private val c: AppContainer) : ViewModel() {
             zzRedemption = if (changed) null else it.zzRedemption,
             totals = if (changed) null else it.totals,
         ) }
-        // Re-resolve fiscal position for the picked customer's state.
+        resolveCustomer(customer)
+    }
+
+    /**
+     * The customer's fiscal position (from their state) and ZZ Cash, read again. Applied only while the
+     * same bill and customer are on screen. Returns the ZZ Cash read.
+     */
+    private fun resolveCustomer(customer: Customer): Job {
+        val uuid = _sell.value.orderUuid
         launchSafe {
             val fposId = c.fiscalPositions.resolve(_sell.value.config ?: return@launchSafe, customer)
-            // Another customer may have been picked meanwhile: apply only to the one still attached.
-            if (_sell.value.customer?.id != customer.id) return@launchSafe
+            // Another customer or bill may be on screen meanwhile: apply only to the one still attached.
+            if (_sell.value.customer?.id != customer.id || _sell.value.orderUuid != uuid) return@launchSafe
             _sell.update { it.copy(fiscalPosition = fiscalPositionsById[fposId]) }
             reprice()
         }
-        refreshZzCash(customer)
+        return refreshZzCash(customer)
     }
 
     /**
@@ -1583,6 +1614,9 @@ class PosViewModel(private val c: AppContainer) : ViewModel() {
         }
         if (s.lines.isEmpty() || s.lines.any { !it.isPriced }) {
             _sell.update { it.copy(error = "Wait for Odoo prices before applying ZZ Cash") }; return
+        }
+        _parked.value.firstOrNull { it.zzReward != null && it.customer?.id == s.customer?.id }?.let { other ->
+            _sell.update { it.copy(error = "This customer's ZZ Cash reward is already on ${other.label}.") }; return
         }
         if (reward.points > ZzCashRules.available(balance, s.zzEarned)) {
             _sell.update { it.copy(error = "Not enough ZZ Cash for ${reward.description}") }; return
@@ -1677,6 +1711,10 @@ class PosViewModel(private val c: AppContainer) : ViewModel() {
 
     private fun editCart(f: (List<CartLine>) -> List<CartLine>) {
         if (_sell.value.pay is PayUi.Working || lockedByPartPayment()) return // cart frozen while paying
+        // A payment still to check would send the bill as it was charged (I4): the screen must match it.
+        if (unresolved.value.any { it.orderUuid == _sell.value.orderUuid }) {
+            _sell.update { it.copy(error = "This bill has a payment to check (yellow bar). Resolve it before changing the bill.") }; return
+        }
         _sell.update { it.copy(lines = f(it.lines), totals = null) }
         reprice()
     }
@@ -1815,6 +1853,9 @@ class PosViewModel(private val c: AppContainer) : ViewModel() {
         val snap = prepareSnapshot() ?: return@launchPay
         val total = snap.totals().totalIncl
         val change = tendered?.takeIf { it >= total }?.minus(total)
+        // The cash is in the drawer: the bill leaves the queue before it is sent, since a cash sale
+        // leaves no journal row that would stop a restart bringing it back to be sold again.
+        billPaid(snap.orderUuid)
         _sell.update { it.copy(pay = PayUi.Working("CASH", "Saving order…")) }
         val sale = c.finalizer.finalize(snap, PaymentLineData(c.settings.cashPaymentMethodId, total, null, null, null))
         countOfferUse(sale)
@@ -1872,9 +1913,22 @@ class PosViewModel(private val c: AppContainer) : ViewModel() {
     fun resumePartlyPaid(orderUuid: String) = launchSafe {
         if (_sell.value.pay is PayUi.Working) return@launchSafe
         val snap = c.finalizer.load(orderUuid) ?: return@launchSafe
+        // The bill on screen is not lost: it waits in the queue (when it has no payment of its own).
+        val leaving = _sell.value.asParked()
+        if (leaving.orderUuid != orderUuid && !leaving.isEmpty) {
+            if (hasPayment(leaving.orderUuid)) {
+                return@launchSafe _sell.update { it.copy(error = "Resolve the payment of the bill on screen first (yellow bar).") }
+            }
+            _parked.update { it + leaving }
+            c.db.parkedBills().upsert(ParkedBillEntity(leaving.orderUuid, leaving.toJson(), leaving.createdAt, 0))
+        }
+        val customer = snap.customer()
         _sell.update {
             it.copy(
-                orderUuid = snap.orderUuid, lines = snap.cartLines(), totals = snap.totals(), customer = snap.customer(),
+                billNumber = nextBillNumber(),
+                phone = customer?.phone?.filter { ch -> ch.isDigit() || ch == '+' } ?: "", customerName = customer?.name ?: "",
+                zzCash = null, zzLookup = ZzLookup.NONE, zzRewards = emptyList(), customerMatches = emptyList(), customerNotFound = false,
+                orderUuid = snap.orderUuid, lines = snap.cartLines(), totals = snap.totals(), customer = customer,
                 zzRedemption = snap.zzRedemption(), fiscalPosition = fiscalPositionsById[snap.fiscalPositionId],
                 offerLines = snap.appliedOffers()?.lines.orEmpty(), offerCoupons = snap.appliedOffers()?.coupons.orEmpty(),
                 offerClaimable = emptyList(),
@@ -1981,6 +2035,7 @@ class PosViewModel(private val c: AppContainer) : ViewModel() {
         val snap = c.finalizer.load(ui.orderUuid)
             ?: return@launchSafe _split.update { it?.copy(busy = false, message = "This bill was not saved. Close and press SPLIT again.") }
         _sell.update { it.copy(pay = PayUi.Working("SPLIT", "Saving order…")) }
+        billPaid(snap.orderUuid) // covered: its cash part leaves no journal row (see payCash)
         val sale = try { c.finalizer.finalizeSplit(snap) } catch (e: CancellationException) { throw e } catch (e: Exception) {
             PosLog.e("SPLIT_FINALIZE_FAILED", e, "order" to ui.orderUuid)
             _split.update { it?.copy(busy = false, message = "Could not save the order: ${friendly(e)}") }
@@ -2070,6 +2125,14 @@ class PosViewModel(private val c: AppContainer) : ViewModel() {
         }
         val earned = if (customer != null) LoyaltyPoints.earned(rules.orEmpty(), s.lines) else Paise.ZERO
         s.zzRedemption?.let { r ->
+            // A paid bill's points are booked in Odoo after it syncs; until then Odoo's balance is too high.
+            val pendingOnCard = c.db.loyalty().due(Long.MAX_VALUE).any { row ->
+                runCatching { Json.parseToJsonElement(row.couponDataJson).jsonObject.containsKey(r.cardId.toString()) }.getOrDefault(false)
+            }
+            if (pendingOnCard) {
+                _sell.update { it.copy(error = "This card's last ZZ Cash is still being booked in Odoo. Try the reward again in a minute, or pay without it.") }
+                return null
+            }
             // Odoo's own pre-payment check (validate_coupon_programs): the card, with what this
             // order earns, still covers the reward.
             val check = runCatching { c.zzCash.validateRedemption(r.cardId, earned, r.reward.points) }
@@ -2134,12 +2197,14 @@ class PosViewModel(private val c: AppContainer) : ViewModel() {
             else -> null
         }
         if (paidAttempt != null) {
+            billPaid(paidAttempt.orderUuid)
             val sale = c.finalizer.finalizeTerminal(paidAttempt)
             countOfferUse(sale)
-            _sell.update { it.copy(pay = PayUi.Done(PaymentOutcome.Paid(paidAttempt), printed = if (sale == null) false else null)) }
+            _sell.update { it.copy(pay = PayUi.Done(PaymentOutcome.Paid(paidAttempt), printed = if (sale == null) false else null,
+                orderUuid = paidAttempt.orderUuid)) }
             sale?.let { printInBackground(it, paidAttempt.mode.label(), listOf(paidAttempt)) }
         } else {
-            _sell.update { it.copy(pay = PayUi.Done(outcome)) }
+            _sell.update { it.copy(pay = PayUi.Done(outcome, orderUuid = outcome.attempt?.orderUuid)) }
         }
         PosLog.i("PAY_UI_OUTCOME", "outcome" to outcome::class.simpleName)
     }
@@ -2232,27 +2297,182 @@ class PosViewModel(private val c: AppContainer) : ViewModel() {
     /** account.fiscal.position records this till may use, keyed by id. */
     private var fiscalPositionsById: Map<Int, FiscalPosition> = emptyMap()
 
+    /** After a paid bill: the oldest waiting bill comes up, else an empty one. */
     fun newSale() {
         if (lockedByPartPayment()) return
-        phoneSearchJob?.cancel()
         _split.value = null
-        _sell.update {
-            it.copy(
-                orderUuid = UUID.randomUUID().toString(), lines = emptyList(), totals = null, partPaid = Paise.ZERO,
-                phone = "", customerName = "", customer = null, customerMatches = emptyList(), customerHasMore = false, zzCash = null,
-                customerNotFound = false, customerNote = null, zzLookup = ZzLookup.NONE,
-                zzRewards = emptyList(), zzRedemption = null, selectedLine = null, keypad = "",
-                fiscalPosition = fiscalPositionsById[it.config?.defaultFiscalPositionId],
-                pay = PayUi.Idle, error = null, notice = null,
-                offerLines = emptyList(), offerCoupons = emptyList(), offerClaimable = emptyList(), offers = OfferState(), offerPrograms = emptyList(),
-            )
-        }
+        billPaid(_sell.value.orderUuid)
+        val next = _parked.value.firstOrNull()
+        if (next != null) _parked.update { it - next }
+        startBill(next)
     }
 
     fun dismissPayResult() {
         // After a paid sale the cart must reset; otherwise (declined/not sent) keep cart for retry.
+        // A result resolved from the bar for another order never clears the bill on screen.
         val done = _sell.value.pay as? PayUi.Done
-        if (done?.isPaid == true) newSale() else _sell.update { it.copy(pay = PayUi.Idle) }
+        val forThisBill = done?.orderUuid == null || done.orderUuid == _sell.value.orderUuid
+        if (done?.isPaid == true && forThisBill) newSale() else _sell.update { it.copy(pay = PayUi.Idle) }
+    }
+
+    // ------------------------------------------------------------------ open bills (the queue)
+
+    /**
+     * Bills waiting while another is on screen, oldest first (the web POS's "+" and order tabs). The
+     * bill on screen is [_sell]. Every open bill is kept on the till (`parked_bill`) so a restart brings
+     * the queue back; Odoo sees a bill only once it is paid.
+     */
+    private val _parked = MutableStateFlow<List<ParkedBill>>(emptyList())
+    val parked: StateFlow<List<ParkedBill>> = _parked.asStateFlow()
+
+    /** Bills paid on this till since it started: the open-bill save never writes them again. */
+    private val paidBills = mutableSetOf<String>()
+
+    /**
+     * The moment a bill is paid it leaves the queue for good: a cash bill leaves no journal row that
+     * would keep a restart from bringing it back as an open bill to sell again.
+     */
+    private fun billPaid(orderUuid: String) {
+        paidBills += orderUuid
+        _parked.update { list -> list.filterNot { it.orderUuid == orderUuid } }
+        launchSafe { c.db.parkedBills().delete(orderUuid) }
+    }
+
+    /** When the bill on screen was first opened (kept with it while it waits). */
+    private var activeCreatedAt = System.currentTimeMillis()
+
+    /** A park or switch is running: a second tap waits for it. */
+    private var switching = false
+
+    private fun SellState.asParked(): ParkedBill = ParkedBill(orderUuid, billNumber, activeCreatedAt,
+        lines.map { ParkedLine(it.uuid, it.product.id, it.qty, it.note) }, customer, offers, zzRedemption?.reward)
+
+    /** The next free number for a bill without a customer; back to 1 when no other bill is open. */
+    private fun nextBillNumber(): Int = (_parked.value.map { it.number }.maxOrNull() ?: 0) + 1
+
+    /** Why the bill on screen cannot be left now, or null. Checked before anything waits. */
+    private fun switchRefusal(): String? {
+        val s = _sell.value
+        return when {
+            switching || s.pay != PayUi.Idle || payStarting || _split.value != null -> "Finish the payment on screen first."
+            s.partPaid.isPositive -> "This bill is part-paid: finish it first (FINISH on the red bar)."
+            s.customerBusy || checkingCode -> "Wait for Odoo's answer first."
+            else -> null
+        }
+    }
+
+    /** A bill with a paid or unconfirmed payment stays on screen until it is finished or resolved (I4, I5). */
+    private suspend fun hasPayment(orderUuid: String): Boolean =
+        c.journal.forOrder(orderUuid).any { it.state.isPaid || it.state.blocksNewCharge }
+
+    /** "+": the bill on screen waits in the queue and an empty one opens. */
+    fun newBill() = switchTo(null)
+
+    /** A chip: the bill on screen waits and that one opens. */
+    fun openBill(uuid: String) {
+        if (uuid == _sell.value.orderUuid) return
+        switchTo(_parked.value.firstOrNull { it.orderUuid == uuid } ?: return)
+    }
+
+    private fun switchTo(target: ParkedBill?) {
+        switchRefusal()?.let { why -> _sell.update { it.copy(error = why) }; return }
+        val leaving = _sell.value.asParked()
+        if (target == null && leaving.isEmpty) return // an empty bill is already on screen
+        if (target == null && _parked.value.size + 1 >= MAX_OPEN_BILLS) {
+            _sell.update { it.copy(error = "At most $MAX_OPEN_BILLS open bills on a till. Pay or remove one first.") }; return
+        }
+        switching = true
+        launchSafe {
+            try {
+                if (hasPayment(leaving.orderUuid)) {
+                    return@launchSafe _sell.update { it.copy(error = "This bill has a payment to check (yellow bar). Resolve it before opening another bill.") }
+                }
+                if (leaving.isEmpty) c.db.parkedBills().delete(leaving.orderUuid) else {
+                    _parked.update { it + leaving }
+                    c.db.parkedBills().upsert(ParkedBillEntity(leaving.orderUuid, leaving.toJson(), leaving.createdAt, 0))
+                }
+                if (target != null) _parked.update { list -> list.filterNot { it.orderUuid == target.orderUuid } }
+                PosLog.i("BILL_SWITCH", "parked" to _parked.value.size, "open" to (target?.orderUuid ?: "new"))
+                startBill(target)
+            } finally {
+                switching = false
+            }
+        }
+    }
+
+    /** Long-press on a waiting bill's chip → Remove: it is dropped from the till (nothing was charged). */
+    fun removeBill(uuid: String) {
+        if (_parked.value.none { it.orderUuid == uuid }) return
+        _parked.update { list -> list.filterNot { it.orderUuid == uuid } }
+        launchSafe { c.db.parkedBills().delete(uuid) }
+        PosLog.i("BILL_REMOVED", "parked" to _parked.value.size)
+    }
+
+    /**
+     * Put [bill] on screen (null: an empty bill). Its lines come back from today's catalogue and are
+     * priced again by Odoo; the customer's fiscal position and ZZ Cash are read again; a chosen ZZ Cash
+     * reward is applied again once the card and prices are in (I2: nothing old is charged).
+     */
+    private fun startBill(bill: ParkedBill?) {
+        phoneSearchJob?.cancel()
+        repriceJob?.cancel()
+        priceGeneration++
+        activeCreatedAt = bill?.createdAt ?: System.currentTimeMillis()
+        val restored = bill?.restore(_sell.value.products.associateBy { it.id }) { pricelistHold.holds(it) }
+        val number = bill?.number ?: nextBillNumber()
+        _sell.update {
+            it.copy(
+                orderUuid = bill?.orderUuid ?: UUID.randomUUID().toString(), billNumber = number,
+                lines = restored?.lines.orEmpty(), totals = null, partPaid = Paise.ZERO,
+                phone = bill?.customer?.phone?.filter { ch -> ch.isDigit() || ch == '+' } ?: "", customerName = bill?.customer?.name ?: "",
+                customer = bill?.customer, customerMatches = emptyList(), customerHasMore = false, zzCash = null,
+                customerNotFound = false, customerNote = null, customerNoteOk = false, customerBusy = false, zzLookup = ZzLookup.NONE,
+                zzRewards = emptyList(), zzRedemption = null, selectedLine = null, keypad = "",
+                fiscalPosition = fiscalPositionsById[it.config?.defaultFiscalPositionId],
+                pay = PayUi.Idle, error = null,
+                notice = restored?.dropped?.takeIf { d -> d > 0 }?.let { d -> "$d item(s) on this bill are no longer sold here and were taken off." },
+                offerLines = emptyList(), offerCoupons = emptyList(), offerClaimable = emptyList(), offers = bill?.offers ?: OfferState(),
+                offerPrograms = emptyList(),
+            )
+        }
+        val customer = bill?.customer
+        if (customer != null) {
+            val zzJob = resolveCustomer(customer)
+            bill.zzReward?.let { reapplyZzReward(bill.orderUuid, customer, it, zzJob) }
+        }
+        if (_sell.value.lines.isNotEmpty()) reprice()
+    }
+
+    /** After the card's balance and Odoo's prices are in, the ZZ Cash reward a waiting bill had goes back on. */
+    private fun reapplyZzReward(uuid: String, customer: Customer, reward: ZzCashReward, zzJob: Job) = launchSafe {
+        zzJob.join()
+        val ready = withTimeoutOrNull(20_000) {
+            _sell.first { it.orderUuid != uuid || (it.totals != null && !it.pricing && it.lines.all { l -> l.isPriced }) }
+        }
+        val s = _sell.value
+        if (ready == null || s.orderUuid != uuid || s.customer?.id != customer.id || s.zzRedemption != null) return@launchSafe
+        applyZzCash(reward)
+    }
+
+    /** The queue as it was before a restart; a bill whose payment started is left to the Reconciler. */
+    private fun restoreOpenBills() = launchSafe {
+        val rows = c.db.parkedBills().all()
+        val bills = rows.mapNotNull { r -> ParkedBill.fromJson(r.billJson) ?: null.also { c.db.parkedBills().delete(r.orderUuid) } }
+        val kept = bills.filter { b -> !hasPayment(b.orderUuid).also { paid -> if (paid) c.db.parkedBills().delete(b.orderUuid) } }
+        if (kept.isEmpty()) return@launchSafe
+        _parked.update { now -> (kept + now).distinctBy { it.orderUuid }.filterNot { it.orderUuid == _sell.value.orderUuid } }
+        // The bill on screen started before the queue was read: give it a number of its own.
+        _sell.update { s -> if (_parked.value.any { it.number == s.billNumber }) s.copy(billNumber = nextBillNumber()) else s }
+        PosLog.i("BILLS_RESTORED", "count" to kept.size)
+    }
+
+    /** The bill on screen is kept on the till as it changes (a restart brings it back as a waiting bill). */
+    @OptIn(FlowPreview::class)
+    private fun keepOpenBillSaved() = launchSafe {
+        _sell.map { it.asParked() }.distinctUntilChanged().debounce(400).collect { b ->
+            if (b.isEmpty || b.orderUuid in paidBills) c.db.parkedBills().delete(b.orderUuid)
+            else c.db.parkedBills().upsert(ParkedBillEntity(b.orderUuid, b.toJson(), b.createdAt, System.currentTimeMillis()))
+        }
     }
 
     private fun friendly(e: Exception): String = when (e) {
@@ -2267,6 +2487,9 @@ class PosViewModel(private val c: AppContainer) : ViewModel() {
     companion object {
         /** Tallest keypad key (dp), as before the keypad became resizable. */
         const val MAX_KEY_DP = 48
+
+        /** Open bills on one till, the one on screen included. */
+        const val MAX_OPEN_BILLS = 10
 
         /** Search waits this long after the last key before filtering the grid. */
         private const val SEARCH_DEBOUNCE_MS = 120L

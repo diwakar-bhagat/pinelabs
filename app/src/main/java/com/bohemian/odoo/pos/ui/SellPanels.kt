@@ -5,7 +5,9 @@ import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
+import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.combinedClickable
 import androidx.compose.foundation.gestures.detectVerticalDragGestures
 import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.*
@@ -39,11 +41,13 @@ import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.bohemian.odoo.pos.R
 import com.bohemian.odoo.pos.core.Paise
 import com.bohemian.odoo.pos.odoo.CartLine
 import com.bohemian.odoo.pos.odoo.LineNote
 import com.bohemian.odoo.pos.odoo.MenuTree
+import com.bohemian.odoo.pos.odoo.ParkedBill
 import com.bohemian.odoo.pos.odoo.Product
 import com.bohemian.odoo.pos.odoo.ZzCashRules
 import com.bohemian.odoo.pos.pine.PayMode
@@ -155,6 +159,50 @@ private fun ProductTile(p: Product, qty: Int, color: Int, images: ProductImages,
 
 // ============================================================================ order
 
+/**
+ * The queue of open bills (the web POS's "+" and order tabs): the bill on screen first, then the ones
+ * waiting, oldest first. Tap one to open it, "+" for a new bill, long-press a waiting one to remove it.
+ */
+@Composable
+private fun BillChips(s: SellState, vm: PosViewModel) {
+    val parked by vm.parked.collectAsStateWithLifecycle()
+    var removing by remember { mutableStateOf<ParkedBill?>(null) }
+    Row(Modifier.fillMaxWidth().horizontalScroll(rememberScrollState()).padding(horizontal = 8.dp, vertical = 6.dp),
+        horizontalArrangement = Arrangement.spacedBy(6.dp), verticalAlignment = Alignment.CenterVertically) {
+        BillChip("${ParkedBill.labelFor(s.customer, s.billNumber)} · ${s.lines.sumOf { it.qty }}", active = true, onClick = {}, onLongClick = null)
+        parked.forEach { b ->
+            BillChip("${b.label} · ${b.itemCount}", active = false, onClick = onceIn { vm.openBill(b.orderUuid) }, onLongClick = { removing = b })
+        }
+        OutlinedButton(onceIn { vm.newBill() }, contentPadding = PaddingValues(horizontal = 14.dp), shape = RoundedCornerShape(6.dp)) {
+            Text("+", fontWeight = FontWeight.Black, fontSize = 18.sp)
+        }
+        if (parked.isNotEmpty()) Text("${parked.size} waiting", fontSize = 12.sp, color = Zz.Muted)
+    }
+    removing?.let { b ->
+        AlertDialog(
+            onDismissRequest = { removing = null },
+            title = { Text("Remove ${b.label}?") },
+            text = { Text("${b.itemCount} item(s). Nothing was charged; the bill is dropped from this till.") },
+            confirmButton = { TextButton({ vm.removeBill(b.orderUuid); removing = null }) { Text("Remove bill") } },
+            dismissButton = { TextButton({ removing = null }) { Text("Keep") } },
+        )
+    }
+}
+
+@OptIn(ExperimentalFoundationApi::class)
+@Composable
+private fun BillChip(label: String, active: Boolean, onClick: () -> Unit, onLongClick: (() -> Unit)?) {
+    Surface(
+        shape = RoundedCornerShape(6.dp),
+        color = if (active) Zz.Black else Zz.Cream,
+        border = BorderStroke(1.dp, if (active) Zz.Black else Zz.Line),
+        modifier = Modifier.combinedClickable(onClick = onClick, onLongClick = onLongClick),
+    ) {
+        Text(label, Modifier.padding(horizontal = 12.dp, vertical = 8.dp), color = if (active) Zz.Cream else Zz.Black,
+            fontWeight = FontWeight.Bold, fontSize = 13.sp, maxLines = 1)
+    }
+}
+
 @Composable
 fun OrderPanel(s: SellState, vm: PosViewModel, modifier: Modifier) {
     var noteFor by remember { mutableStateOf<String?>(null) }
@@ -173,6 +221,8 @@ fun OrderPanel(s: SellState, vm: PosViewModel, modifier: Modifier) {
     }
 
     Column(modifier.background(Color.White)) {
+        BillChips(s, vm)
+        HorizontalDivider(color = Zz.Line)
         if (s.lines.isEmpty()) {
             Box(Modifier.weight(1f).fillMaxWidth(), contentAlignment = Alignment.Center) {
                 Text("Tap a product to start the order", color = Zz.Muted)

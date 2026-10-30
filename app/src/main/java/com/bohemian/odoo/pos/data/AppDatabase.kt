@@ -175,6 +175,31 @@ interface OutboxDao {
     suspend fun markFailed(uuid: String, error: String, next: Long)
 }
 
+/**
+ * An open bill on this till (the queue of bills, 0.6.0): what the cashier put on it, as JSON
+ * (`odoo/ParkedBill`). Never money: no price, no payment. Odoo sees the bill only once it is paid.
+ */
+@Entity(tableName = "parked_bill")
+data class ParkedBillEntity(
+    @PrimaryKey val orderUuid: String,
+    val billJson: String,
+    val createdAt: Long,
+    /** When it was last the bill on screen; the newest is opened after a restart. */
+    val activeAt: Long,
+)
+
+@Dao
+interface ParkedBillDao {
+    @Insert(onConflict = OnConflictStrategy.REPLACE)
+    suspend fun upsert(e: ParkedBillEntity)
+
+    @Query("SELECT * FROM parked_bill ORDER BY createdAt")
+    suspend fun all(): List<ParkedBillEntity>
+
+    @Query("DELETE FROM parked_bill WHERE orderUuid = :uuid")
+    suspend fun delete(uuid: String)
+}
+
 @Dao
 interface VoidAttemptDao {
     @Insert(onConflict = OnConflictStrategy.ABORT)
@@ -204,8 +229,8 @@ interface VoidAttemptDao {
 
 @Database(
     entities = [PaymentAttemptEntity::class, OutboxEntity::class, SaleSnapshotEntity::class, VoidAttemptEntity::class,
-        LoyaltyConfirmEntity::class],
-    version = 3, exportSchema = false,
+        LoyaltyConfirmEntity::class, ParkedBillEntity::class],
+    version = 4, exportSchema = false,
 )
 abstract class AppDatabase : RoomDatabase() {
     abstract fun attempts(): PaymentAttemptDao
@@ -213,6 +238,7 @@ abstract class AppDatabase : RoomDatabase() {
     abstract fun snapshots(): SaleSnapshotDao
     abstract fun voids(): VoidAttemptDao
     abstract fun loyalty(): LoyaltyConfirmDao
+    abstract fun parkedBills(): ParkedBillDao
 
     companion object {
         /** v2 (Phase 4b): void_attempt table. SQL matches Room's generated createAllTables. */
@@ -229,6 +255,17 @@ abstract class AppDatabase : RoomDatabase() {
             }
         }
 
+        /** v4 (0.6.0): parked_bill table, the queue of open bills. SQL matches Room's createAllTables. */
+        val MIGRATION_3_4 = object : Migration(3, 4) {
+            override fun migrate(db: SupportSQLiteDatabase) {
+                db.execSQL(PARKED_BILL_DDL)
+            }
+        }
+
+        internal const val PARKED_BILL_DDL = "CREATE TABLE IF NOT EXISTS `parked_bill` (" +
+            "`orderUuid` TEXT NOT NULL, `billJson` TEXT NOT NULL, `createdAt` INTEGER NOT NULL, " +
+            "`activeAt` INTEGER NOT NULL, PRIMARY KEY(`orderUuid`))"
+
         internal const val LOYALTY_CONFIRM_DDL = "CREATE TABLE IF NOT EXISTS `loyalty_confirm` (" +
             "`orderUuid` TEXT NOT NULL, `couponDataJson` TEXT NOT NULL, `attempts` INTEGER NOT NULL, " +
             "`lastError` TEXT, `createdAt` INTEGER NOT NULL, `nextAttemptAt` INTEGER NOT NULL, PRIMARY KEY(`orderUuid`))"
@@ -241,7 +278,7 @@ abstract class AppDatabase : RoomDatabase() {
         fun create(context: Context): AppDatabase =
             Room.databaseBuilder(context, AppDatabase::class.java, "bohemian-pos.db")
                 // Payment data must never be silently dropped: no destructive migrations.
-                .addMigrations(MIGRATION_1_2, MIGRATION_2_3)
+                .addMigrations(MIGRATION_1_2, MIGRATION_2_3, MIGRATION_3_4)
                 .build()
     }
 }
