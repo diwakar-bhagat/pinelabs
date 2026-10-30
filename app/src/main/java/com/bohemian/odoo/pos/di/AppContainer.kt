@@ -13,6 +13,12 @@ import com.bohemian.odoo.pos.odoo.CatalogService
 import com.bohemian.odoo.pos.odoo.CustomerService
 import com.bohemian.odoo.pos.odoo.OdooContractCheck
 import com.bohemian.odoo.pos.odoo.OdooJson2Client
+import kotlin.random.Random
+import kotlinx.coroutines.withContext
+import kotlinx.coroutines.flow.first
+import com.bohemian.odoo.pos.odoo.OdooLane
+import com.bohemian.odoo.pos.odoo.SalesService
+import com.bohemian.odoo.pos.odoo.TillStatus
 import com.bohemian.odoo.pos.odoo.OrderSyncService
 import com.bohemian.odoo.pos.odoo.PendingWork
 import com.bohemian.odoo.pos.odoo.RefundService
@@ -150,5 +156,30 @@ class AppContainer(context: Context) {
                 delay(30_000)
             }
         }
+        // F5: this till's row in Odoo's till list, every 15 minutes (first within 1–2 minutes of start).
+        appScope.launch {
+            delay(60_000 + Random.nextLong(60_000))
+            while (isActive) {
+                if (settings.isConfigured) runCatching {
+                    withContext(OdooLane.BACKGROUND) { tillStatus.send(statusReport(), SalesService.utc(System.currentTimeMillis())) }
+                }
+                delay(TillStatus.EVERY_MS)
+            }
+        }
+    }
+
+    val tillStatus = TillStatus(odoo)
+
+    private suspend fun statusReport(): TillStatus.Report {
+        val problems = db.outbox().observeProblems().first()
+        val refused = problems.firstOrNull { it.kind == "REJECTED" }
+        val rate = odoo.stats.snapshot()
+        return TillStatus.Report(
+            serial = terminalSerial, store = settings.posConfigName, version = BuildConfig.VERSION_NAME,
+            outbox = db.outbox().count(), rejected = refused?.count ?: 0,
+            unresolved = db.attempts().observeUnresolved().first().size, notSentAtOnce = orderSync.notSentAtOnceToday,
+            callsPerMinute = rate.perMinute, throttledToday = rate.throttledToday,
+            lastError = refused?.lastError ?: problems.firstOrNull()?.lastError, keyExpires = null,
+        )
     }
 }

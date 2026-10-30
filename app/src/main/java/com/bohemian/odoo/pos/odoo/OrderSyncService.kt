@@ -85,7 +85,18 @@ class OrderSyncService(
                 .upsert(LoyaltyConfirmEntity(uuid, couponData.toString(), 0, null, clock(), 0))
         }
         outbox.upsert(OutboxEntity(uuid, payload.toString(), amountPaise, 0, null, clock(), 0))
-        return withContext(OdooLane.SALE) { trySend(uuid, payload) }
+        return withContext(OdooLane.SALE) { trySend(uuid, payload) }.also { sent -> if (!sent) countNotSentAtOnce() }
+    }
+
+    /** Sales today whose first send did not reach Odoo (out of reach, busy or refused), for the till's status row. */
+    @Volatile var notSentAtOnceToday = 0
+        private set
+    private var countedDay = -1
+
+    @Synchronized private fun countNotSentAtOnce() {
+        val day = java.util.Calendar.getInstance().apply { timeInMillis = clock() }.get(java.util.Calendar.DAY_OF_YEAR)
+        if (day != countedDay) { countedDay = day; notSentAtOnceToday = 0 }
+        notSentAtOnceToday++
     }
 
     /**
