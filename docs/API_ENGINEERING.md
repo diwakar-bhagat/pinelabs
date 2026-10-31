@@ -267,6 +267,66 @@ what changed (`pos_last_server_date`). Since 0.8.0 the till does the same whenev
   refusal (anything but a network error, a rejected key or HTTP 429) they serve for an hour.
 - **Idle budget per till:** about 0.6 calls a minute (0.7.x: ~1.6; 0.5.x: 13), about 0.9 MB an hour of data.
 
+## Live rush (31 Oct, 0.8.0, read-only)
+
+How many stores one key carries when every store is at its peak at once, measured on the live database with
+the till's key (`tools/odoo/billing_rush.py --model 0.8`, 12:52–13:02 IST, owner's yes).
+
+- **The rush:** simulated stores billed like the till (same calls, domains and pacing), each at KLJ's busiest
+  hour in 60 days (35 bills an hour). Stores were added every minute until Odoo refused a call.
+- **The bill mix, from 60 days of live orders:** 1.86 lines a bill, 87% with a customer. 15% of lines were
+  not priced before on that till, so they need `compute_all`. That makes about 4.4 calls a bill, and a fifth
+  of all calls were background.
+- **Nothing changed in Odoo:** a bill's two writes (`sync_from_ui`, `confirm_coupon_programs`) were sent as
+  one read each, so Odoo counted the same number of calls. About 1,050 calls in 10 minutes.
+
+| Stores at peak together | Calls a second | Odoo |
+|---|---|---|
+| 5 – 25 | 0.3 – 1.4 | all answered |
+| 30 | 2.0 | all answered |
+| 50 | 2.3 | all answered |
+| 60 | 3.2 | all answered |
+| 80 | 4.3 | first 429 after 47 s |
+
+- **Answers stayed fast:** 95% of calls within about 0.23 s at every step. Bursts of 15 calls in one
+  second were accepted.
+- **Where the limit sits:** the first 429 came at about 3.5–3.8 calls a second kept up for 1–2 minutes.
+  No simple shape (fixed window, sliding window, token bucket) fits only the rush's own calls; other callers
+  on the key or database likely count too.
+- **What the 429 looks like:** a plain HTML page with no `Retry-After`. The till backs off 2 / 4 / 8 s.
+- **One machine:** every simulated store called from one machine. If Odoo limits per network, each real store
+  has its own allowance, and the key is not the bottleneck.
+- **Capacity on 0.8.0:** about 56 stores at full peak together before the limit; plan for about 40, keeping
+  30% for other callers and for the heavier writes.
+- **Real traffic:** the busiest hour across all stores so far was 66 bills (28 Oct, 14:00), about 5% of the
+  limit.
+- **Not measured:** real writes. The limit counts requests, but Odoo's load under real `sync_from_ui` calls
+  needs a duplicate of the database.
+
+## Fewer calls per bill (0.9.0)
+
+The rush showed where the calls go: the customer search plus the card read were 43% of them, and live sync a
+fifth. Data structures help only where they remove a call; the till's own work takes microseconds.
+
+- **Customer index** (`odoo/CustomerIndex.kt`): every customer with a mobile, in memory on the till (3,281
+  on 31 Oct, read in 1.8 s in 2 calls).
+  - **The structure:** two sorted arrays, the Indian numbers by their 10 digits and every number by its
+    digits reversed. The first or last digits typed are a binary search, then a scan over the matches.
+  - **Same answers as Odoo:** checked live on 20 digit queries, 119 matches (`LiveCustomerIndexCheck`).
+  - **Kept up to date:** read in full once a day; otherwise customers changed in Odoo since the last read
+    (`write_date`, archived ones too) every 15 minutes. A miss asks Odoo, as before (a customer saved at
+    another store since).
+  - **Saving a customer:** still checked against Odoo first, so nobody is created twice.
+- **One call per picked customer:** `loyalty.card.web_search_read` returns the card's points and the
+  customer, nested, as Odoo has them now (`ZzCashService.card`).
+  - **Changed details:** a GST detail changed since the index was read reprices the bill under its new
+    fiscal position.
+  - **Typed but never picked:** such a number is still read from Odoo at payment.
+- **Live sync in a rush** (`odoo/LivePace.kt`): every 5 minutes instead of 2 while the till has sold 3
+  bills within 10 minutes, or Odoo answered 429 within them.
+- **The result:** about 3.1 calls a bill instead of 4.4, and about 37% fewer calls per store at peak.
+  That is about 90 stores at full peak together before the limit, or about 65 to plan for.
+
 ## One shared key
 
 - **The limit:** keeping one key for every store is the owner's decision. If Odoo counts per key, a

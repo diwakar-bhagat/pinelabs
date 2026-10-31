@@ -691,6 +691,29 @@ a time; an offline queue; pushes over the bus. The till now loads the same way w
   reads for an hour, so a refusing loader is never asked every pass.
 - **Not changed:** `compute_all` per line (I2), `sync_from_ui`, the outbox, error kinds, contract check,
   lanes and pacing.
+
+### Decisions 2026-10-31 (live rush on one key, 0.9.0)
+
+The owner asked how many stores one key carries at a simultaneous peak. Full write-up and tables:
+`docs/API_ENGINEERING.md`, "Live rush" and "Fewer calls per bill".
+- **The rush** (`tools/odoo/billing_rush.py`): read-only, on the live database, owner's yes. Simulated stores
+  billed like 0.8.0 at KLJ's busiest hour (35 bills an hour) and were added each minute.
+  - **The bill mix (live, 60 days):** 1.86 lines a bill, 87% with a customer, 15% of lines needing
+    `compute_all`. That is about 4.4 calls a bill.
+  - **Results:** all answered up to 60 stores (3.2 calls a second); the first 429 came at 80 (about 3.8 a
+    second sustained). That 429 is a plain HTML page with no `Retry-After`.
+  - **Capacity on 0.8.0:** about 56 stores at full peak together; plan for about 40.
+  - **Real traffic:** the chain's busiest hour (66 bills) is about 5% of the limit.
+- **0.9.0 cuts calls where the rush found them:**
+  - **Customer index** (`odoo/CustomerIndex.kt`): in memory only, never stored. Reads go to Odoo in the
+    background lane, in full once a day, otherwise changes every 15 minutes. It matched Odoo's search on
+    live data.
+  - **One call per picked customer** (`ZzCashService.card`): the card's points and the customer as Odoo has
+    them now. A changed GST detail reprices the bill (I2). A number typed but never picked is still read
+    from Odoo at payment.
+  - **Live sync every 5 minutes in a rush** (`odoo/LivePace.kt`): 3 bills within 10 minutes, or a 429 within
+    them.
+  - **The result:** about 3.1 calls a bill, about 90 stores at full peak (about 65 to plan for).
 ---
 
 ## 6. Odoo integration (verified against live DB, 2026-09-21)
@@ -893,6 +916,10 @@ company password manager + encrypted drive.
 | 48 | With a session open, restart the till; change a product's price in Odoo | Selling within a few seconds; the new price on the tile within 2 minutes; Setup's call rate about 0.5–1 a minute idle |
 | 49 | Archive a product (or untick Available in POS) in Odoo | It leaves the till within 15 minutes |
 | 50 | Close the session in Odoo, then open the next one from the till | The till keeps working on the separate reads with no session, and goes back to Odoo's loader once the new session is open |
+| 51 | Type the first 4, then the last 4 digits of a known customer's mobile | The list appears at once (no wait for Odoo), the same customers as before; pick one: ZZ Cash balance shows |
+| 52 | Save a new customer at another till (or in Odoo), then search their digits here at once | Found (Odoo is asked when the till's list has no match); within 15 minutes it is in the till's list too |
+| 53 | Change a picked customer's state in Odoo, then pick them on the till | The bill is priced again under the new fiscal position |
+| 54 | Sell 3 bills within 10 minutes, then read the log | `LIVE_PACE every_s=300` while selling, back to 120 after a quiet 10 minutes |
 
 ---
 
@@ -959,6 +986,9 @@ company password manager + encrypted drive.
 - [ ] On device: first full catalogue load time and memory with 2,421 tiles on the E700 (UAT case 14)
 - [ ] ZZ Note codes have no usage limit in Odoo (`limit_usage` off): anyone who learns one can reuse it. Odoo setting, not the app
 - [ ] Offers not supported on the till: gift cards, eWallets, coupons for a next order, pricelist-limited programs (none in use)
+- [ ] Under the POS-User key, confirm `loyalty.card.web_search_read` (the 0.9.0 card read) and the `res.partner` index reads are allowed
+- [ ] Is Odoo's limit per network or per key / database? Run `tools/odoo/billing_rush.py` from two networks at once (owner's yes, a quiet hour)
+- [ ] Rush with real writes (`sync_from_ui`, `confirm_coupon_programs`) on a duplicate of the database, not the live one
 - [ ] Under the POS-User key, confirm `pos.session.load_data`, `product.product.search` on reward domains, `use_coupon_code` and `formatted_read_group` on `pos.order` / `pos.payment` are allowed
 - [ ] First live sale with an offer from the till (UAT 24–27), then read `loyalty.history` and the order's reward lines back
 - [ ] A code whose program has several rewards waits for the cashier's pick under Reward; Odoo applies the only claimable one at once (no live program has several)
@@ -996,5 +1026,5 @@ in the repo root (`ODOO_URL`, `ODOO_DB`, `ODOO_USER`, `ODOO_API_KEY`). Writes ne
 | `REVIEW.md` | External review checklist (2026-10-27): findings F1–F6 with fixes, endpoint map, identity/signing, commands run, blockers |
 | `AGENT_PROMPT_E700_A2A.md` | Prompt for an on-device AI agent (adb) to run and report the App-to-App flow safely |
 | `ROLLOUT_STORES.md` | Multi-store rollout checklist: per-store Odoo user and key, E700 and Cash methods, who closes the day, terminal Setup, checks under the store key |
-| `API_ENGINEERING.md` | How the till calls Odoo for 20 stores on one database and key: lanes, 429 handling, live-sync tiers, calls per sale, the budget, counters, next steps |
+| `API_ENGINEERING.md` | How the till calls Odoo for 20 stores on one database and key: lanes, 429 handling, live-sync tiers, calls per sale, the budget, counters, the POS loader, the live rush (stores per key) and 0.9.0's fewer calls per bill |
 | `CASE_2026-10-28_PINE_OVERPAY.md` | Case study: Odoo web POS took ₹42 by Pine on a ₹20 bill at HQ27GGN; why, the fix, and how the E700 till prevents it |

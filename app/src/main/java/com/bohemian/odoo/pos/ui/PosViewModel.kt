@@ -30,6 +30,7 @@ import com.bohemian.odoo.pos.odoo.SalesService
 import com.bohemian.odoo.pos.odoo.LiveArea
 import com.bohemian.odoo.pos.odoo.LiveStamps
 import com.bohemian.odoo.pos.odoo.LiveSync
+import com.bohemian.odoo.pos.odoo.LivePace
 import com.bohemian.odoo.pos.odoo.PosCatalog
 import com.bohemian.odoo.pos.odoo.PosLoad
 import com.bohemian.odoo.pos.odoo.ProductGrid
@@ -90,6 +91,7 @@ import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.async
+import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.withContext
 import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.Dispatchers
@@ -898,6 +900,7 @@ class PosViewModel(private val c: AppContainer) : ViewModel() {
             runCatching { withContext(Dispatchers.IO) { c.catalogCache.save(cfg, st.products, categories = st.categories, notes = st.notes) } }
                 .onFailure { PosLog.w("CATALOG_CACHE_SAVE_FAILED", "err" to it.message) }
         }
+        withContext(OdooLane.BACKGROUND) { syncCustomersIfDue() }
         val products = _sell.value.products
         c.productImages.prefetch(products.filter { it.categIds.isNotEmpty() }, products)
     }
@@ -1071,6 +1074,7 @@ class PosViewModel(private val c: AppContainer) : ViewModel() {
                 .onFailure { PosLog.w("CATALOG_CACHE_SAVE_FAILED", "err" to it.message) }
             PosLog.i("CATALOG_REST_LOADED", "tabs" to shownCategories.size, "zz_rules" to (rules?.size ?: -1))
         }
+        withContext(OdooLane.BACKGROUND) { syncCustomersIfDue() }
         // Photos of the menu tabs in the background; the rest load as their tiles appear.
         val products = _sell.value.products
         c.productImages.prefetch(products.filter { it.categIds.isNotEmpty() }, products)
@@ -1100,20 +1104,29 @@ class PosViewModel(private val c: AppContainer) : ViewModel() {
         Calendar.getInstance().get(Calendar.HOUR_OF_DAY) in c.settings.salesDayStartHour until c.settings.salesDayEndHour
 
     /**
-     * Every [LIVE_SYNC_MS] in the sales day, every [QUIET_SYNC_MS] outside it: what changed in Odoo
-     * reaches the till by itself. Each till starts at its own random moment, so tills do not align.
+     * Every [LivePace.LIVE_MS] in the sales day ([LivePace.RUSH_MS] while this till sells briskly or Odoo
+     * answered 429 lately), every [LivePace.QUIET_MS] outside it: what changed in Odoo reaches the till by
+     * itself, and the customer index is kept up to date. Each till starts at its own random moment, so
+     * tills do not align.
      */
     private fun startLiveSync() {
         if (liveJob?.isActive == true || !_configured.value) return
         liveJob = launchSafe {
-            delay(Random.nextLong(LIVE_SYNC_MS))
+            delay(Random.nextLong(LivePace.LIVE_MS))
             var lastPassAt = 0L
+            var lastEvery = 0L
             while (true) {
-                delay(LIVE_SYNC_MS)
-                if (!inSalesDay() && System.currentTimeMillis() - lastPassAt < QUIET_SYNC_MS) continue
-                lastPassAt = System.currentTimeMillis()
+                delay(LIVE_TICK_MS)
+                val now = System.currentTimeMillis()
+                val every = LivePace.intervalMs(now, inSalesDay(), saleTimes, c.odoo.stats.snapshot().lastThrottledAt)
+                if (now - lastPassAt < every - LIVE_TICK_MS / 2) continue
+                if (every != lastEvery) {
+                    PosLog.i("LIVE_PACE", "every_s" to every / 1000)
+                    lastEvery = every
+                }
+                lastPassAt = now
                 try {
-                    withContext(OdooLane.BACKGROUND) { liveSyncOnce() }
+                    withContext(OdooLane.BACKGROUND) { liveSyncOnce(); syncCustomersIfDue() }
                     lastLiveOkAt = System.currentTimeMillis()
                     checkContractIfDue()
                 } catch (e: CancellationException) {
@@ -1815,7 +1828,7 @@ class PosViewModel(private val c: AppContainer) : ViewModel() {
         val typed = _sell.value.phone
         _sell.update { it.copy(customerBusy = true, customerNote = null, customerNoteOk = false) }
         try {
-            val found = c.customers.findByPhone(e164)
+            val found = c.customerIndex.exact(e164) ?: c.customers.findByPhone(e164)
             // The cashier typed another number meanwhile: this answer is for the old one, drop it.
             if (_sell.value.phone != typed) return@launchSafe _sell.update { it.copy(customerBusy = false) }
             if (found != null) pickCustomer(found)
@@ -1841,6 +1854,7 @@ class PosViewModel(private val c: AppContainer) : ViewModel() {
         try {
             val existing = c.customers.findByPhone(e164)
             val saved = existing ?: c.customers.create(name, e164)
+            c.customerIndex.put(saved, e164)
             PosLog.i("CUSTOMER_SAVED", "partner" to saved.id, "new" to (existing == null))
             // The form is locked while saving; if the number changed anyway, do not attach this one.
             if (c.customers.normalizeIndianMobile(_sell.value.phone) != e164) {
@@ -1919,7 +1933,10 @@ class PosViewModel(private val c: AppContainer) : ViewModel() {
             runCatching { c.zzCash.rules(program.id) }.onFailure { PosLog.w("ZZ_RULES_LOAD_FAILED", "err" to it.message) }.getOrNull()
         }
         val (lookup, balance, rewards) = try {
-            val b = c.zzCash.balance(customer.id, program.id)
+            // One call (0.9.0): the card and the customer as Odoo has them now, in place of the balance read.
+            val card = c.zzCash.card(customer.id, program.id)
+            card?.customer?.let { useFreshCustomer(it.customer, it.phoneSanitized) }
+            val b = card?.balance
             if (b == null) Triple(ZzLookup.NO_CARD, null, emptyList()) else Triple(ZzLookup.LOADED, b, rewardsFor(program.id))
         } catch (e: Exception) {
             PosLog.w("ZZ_CASH_LOOKUP_FAILED", "partner" to customer.id, "err" to e.message)
@@ -1930,6 +1947,24 @@ class PosViewModel(private val c: AppContainer) : ViewModel() {
             if (s.customer?.id != customer.id) s
             else s.copy(zzCash = balance, zzRewards = rewards, zzLookup = lookup, zzRules = s.zzRules ?: rules)
         }
+    }
+
+    /**
+     * The customer as read with their card goes in the index and, while the same customer is on an unpaid
+     * bill, on screen: a GST detail changed in Odoo since the index was read gives a new fiscal position,
+     * and the bill is priced again (I2).
+     */
+    private fun useFreshCustomer(fresh: Customer, phoneSanitized: String?) {
+        c.customerIndex.put(fresh, phoneSanitized)
+        val s = _sell.value
+        if (s.customer?.id != fresh.id || s.customer == fresh) return
+        if (s.pay != PayUi.Idle || payStarting || lockedByPartPayment()) return
+        val cfg = s.config ?: return
+        val fpos = fiscalPositionsById[c.fiscalPositions.resolve(cfg, fresh)]
+        val fposChanged = fpos?.id != s.fiscalPosition?.id
+        _sell.update { st -> if (st.customer?.id != fresh.id) st else st.copy(customer = fresh, customerName = fresh.name, fiscalPosition = fpos) }
+        PosLog.i("CUSTOMER_REFRESHED", "partner" to fresh.id, "fpos_changed" to fposChanged)
+        if (fposChanged) reprice()
     }
 
     /** The program's "₹N off" rewards: they change rarely, so read once per catalogue load. */
@@ -2003,15 +2038,76 @@ class PosViewModel(private val c: AppContainer) : ViewModel() {
 
     private var phoneSearchJob: kotlinx.coroutines.Job? = null
 
+    /** Odoo's clock less the overlap at the last customer read: the next delta asks from here. */
+    private var customerSince: String? = null
+
+    /** When the customer index last asked Odoo (0 = never). */
+    private var customerSyncAt = 0L
+
+    /** One index read at a time (the catalogue load and the live-sync pass may both ask). */
+    private val customerSync = Mutex()
+
+    /** The customer list on screen came from the index: its next page does too. */
+    private var customerListLocal = false
+
+    /** When this till's recent bills were paid: a rush slows live sync ([LivePace]). */
+    private val saleTimes = java.util.concurrent.ConcurrentLinkedDeque<Long>()
+
+    /**
+     * The till's customer index (0.9.0): read in full the first time and once a day, otherwise only what
+     * changed in Odoo, every [CUSTOMER_DELTA_MS]. Never throws: without an index the search asks Odoo.
+     */
+    private suspend fun syncCustomersIfDue() {
+        val now = System.currentTimeMillis()
+        if (customerSyncAt != 0L && now - customerSyncAt < CUSTOMER_DELTA_MS) return
+        if (!customerSync.tryLock()) return
+        try {
+            customerSyncAt = now // a failed read waits the same pause, never every pass
+            val idx = c.customerIndex
+            val since = customerSince
+            if (!idx.ready || since == null || now - idx.loadedAt >= CUSTOMER_FULL_MS) {
+                val (rows, serverTime) = c.customers.indexAll()
+                withContext(Dispatchers.Default) { idx.replaceAll(rows, now) } // sorting ~3,300 customers, off Main
+                customerSince = PosLoad.nextSince(null, serverTime ?: now)
+                PosLog.i("CUSTOMER_INDEX_LOADED", "customers" to idx.size)
+            } else {
+                val delta = c.customers.indexChanges(since)
+                if (delta == null) { customerSince = null; return } // an import: read in full at the next pass
+                idx.apply(delta.rows, delta.removed)
+                customerSince = PosLoad.nextSince(since, delta.serverTimeMs)
+                if (delta.rows.isNotEmpty() || delta.removed.isNotEmpty()) {
+                    PosLog.i("CUSTOMER_INDEX_DELTA", "changed" to delta.rows.size, "removed" to delta.removed.size, "customers" to idx.size)
+                }
+            }
+        } catch (e: CancellationException) {
+            throw e
+        } catch (e: Exception) {
+            PosLog.w("CUSTOMER_INDEX_FAILED", "reason" to e::class.simpleName, "err" to e.message)
+        } finally {
+            customerSync.unlock()
+        }
+    }
+
     /**
      * Search in the background once 4 digits or 2 letters are typed: the first page, A→Z. Debounced:
      * only the last keystroke's search runs. Clears the list when too little is typed.
      */
     private fun searchCustomers(query: String, debounce: Boolean = true) {
         phoneSearchJob?.cancel() // any edit cancels the search in flight
+        customerListLocal = false
         if (!CustomerService.isSearchable(query)) {
             _sell.update { it.copy(customerMatches = emptyList(), customerHasMore = false) }
             return
+        }
+        // A mobile is found in the till's index at once, with no call. Nobody there (saved at another store
+        // since the last update), a name, or no index yet: Odoo is asked, as before.
+        if (CustomerService.isPhoneQuery(query) && c.customerIndex.ready) {
+            val local = c.customerIndex.byPhone(query)
+            if (local.isNotEmpty()) {
+                customerListLocal = true
+                _sell.update { it.copy(customerMatches = local, customerHasMore = local.size == CustomerService.PAGE) }
+                return
+            }
         }
         phoneSearchJob = launchSafe {
             if (debounce) delay(CUSTOMER_SEARCH_DEBOUNCE_MS)
@@ -2036,6 +2132,14 @@ class PosViewModel(private val c: AppContainer) : ViewModel() {
         if (!s.customerHasMore || phoneSearchJob?.isActive == true) return
         val query = s.phone
         val offset = s.customerMatches.size
+        if (customerListLocal) {
+            val page = c.customerIndex.byPhone(query, offset)
+            _sell.update {
+                if (it.phone != query || it.customerMatches.size != offset) it
+                else it.copy(customerMatches = (it.customerMatches + page).distinctBy { m -> m.id }, customerHasMore = page.size == CustomerService.PAGE)
+            }
+            return
+        }
         phoneSearchJob = launchSafe {
             try {
                 val page = c.customers.search(query, offset)
@@ -2435,6 +2539,8 @@ class PosViewModel(private val c: AppContainer) : ViewModel() {
             // A typed number must belong to a saved customer: nobody is created silently at payment.
             val e164 = c.customers.normalizeIndianMobile(s.phone)
                 ?: return null.also { _sell.update { it.copy(error = "The customer mobile is not valid. Fix or clear it under Customer.") } }
+            // Read from Odoo, not the index: this customer was never picked, so their card read never
+            // refreshed their GST details, and the bill is about to be charged with them.
             val found = try { c.customers.findByPhone(e164) } catch (e: Exception) {
                 PosLog.w("CUSTOMER_LOOKUP_FAILED", "phone" to Redact.phone(e164), "err" to e.message)
                 return null.also { _sell.update { it.copy(error = "Could not find the customer in Odoo: ${friendly(e)}") } }
@@ -2685,6 +2791,8 @@ class PosViewModel(private val c: AppContainer) : ViewModel() {
      */
     private fun billPaid(orderUuid: String) {
         paidBills += orderUuid
+        saleTimes.addLast(System.currentTimeMillis())
+        while (saleTimes.size > 20) saleTimes.pollFirst()
         _parked.update { list -> list.filterNot { it.orderUuid == orderUuid } }
         launchSafe { c.db.parkedBills().delete(orderUuid) }
     }
@@ -2887,11 +2995,12 @@ class PosViewModel(private val c: AppContainer) : ViewModel() {
         /** Longest the paid customer waits for Odoo's bill before the till prints its own copy. */
         private const val BILL_READ_TIMEOUT_MS = 8_000L
 
-        /** How often the till asks Odoo what changed (config, products, menu, taxes, offers, bill text). */
-        private const val LIVE_SYNC_MS = 120_000L
+        /** The live-sync loop looks this often whether a pass is due ([LivePace]). */
+        private const val LIVE_TICK_MS = 15_000L
 
-        /** Outside the sales day: the config only, this often. */
-        private const val QUIET_SYNC_MS = 15 * 60_000L
+        /** The customer index asks Odoo what changed this often, and reads everything again daily. */
+        private const val CUSTOMER_DELTA_MS = 15 * 60_000L
+        private const val CUSTOMER_FULL_MS = 24 * 60 * 60_000L
 
         /** A first load this soon after boot waits up to [BOOT_SPREAD_MS] first. */
         private const val BOOT_WINDOW_MS = 5 * 60_000L

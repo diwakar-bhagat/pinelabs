@@ -51,6 +51,7 @@ masked PAN, from which it keeps the last 4 digits.
 | Catalogue cache (products, prices, barcodes, menu tabs, note tags, POS config) | `files/catalog/catalog.json` | App-private; not sensitive |
 | Product photos (`image_256` from Odoo) | `files/img/` | App-private; not sensitive; old versions deleted on refresh |
 | ZZ Cash points to book (`confirm_coupon_programs` data: card id, partner id, points) | Room DB `loyalty_confirm` | App-private; deleted once Odoo confirms |
+| Customer index (name, mobile, GSTIN, state of customers with a mobile, 0.9.0) | Process memory only | Never written to storage; read again from Odoo after a restart |
 | Crash reports (stack traces) | `files/crash/` | App-private; redacted before writing (§5); newest 10 kept |
 
 `android:allowBackup="false"`, `fullBackupContent="false"` and `dataExtractionRules` (Android 12+, everything excluded): nothing goes to a device or cloud backup or device transfer.

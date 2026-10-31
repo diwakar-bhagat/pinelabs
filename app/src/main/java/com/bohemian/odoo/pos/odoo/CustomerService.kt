@@ -107,6 +107,46 @@ class CustomerService(private val odoo: OdooJson2Client) {
         odoo.call("res.partner", "read", jsonOf("ids" to listOf(id), "fields" to PARTNER_FIELDS))
             .objects().firstOrNull()?.toCustomer()
 
+    /**
+     * Every customer with a mobile, for the till's [CustomerIndex]: pages of [INDEX_PAGE] by id, and
+     * Odoo's clock at the first page (the next delta asks from there, less the overlap).
+     */
+    suspend fun indexAll(): Pair<List<IndexedCustomer>, Long?> {
+        val all = ArrayList<IndexedCustomer>()
+        var afterId = 0
+        var serverTime: Long? = null
+        while (true) {
+            val a = odoo.callWithServerTime("res.partner", "search_read", jsonOf(
+                "domain" to listOf(listOf("phone_sanitized", "!=", false), listOf("id", ">", afterId)),
+                "fields" to INDEX_FIELDS,
+                "order" to "id",
+                "limit" to INDEX_PAGE,
+            ))
+            if (serverTime == null) serverTime = a.serverTimeMs
+            val rows = a.value.objects()
+            all += indexRows(rows)
+            if (rows.size < INDEX_PAGE) return all to serverTime
+            afterId = rows.last().int("id") ?: return all to serverTime
+        }
+    }
+
+    /**
+     * Customers changed in Odoo since [sinceUtc], archived ones too (`active_test` off), with Odoo's clock.
+     * Null when more changed than one read brings (an import): the index is then read in full again.
+     */
+    suspend fun indexChanges(sinceUtc: String): IndexDelta? {
+        val a = odoo.callWithServerTime("res.partner", "search_read", jsonOf(
+            "domain" to listOf(listOf("write_date", ">", sinceUtc)),
+            "fields" to INDEX_FIELDS + "active",
+            "order" to "id",
+            "limit" to INDEX_PAGE,
+            "context" to mapOf("active_test" to false),
+        ))
+        val rows = a.value.objects()
+        if (rows.size >= INDEX_PAGE) return null
+        return indexDelta(rows, a.serverTimeMs)
+    }
+
     /** res.country.state.l10n_in_tin → state id (the GSTIN's first two digits). */
     suspend fun findStateByTin(tin: String): Int? =
         odoo.call("res.country.state", "search_read", jsonOf(
@@ -115,21 +155,69 @@ class CustomerService(private val odoo: OdooJson2Client) {
             "limit" to 1,
         )).objects().firstOrNull()?.int("id")
 
-    private fun JsonObject.toCustomer() = Customer(
-        id = int("id")!!,
-        name = str("name") ?: "",
-        phone = str("phone"),
-        gstin = str("vat"),
-        gstTreatment = GstTreatment.fromOdoo(str("l10n_in_gst_treatment")),
-        stateId = m2oId("state_id"),
-        stateName = m2oName("state_id"),
-        fiscalPositionId = m2oId("property_account_position_id"),
-    )
+    /** What one delta brought: customers to put in the index again, ids to take out, and Odoo's clock. */
+    data class IndexDelta(val rows: List<IndexedCustomer>, val removed: List<Int>, val serverTimeMs: Long?)
 
     companion object {
         private val PARTNER_FIELDS = listOf(
             "name", "phone", "vat", "l10n_in_gst_treatment", "state_id", "property_account_position_id",
         )
+
+        /** The customer fields plus the E.164 mobile the index matches on. */
+        private val INDEX_FIELDS = PARTNER_FIELDS + "phone_sanitized"
+
+        /** Customers per index read: 2,000 rows are about 390 KB. */
+        const val INDEX_PAGE = 2000
+
+        /**
+         * The nested customer of a `web_search_read` specification ([PARTNER_SPEC]): many2ones come as
+         * an id, or as `{"id", "display_name"}` when their fields are asked for.
+         */
+        val PARTNER_SPEC: Map<String, Any> = mapOf("fields" to mapOf(
+            "name" to emptyMap<String, Any>(), "phone" to emptyMap<String, Any>(), "phone_sanitized" to emptyMap<String, Any>(),
+            "vat" to emptyMap<String, Any>(), "l10n_in_gst_treatment" to emptyMap<String, Any>(),
+            "state_id" to mapOf("fields" to mapOf("display_name" to emptyMap<String, Any>())),
+            "property_account_position_id" to emptyMap<String, Any>(),
+        ))
+
+        internal fun JsonObject.toCustomer() = Customer(
+            id = int("id")!!,
+            name = str("name") ?: "",
+            phone = str("phone"),
+            gstin = str("vat"),
+            gstTreatment = GstTreatment.fromOdoo(str("l10n_in_gst_treatment")),
+            stateId = m2oId("state_id"),
+            stateName = m2oName("state_id"),
+            fiscalPositionId = m2oId("property_account_position_id"),
+        )
+
+        /** A customer nested in a `web_search_read` answer, read with [PARTNER_SPEC]. */
+        internal fun fromSpec(o: JsonObject): IndexedCustomer? {
+            val id = o.int("id") ?: return null
+            val state = o["state_id"] as? JsonObject
+            val customer = Customer(
+                id = id,
+                name = o.str("name") ?: "",
+                phone = o.str("phone"),
+                gstin = o.str("vat"),
+                gstTreatment = GstTreatment.fromOdoo(o.str("l10n_in_gst_treatment")),
+                stateId = state?.int("id"),
+                stateName = state?.str("display_name"),
+                fiscalPositionId = o.int("property_account_position_id"),
+            )
+            return IndexedCustomer(customer, o.str("phone_sanitized") ?: "")
+        }
+
+        internal fun indexRows(rows: List<JsonObject>): List<IndexedCustomer> = rows.mapNotNull { r ->
+            val phone = r.str("phone_sanitized") ?: return@mapNotNull null
+            IndexedCustomer(r.toCustomer(), phone)
+        }
+
+        /** An active customer with a mobile goes in again; an archived one, or one without a mobile, goes out. */
+        internal fun indexDelta(rows: List<JsonObject>, serverTimeMs: Long?): IndexDelta {
+            val (keep, drop) = rows.partition { it.bool("active") && it.str("phone_sanitized") != null }
+            return IndexDelta(indexRows(keep), drop.mapNotNull { it.int("id") }, serverTimeMs)
+        }
 
         /** Results per page in the customer dialog; the next page loads as the list is scrolled. */
         const val PAGE = 20

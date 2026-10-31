@@ -30,6 +30,9 @@ data class ZzCashReward(
     val discountProductId: Int,
 )
 
+/** A ZZ Cash card read with its customer: [customer] is what Odoo holds now (null if it did not come). */
+data class ZzCard(val balance: ZzCashBalance, val customer: IndexedCustomer?)
+
 /** The loyalty.program this till earns and redeems ZZ Cash on, found in Odoo (never a fixed id). */
 data class ZzCashProgram(val id: Int, val name: String)
 
@@ -69,6 +72,27 @@ class ZzCashService(private val odoo: OdooJson2Client) {
         )).objects()
         if (rows.size > 1) PosLog.w("ZZ_CASH_TWO_CARDS", "partner" to partnerId, "program" to programId)
         return fromRows(partnerId, rows)
+    }
+
+    /**
+     * The customer's card and, in the same call, the customer as Odoo has them now (0.9.0): one
+     * `web_search_read` on loyalty.card with the partner nested. The till finds customers in its own
+     * index, so this one call per picked customer is the fresh balance and fresh GST details together.
+     * Null when the customer has no card in [programId]. Throws on network/server errors.
+     */
+    suspend fun card(partnerId: Int, programId: Int): ZzCard? {
+        val res = odoo.call("loyalty.card", "web_search_read", jsonOf(
+            "domain" to listOf(
+                listOf("partner_id", "=", partnerId),
+                listOf("program_id", "=", programId),
+            ),
+            "specification" to CARD_SPEC,
+            "order" to "id", // the same card every time, should a customer ever have two
+            "limit" to 2,
+        )) as? JsonObject ?: return null
+        val rows = res["records"]?.objects().orEmpty()
+        if (rows.size > 1) PosLog.w("ZZ_CASH_TWO_CARDS", "partner" to partnerId, "program" to programId)
+        return fromCardRows(partnerId, rows)
     }
 
     /**
@@ -115,6 +139,19 @@ class ZzCashService(private val odoo: OdooJson2Client) {
     }
 
     companion object {
+        /** loyalty.card fields for [card], with the customer nested ([CustomerService.PARTNER_SPEC]). */
+        private val CARD_SPEC: Map<String, Any> = mapOf(
+            "points" to emptyMap<String, Any>(), "code" to emptyMap<String, Any>(), "partner_id" to CustomerService.PARTNER_SPEC,
+        )
+
+        internal fun fromCardRows(partnerId: Int, rows: List<JsonObject>): ZzCard? {
+            val row = rows.firstOrNull() ?: return null
+            val balance = fromRows(partnerId, listOf(row)) ?: return null
+            val customer = (row["partner_id"] as? JsonObject)?.let { CustomerService.fromSpec(it) }
+                ?.takeIf { it.customer.id == partnerId }
+            return ZzCard(balance, customer)
+        }
+
         internal fun fromProgramRows(rows: List<JsonObject>): ZzCashProgram? {
             val row = rows.singleOrNull() ?: return null
             return ZzCashProgram(row.int("id") ?: return null, row.str("name") ?: "ZZ Cash")

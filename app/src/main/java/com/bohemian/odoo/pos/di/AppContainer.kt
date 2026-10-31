@@ -105,6 +105,10 @@ class AppContainer(context: Context) {
         )
     })
     val customers = CustomerService(odoo)
+
+    /** Every customer with a mobile, in memory, so a search costs no call (0.9.0). */
+    val customerIndex = com.bohemian.odoo.pos.odoo.CustomerIndex()
+
     val bills = com.bohemian.odoo.pos.odoo.BillService(odoo)
     val sales = com.bohemian.odoo.pos.odoo.SalesService(odoo)
     val liveSync = com.bohemian.odoo.pos.odoo.LiveSync(odoo)
