@@ -247,6 +247,8 @@ def pct(v, q):
 
 # ---- setup (a handful of plain calls before the clock starts)
 SESSIONS = [(s["id"], s["config_id"]) for s in plain("pos.session", "search_read", domain=[["state", "=", "opened"]], fields=["config_id"], load=None)]
+if not SESSIONS:  # at night every session may be closed; Odoo's loader reads a closed one just the same
+    SESSIONS = [(s["id"], s["config_id"]) for s in plain("pos.session", "search_read", domain=[], fields=["config_id"], order="id desc", limit=2, load=None)]
 PRODUCTS = [p for p in plain("product.product", "search_read", domain=[["available_in_pos", "=", True], ["sale_ok", "=", True], ["taxes_id", "!=", False]],
                              fields=["lst_price", "taxes_id"], limit=300, load=None)]
 ZZ = plain("loyalty.program", "search_read", domain=[["program_type", "=", "loyalty"], ["pos_ok", "=", True]], fields=["id"], limit=1)

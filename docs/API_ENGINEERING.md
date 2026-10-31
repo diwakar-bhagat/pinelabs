@@ -327,6 +327,51 @@ fifth. Data structures help only where they remove a call; the till's own work t
 - **The result:** about 3.1 calls a bill instead of 4.4, and about 37% fewer calls per store at peak.
   That is about 90 stores at full peak together before the limit, or about 65 to plan for.
 
+## Peak replay (offline, 0.9.0)
+
+The busiest real hour, replayed by tills running the real `OdooJson2Client` (lanes, gate, pacing, 429 backoff)
+against a stand-in for Odoo. No load reached the live database; only the extraction read it
+(`PeakReplaySimulation`, `PEAK_REPLAY=1`).
+
+- **The hour:** 28 Oct, 14:07–15:07 IST, 69 bills at 5 stores:
+
+  | Store | Bills |
+  |---|---|
+  | KLJ | 33 |
+  | HQ27GGN | 13 |
+  | Club 125 | 12 |
+  | SWN | 10 |
+  | ZenZebra | 1 |
+
+  - **The bills:** 1.78 lines each, and 10% of lines needed Odoo's pricing. 78% had a customer, and 17 were
+    new customers.
+  - **The fixture:** timings and counts only (`test/resources/peak/`, made by `tools/odoo/peak_extract.py`).
+- **How:** minutes 10–25 of that hour (its busiest 10 minutes are inside) replayed in real time. There are k
+  copies of the chain, each copy's bills shifted by up to ±5 minutes, so k copies are 5k stores at their
+  peak together.
+  - **Each bill:** called as 0.9.0 does. A new customer costs the search, Find, the look-up before saving and
+    the save.
+  - **Live sync:** at `LivePace`.
+- **The stand-in's limit:** the one measured live (a bucket of 3.5 calls a second holding 60, a plain 429).
+  Beside it, Odoo's published guidance (1 a second, bursts of 3).
+
+| Limit | Stores at peak together | 429s | Paid (95%) | Slowest paid | Taps (95%) | Sales to the outbox |
+|---|---|---|---|---|---|---|
+| measured | 5 – 100 | 0 | 0.86 s | 1.2 s | 0.4 s | 0 |
+| measured | 125 | 60 | 0.86 s | 14.8 s | 0.4 s | 0 |
+| measured | 150 | 905 | 14.7 s | 33 s | 6.2 s | 13 |
+| measured | 200 | 3,795 | 31.5 s | 36 s | 8.7 s | 114 |
+| guidance | 10 | 1 | 0.86 s | 0.9 s | 0.4 s | 0 |
+| guidance | 20 | 32 | 2.8 s | 7.0 s | 2.0 s | 0 |
+| guidance | 40 | 461 | 18.9 s | 34 s | 7.3 s | 5 |
+
+- **Measured limit:** one key carries about 100 stores at their real peak together with no 429 at all, and
+  about 125 at the edge (a few seconds' wait on some bills, no sale delayed). Beyond that the backoff
+  queues up, and sales go through the outbox, so none is lost.
+- **Odoo's guidance, if enforced on the key:** about 10 stores clean, 20 with waits of a few seconds.
+- **New customers cost the most:** a quarter of that hour's bills, at 5 extra calls each. A next step is
+  to drop the typed search when the till's index is fresh, since Find and the save look Odoo up anyway.
+
 ## One shared key
 
 - **The limit:** keeping one key for every store is the owner's decision. If Odoo counts per key, a

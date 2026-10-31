@@ -714,6 +714,13 @@ The owner asked how many stores one key carries at a simultaneous peak. Full wri
   - **Live sync every 5 minutes in a rush** (`odoo/LivePace.kt`): 3 bills within 10 minutes, or a 429 within
     them.
   - **The result:** about 3.1 calls a bill, about 90 stores at full peak (about 65 to plan for).
+- **Peak replay** (offline, `PeakReplaySimulation`): the busiest real hour (28 Oct 14:07, 69 bills at 5
+  stores) was replayed with the real client against a stand-in for Odoo at the measured limit. Results:
+  - about 100 stores at their peak together with no 429;
+  - about 125 at the edge;
+  - sales went through the outbox from 150.
+
+  Under Odoo's published 1 call a second, about 10. Table: `docs/API_ENGINEERING.md`, "Peak replay".
 ---
 
 ## 6. Odoo integration (verified against live DB, 2026-09-21)
