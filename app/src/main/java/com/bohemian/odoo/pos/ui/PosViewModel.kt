@@ -1904,7 +1904,7 @@ class PosViewModel(private val c: AppContainer) : ViewModel() {
      * The customer's fiscal position (from their state) and ZZ Cash, read again. Applied only while the
      * same bill and customer are on screen. Returns the ZZ Cash read.
      */
-    private fun resolveCustomer(customer: Customer): Job {
+    private fun resolveCustomer(customer: Customer, reuseCard: Boolean = false): Job {
         val uuid = _sell.value.orderUuid
         launchSafe {
             val fposId = c.fiscalPositions.resolve(_sell.value.config ?: return@launchSafe, customer)
@@ -1913,14 +1913,14 @@ class PosViewModel(private val c: AppContainer) : ViewModel() {
             _sell.update { it.copy(fiscalPosition = fiscalPositionsById[fposId]) }
             reprice()
         }
-        return refreshZzCash(customer)
+        return refreshZzCash(customer, reuseCard)
     }
 
     /**
      * Read the customer's ZZ Cash balance. Never blocks the sale: on failure the cashier
      * just sees no balance. The result is only applied if the same customer is still attached.
      */
-    private fun refreshZzCash(customer: Customer) = launchSafe {
+    private fun refreshZzCash(customer: Customer, reuseCard: Boolean = false) = launchSafe {
         _sell.update { s -> if (s.customer?.id == customer.id) s.copy(zzLookup = ZzLookup.LOADING) else s }
         val program = zzProgram ?: _sell.value.config?.let { cfg -> runCatching { zzProgramFallback(cfg) }.getOrNull() }?.also { zzProgram = it }
         if (program == null) {
@@ -1934,7 +1934,10 @@ class PosViewModel(private val c: AppContainer) : ViewModel() {
         }
         val (lookup, balance, rewards) = try {
             // One call (0.9.0): the card and the customer as Odoo has them now, in place of the balance read.
-            val card = c.zzCash.card(customer.id, program.id)
+            // A waiting bill reopened within 2 minutes reuses the last read (0.9.1, [RecentCards]).
+            val recent = if (reuseCard) recentCards.fresh(customer.id, program.id) else null
+            val card = if (recent != null) recent.card.also { PosLog.i("ZZ_CARD_REUSED", "partner" to customer.id) }
+                else c.zzCash.card(customer.id, program.id).also { recentCards.put(customer.id, program.id, it) }
             card?.customer?.let { useFreshCustomer(it.customer, it.phoneSanitized) }
             val b = card?.balance
             if (b == null) Triple(ZzLookup.NO_CARD, null, emptyList()) else Triple(ZzLookup.LOADED, b, rewardsFor(program.id))
@@ -2049,6 +2052,9 @@ class PosViewModel(private val c: AppContainer) : ViewModel() {
 
     /** The customer list on screen came from the index: its next page does too. */
     private var customerListLocal = false
+
+    /** ZZ Cash card reads of the last 2 minutes, for waiting bills reopened soon after (0.9.1). */
+    private val recentCards = com.bohemian.odoo.pos.odoo.RecentCards()
 
     /** When this till's recent bills were paid: a rush slows live sync ([LivePace]). */
     private val saleTimes = java.util.concurrent.ConcurrentLinkedDeque<Long>()
@@ -2564,6 +2570,8 @@ class PosViewModel(private val c: AppContainer) : ViewModel() {
             reprice()
             return null
         }
+        // Their points move with this bill: a later reopen of another of their bills reads the card again.
+        customer?.let { recentCards.forget(it.id) }
         if (s.zzRedemption != null && s.zzCash?.partnerId != customer?.id) {
             _sell.update { it.copy(error = "Customer changed. ZZ Cash was removed; check the total and charge again.") }
             removeZzCash()
@@ -2896,7 +2904,7 @@ class PosViewModel(private val c: AppContainer) : ViewModel() {
         }
         val customer = bill?.customer
         if (customer != null) {
-            val zzJob = resolveCustomer(customer)
+            val zzJob = resolveCustomer(customer, reuseCard = true)
             bill.zzReward?.let { reapplyZzReward(bill.orderUuid, customer, it, zzJob) }
         }
         if (_sell.value.lines.isNotEmpty()) reprice()

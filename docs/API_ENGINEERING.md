@@ -369,6 +369,9 @@ against a stand-in for Odoo. No load reached the live database; only the extract
   about 125 at the edge (a few seconds' wait on some bills, no sale delayed). Beyond that the backoff
   queues up, and sales go through the outbox, so none is lost.
 - **Odoo's guidance, if enforced on the key:** about 10 stores clean, 20 with waits of a few seconds.
+- **Open bills (0.9.1):** parking, switching and removing a bill cost no call. Reopening one costs its
+  customer's card read, reused for 2 minutes (`odoo/RecentCards.kt`), so switching between open bills is free.
+  An item whose price changed since it was parked is priced again.
 - **New customers cost the most:** a quarter of that hour's bills, at 5 extra calls each. A next step is
   to drop the typed search when the till's index is fresh, since Find and the save look Odoo up anyway.
 

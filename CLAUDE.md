@@ -721,6 +721,10 @@ The owner asked how many stores one key carries at a simultaneous peak. Full wri
   - sales went through the outbox from 150.
 
   Under Odoo's published 1 call a second, about 10. Table: `docs/API_ENGINEERING.md`, "Peak replay".
+- **0.9.1, open bills:** parking, switching and removing a bill cost no Odoo call. A waiting bill reopened
+  within 2 minutes reuses its customer's last card read (`odoo/RecentCards.kt`), so switching back and forth
+  costs nothing either. A customer's entry is dropped when one of their bills goes to payment. Odoo still
+  checks a reward at payment.
 ---
 
 ## 6. Odoo integration (verified against live DB, 2026-09-21)
@@ -927,6 +931,7 @@ company password manager + encrypted drive.
 | 52 | Save a new customer at another till (or in Odoo), then search their digits here at once | Found (Odoo is asked when the till's list has no match); within 15 minutes it is in the till's list too |
 | 53 | Change a picked customer's state in Odoo, then pick them on the till | The bill is priced again under the new fiscal position |
 | 54 | Sell 3 bills within 10 minutes, then read the log | `LIVE_PACE every_s=300` while selling, back to 120 after a quiet 10 minutes |
+| 55 | Two open bills with customers: switch A → B → A within a minute; then pay A, park a second bill for A's customer and reopen it | The switches show the balances at once (`ZZ_CARD_REUSED` in the log); after A's payment the reopened bill reads the card again and shows the new balance |
 
 ---
 
