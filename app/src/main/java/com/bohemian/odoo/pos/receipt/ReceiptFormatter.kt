@@ -52,8 +52,11 @@ data class ReceiptItem(
 
 data class ReceiptPayment(val method: String, val amount: Paise)
 
-/** What the E700 adds for a card / UPI payment (not on Odoo's PDF; the customer needs it for disputes). */
-data class TerminalSlip(val mode: String, val cardLast4: String?, val rrn: String?, val authCode: String?)
+/**
+ * What the E700 adds for a card / UPI payment (not on Odoo's PDF; the customer needs it for disputes).
+ * [forceDone]: the cashier marked it paid without the terminal's confirmation (Odoo's Force done).
+ */
+data class TerminalSlip(val mode: String, val cardLast4: String?, val rrn: String?, val authCode: String?, val forceDone: Boolean = false)
 
 data class ReceiptZzCash(val earned: String, val used: String?, val balance: String, val expiry: String?)
 
@@ -147,6 +150,7 @@ class ReceiptFormatter(private val width: Int, private val text: BillText = Bill
             t.cardLast4?.let { kv("Card", "**** $it") }
             t.rrn?.let { kv("RRN", it) }
             t.authCode?.let { kv("Auth", it) }
+            if (t.forceDone) left("Force done (no terminal ref)")
         }
         r.zzCash?.let { z ->
             rule()

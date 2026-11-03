@@ -14,9 +14,12 @@ import kotlinx.serialization.json.jsonPrimitive
  */
 class CustomerService(private val odoo: OdooJson2Client) {
 
-    /** Accepts "98xxxxxxxx", "+91 98xx…", etc. Returns E.164 "+91XXXXXXXXXX" or null. */
+    /**
+     * Accepts "98xxxxxxxx", "+91 98xx…", "098…", etc. Returns E.164 "+91XXXXXXXXXX" or null. The 91 is
+     * dropped only from a 12-digit number: "9123456789" is itself a mobile (it lost its 91 before 0.10.0).
+     */
     fun normalizeIndianMobile(input: String): String? {
-        val d = input.filter { it.isDigit() }.removePrefix("91").let { if (it.length == 11 && it.startsWith("0")) it.drop(1) else it }
+        val d = nationalDigits(input)
         return if (d.length == 10 && d.first() in "6789") "+91$d" else null
     }
 
@@ -97,9 +100,15 @@ class CustomerService(private val odoo: OdooJson2Client) {
             (gstTreatment ?: clean?.let { GstTreatment.REGULAR })?.let { put("l10n_in_gst_treatment", it.odoo) }
             resolvedState?.let { put("state_id", it) }
         }
-        val id = odoo.call("res.partner", "create", jsonOf("vals_list" to listOf(vals)))
-            .jsonArray.first().jsonPrimitive.intOrNull!!
-        // Read back: Odoo computes fields (state from VAT, fiscal position) on write.
+        // zz_store_customer: Odoo's "created by Sales team is a Brand" rule leaves a contact made with it
+        // alone (tools/odoo/fix_brand_rule.py). The till's key belongs to a Sales-team member, and that
+        // rule used to move the number off every new customer.
+        val id = odoo.call("res.partner", "create", jsonOf(
+            "vals_list" to listOf(vals),
+            "context" to mapOf(STORE_CUSTOMER to true),
+        )).jsonArray.first().jsonPrimitive.intOrNull!!
+        // Read back: Odoo computes fields (state from VAT, fiscal position) on write, and its rules may
+        // have changed the contact (see [lostPhone]).
         return read(id) ?: Customer(id, name, e164, clean, gstTreatment, resolvedState)
     }
 
@@ -217,6 +226,28 @@ class CustomerService(private val odoo: OdooJson2Client) {
         internal fun indexDelta(rows: List<JsonObject>, serverTimeMs: Long?): IndexDelta {
             val (keep, drop) = rows.partition { it.bool("active") && it.str("phone_sanitized") != null }
             return IndexDelta(indexRows(keep), drop.mapNotNull { it.int("id") }, serverTimeMs)
+        }
+
+        /** Context key on `res.partner.create`: a store customer, never a Brand (Odoo server action 1384). */
+        const val STORE_CUSTOMER = "zz_store_customer"
+
+        /**
+         * Odoo kept no [e164] on the customer it just saved: a rule moved the number off (as the Brand rule
+         * did until 3 Nov 2026). Without it the WhatsApp bill never goes and the customer can't be found by
+         * number again. False when no number was sent.
+         */
+        fun lostPhone(e164: String?, saved: Customer): Boolean =
+            e164 != null && nationalDigits(saved.phone ?: "") != e164.takeLast(10)
+
+        /**
+         * A number as Odoo's customer list shows it: "+91 98212 71573" for an Indian mobile, any other
+         * number as Odoo has it. Null when there is none.
+         */
+        fun displayPhone(phone: String?): String? {
+            val p = phone?.trim()?.takeIf { it.isNotEmpty() } ?: return null
+            val d = nationalDigits(p)
+            val indian = d.length == 10 && (p.startsWith("+91") || !p.startsWith("+"))
+            return if (indian) "+91 ${d.take(5)} ${d.drop(5)}" else p
         }
 
         /** Results per page in the customer dialog; the next page loads as the list is scrolled. */

@@ -10,6 +10,7 @@ import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.*
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.getValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
@@ -20,6 +21,7 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.compose.ui.window.Dialog
 import androidx.compose.ui.window.DialogProperties
+import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.bohemian.odoo.pos.R
 import com.bohemian.odoo.pos.payment.SplitLine
 
@@ -101,13 +103,19 @@ private fun PaymentLineRow(line: SplitLine, ui: SplitUi, vm: PosViewModel) {
                 PartState.Charging -> "Charging on the terminal…"
                 is PartState.Paid -> "✓ Paid" + (part.attempt.details?.rrn?.let { " · RRN $it" } ?: "")
                 is PartState.Failed -> "✕ ${part.reason.lineSequence().first()}"
-                is PartState.Unconfirmed -> "⚠ Not confirmed: check the yellow bar"
+                is PartState.Unconfirmed -> "⚠ Not confirmed by the terminal: check it, then decide"
             }
             Text(status, fontSize = 13.sp, maxLines = 2, overflow = TextOverflow.Ellipsis,
                 color = when (part) { is PartState.Paid -> Zz.Green; is PartState.Failed, is PartState.Unconfirmed -> Zz.Red; else -> Zz.Muted })
         }
         Text(line.amount.format(), fontWeight = FontWeight.Bold, fontSize = 18.sp)
         Spacer(Modifier.width(8.dp))
+        if (part is PartState.Unconfirmed) {
+            val ref = part.attempt.billingRef
+            val busy by vm.barBusy.collectAsStateWithLifecycle()
+            DecisionButtons(ref in busy, { vm.askDecision(paid = true, ref) }, { vm.askDecision(paid = false, ref) })
+            Spacer(Modifier.width(8.dp))
+        }
         if (line.mode != null && part !is PartState.Paid && part !is PartState.Unconfirmed) {
             Button(onceIn { vm.splitCharge(line.uuid) }, enabled = part != PartState.Charging && line.amount.isPositive, shape = RoundedCornerShape(6.dp),
                 colors = ButtonDefaults.buttonColors(containerColor = Zz.Red, contentColor = Zz.Cream)) { Text("CHARGE") }

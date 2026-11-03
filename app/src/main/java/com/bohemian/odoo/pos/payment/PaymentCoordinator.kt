@@ -10,17 +10,26 @@ import com.bohemian.odoo.pos.pine.SaleRequest
 import com.bohemian.odoo.pos.pine.VoidRequest
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.NonCancellable
-import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
+import kotlinx.coroutines.withTimeoutOrNull
 
-data class StatusPolicy(val maxChecks: Int = 3, val intervalMs: Long = 5_000)
+/**
+ * GetStatus timing (HARD RULE 5): the wait before each check. The first comes soon after the terminal
+ * answers, since a GetStatus itself takes a few seconds on the E700 (5 s × 3 kept cashiers waiting about
+ * 30 s, 3 Nov 2026). A UPI decline or cancel the terminal states outright is confirmed with
+ * [confirmChecks] check(s), not the whole loop.
+ */
+data class StatusPolicy(val delaysMs: List<Long> = listOf(1_000, 4_000, 5_000), val confirmChecks: Int = 1) {
+    val maxChecks: Int get() = delaysMs.size
+}
 
 sealed interface PaymentOutcome {
     val attempt: PaymentAttempt?
@@ -62,6 +71,13 @@ class PaymentCoordinator(
      */
     private val _checking = MutableStateFlow<Set<String>>(emptySet())
     val checking: StateFlow<Set<String>> = _checking.asStateFlow()
+
+    /** The orders of [checking], so the waiting dialog of that bill can offer Force done / Not paid. */
+    private val _checkingOrders = MutableStateFlow<Set<String>>(emptySet())
+    val checkingOrders: StateFlow<Set<String>> = _checkingOrders.asStateFlow()
+
+    /** Attempts a cashier has just decided: wakes their status loop at once instead of after its wait. */
+    private val decided = MutableStateFlow<Set<String>>(emptySet())
 
     /**
      * Charge [amount] for [orderUuid]. [orderTotal] is the bill; a split bill is paid in several
@@ -129,7 +145,10 @@ class PaymentCoordinator(
     }
 
     /**
-     * Supervisor decision for NEEDS_REVIEW / UNKNOWN after checking the terminal / charge slip.
+     * The cashier's Force done / Not paid (Odoo's "Force done") for an attempt the terminal has not
+     * confirmed, after looking at the terminal or the customer's app. HARD RULE 5's human decision: it is
+     * taken under the mutex, so a GetStatus already in flight finishes first and a definitive answer from
+     * the terminal wins. A running status loop wakes at once and ends with this decision.
      * Idempotent: an attempt that is already final (the status check got there first, or a
      * double tap) keeps its state and its outcome is returned. Null when there is no such attempt.
      */
@@ -142,8 +161,14 @@ class PaymentCoordinator(
         val state = if (paid) AttemptState.RESOLVED_PAID else AttemptState.RESOLVED_NOT_PAID
         journal.transition(billingRef, state, clock(), note = "manual: $note")
         PosLog.w("PAYMENT_MANUAL_RESOLVE", "ref" to billingRef, "paid" to paid)
+        // Booked in Odoo with no transaction id: the way to find these in Odoo, as Odoo's own force done.
+        if (paid) PosLog.w("PAYMENT_FORCE_DONE", "ref" to billingRef, "mode" to a.mode, "amount" to a.amount)
+        decided.update { it + billingRef }
         outcomeOf(journal.get(billingRef) ?: a, note)
     }
+
+    /** The attempt's outcome as the journal has it now (a decision may have landed since a loop began). */
+    suspend fun outcomeNow(billingRef: String): PaymentOutcome? = journal.get(billingRef)?.let { outcomeOf(it, it.note ?: "") }
 
     /** Used by Reconciler at startup; caller must not hold the mutex. */
     internal suspend fun reconcile(a: PaymentAttempt): PaymentOutcome = withContext(NonCancellable) {
@@ -166,12 +191,13 @@ class PaymentCoordinator(
     /** What a locked step decided: an outcome, or a status check to run without holding the lock. */
     private sealed interface Step {
         data class Done(val outcome: PaymentOutcome) : Step
-        data class CheckStatus(val attempt: PaymentAttempt) : Step
+        /** [confirmOnly]: the terminal said declined or cancelled; one check confirms it. */
+        data class CheckStatus(val attempt: PaymentAttempt, val confirmOnly: Boolean = false) : Step
     }
 
     private suspend fun finish(step: Step): PaymentOutcome = when (step) {
         is Step.Done -> step.outcome
-        is Step.CheckStatus -> statusLoop(step.attempt)
+        is Step.CheckStatus -> statusLoop(step.attempt, if (step.confirmOnly) policy.delaysMs.take(policy.confirmChecks) else policy.delaysMs)
     }
 
     // ------------------------------------------------------------------ void (Phase 4b)
@@ -301,8 +327,10 @@ class PaymentCoordinator(
         }
         is GatewayResult.Declined ->
             if (a.mode.needsStatusCheckOnFailure) {
-                // Pine: for UPI, a "failed"/session-expired response must be confirmed via GetStatus.
-                Step.CheckStatus(a)
+                // Pine: for UPI, a "failed"/session-expired response must be confirmed via GetStatus. The
+                // terminal said so outright (or the cashier cancelled the QR): one check, not the loop.
+                PosLog.i("PAYMENT_DECLINED_CONFIRM", "ref" to a.billingRef, "code" to r.code)
+                Step.CheckStatus(a, confirmOnly = true)
             } else {
                 journal.transition(a.billingRef, AttemptState.DECLINED, clock(), details = r.details, note = r.message)
                 PosLog.i("PAYMENT_FAILED", "ref" to a.billingRef, "code" to r.code)
@@ -328,18 +356,20 @@ class PaymentCoordinator(
      * mutex: it is taken for each GetStatus and its journal step only. Before every check the
      * attempt is read again, so a supervisor decision made in the meantime wins and ends the loop.
      */
-    private suspend fun statusLoop(a: PaymentAttempt): PaymentOutcome {
+    private suspend fun statusLoop(a: PaymentAttempt, delays: List<Long>): PaymentOutcome {
         val mine = mutex.withLock {
             if (a.billingRef in _checking.value) return@withLock false
             _checking.update { it + a.billingRef }
+            _checkingOrders.update { it + a.orderUuid }
             journal.get(a.billingRef)?.takeIf { !it.state.isFinal }?.let { journal.transition(a.billingRef, AttemptState.STATUS_CHECK, clock()) }
             true
         }
         // Another status check for this attempt is already running: report it as unresolved for now.
         if (!mine) return PaymentOutcome.Unresolved(current(a))
         try {
-            repeat(policy.maxChecks) { i ->
-                delay(policy.intervalMs)
+            delays.forEachIndexed { i, wait ->
+                // A cashier's decision ends the wait at once; the check below then finds it and stops.
+                withTimeoutOrNull(wait) { decided.first { a.billingRef in it } }
                 val outcome = mutex.withLock { checkOnce(a, i + 1) }
                 if (outcome != null) return outcome
             }
@@ -347,12 +377,14 @@ class PaymentCoordinator(
                 val fresh = current(a)
                 if (fresh.state.isFinal || fresh.state == AttemptState.NEEDS_REVIEW) outcomeOf(fresh, fresh.note ?: "")
                 else {
-                    journal.transition(a.billingRef, AttemptState.UNKNOWN, clock(), note = "status not confirmed after ${policy.maxChecks} checks")
+                    journal.transition(a.billingRef, AttemptState.UNKNOWN, clock(), note = "status not confirmed after ${delays.size} checks")
                     PaymentOutcome.Unresolved(current(a))
                 }
             }
         } finally {
             _checking.update { it - a.billingRef }
+            _checkingOrders.update { it - a.orderUuid }
+            decided.update { it - a.billingRef }
         }
     }
 

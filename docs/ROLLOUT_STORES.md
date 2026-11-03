@@ -103,7 +103,12 @@ payment-method change per store.**
 - **Bill numbers:** Odoo numbers the bills itself (`name` "ZenZebra - 000028", `pos_reference`
   "260-1-000028"). The till sends neither, so two tills can't make the same number.
 - **WhatsApp bills:** both WhatsApp bill automations filter on state, a +91 phone and `source not in
-  (mobile, kiosk)`, with no store filter. E700 orders (`source = pos`) from every store are covered.
+  (mobile, kiosk)`, with no store filter. E700 orders (`source = pos`) from every store are covered,
+  provided the customer keeps a phone.
+  - **Until 3 Nov 2026 the till's new customers lost theirs:** the "created by Sales team is a Brand" rule
+    ran on them, because the till's key belongs to a Sales-team member.
+  - **The fix and the repair:** `docs/ZZ_CASH.md`, "The Brand rule".
+  - **If the till ever gets its own Odoo user:** keep that user out of the Sales team.
 - **Load on Odoo:** about 12 small reads a minute per idle till (the config plus 11 `write_date`
   stamps, `odoo/LiveSync.kt`). SALES adds 3 a minute while it is open.
 - **Taxes:** all 51 sale taxes belong to company 1, and every active store is in company 1.

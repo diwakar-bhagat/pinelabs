@@ -139,3 +139,34 @@ the settled-sale refund work.
   - Earning and booking stay as before (`LoyaltyPoints`, `confirm_coupon_programs`), in one call
     with the offers' coupons.
 
+
+## The Brand rule took the number off till customers (2026-11-03)
+
+- **What happened:** the till creates customers under a key whose user leads the Sales team. Odoo automation 23
+  ("Contacts: created by Sales team is a Brand", server action 1384) then ran action 1393 on every new till
+  customer. A contact with no orders yet became a Brand: `x_contact_kind='brand'`, the number moved from
+  `phone` to `x_brand_phone`, and `x_first_name` was emptied.
+- **What it cost:** the bill automations (1277, 1283) need `partner_id.phone ilike '+91'`, so these customers
+  got no WhatsApp bill. Their ZZ Cash cards still earned (79 cards, 3,846 points on 3 Nov), but the till could
+  not find them by number, so 11 people were saved twice and their points sit on two cards.
+- **The fix:**
+  - `tools/odoo/fix_brand_rule.py` makes action 1384 leave a walk-in store customer alone: an Indian mobile,
+    no email, no company, no parent, or the till's context `zz_store_customer`.
+  - `tools/odoo/repair_till_customers.py` gives the contacts with bills their phone back and marks them Store
+    customer.
+  - The duplicates are merged by hand: Contacts → Action → Merge, then one card per person. Each duplicate
+    card also got the ₹30 welcome credit, which is the owner's call.
+- **Server action 1384 after the fix:**
+
+  ```python
+  team = env['crm.team'].browse(1)
+  if env.user in (team.member_ids | team.user_id) and not env.context.get('zz_store_customer'):
+      brands = records.filtered(lambda p: p.is_company or p.email or p.parent_id
+                                or not (p.phone_sanitized or '').startswith('+91'))
+      if brands:
+          env['ir.actions.server'].browse(1393).with_context(active_model='res.partner', active_ids=brands.ids).run()
+  ```
+
+  If someone edits it in Odoo, compare it with this. The script refuses to overwrite code it does not expect.
+- **On the till (0.10.0):** a new customer that comes back from Odoo without its number shows a red note and
+  `CUSTOMER_PHONE_DROPPED`, so a rule like this is seen the same day.

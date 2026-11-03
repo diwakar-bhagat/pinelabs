@@ -80,7 +80,7 @@ class PaymentCoordinatorTest {
     private val gen = BillingRefGenerator("TEST")
     private fun TestScope.coordinator() = PaymentCoordinator(
         gateway = { gw }, journal = journal, voids = voids, refs = { gen },
-        policy = StatusPolicy(maxChecks = 3, intervalMs = 5_000), backgroundScope = backgroundScope,
+        policy = StatusPolicy(delaysMs = listOf(5_000, 5_000, 5_000), confirmChecks = 3), backgroundScope = backgroundScope,
     )
     private val ok = GatewayResult.Approved(TxnDetails(rrn = "123", authCode = "A1"))
     private val amt = Paise(52800)

@@ -39,7 +39,19 @@ class CustomerSaveTest {
         assertEquals("create", method)
         val vals = create["vals_list"]!!.jsonArray.single().jsonObject
         assertEquals(mapOf("name" to JsonPrimitive("Riya"), "phone" to JsonPrimitive("+919876543210")), vals)
+        // A store customer, so Odoo's "created by Sales team is a Brand" rule leaves it alone.
+        assertEquals("""{"zz_store_customer":true}""", create["context"].toString())
         assertEquals("read", body().first)
+    }
+
+    @Test fun `a customer Odoo saved without the number is told apart (the Brand rule, 3 Nov 2026)`() = runTest {
+        server.enqueue(MockResponse().setBody("[78]"))
+        server.enqueue(MockResponse().setBody("""[{"id": 78, "name": "Aman", "phone": false, "vat": false,
+            "l10n_in_gst_treatment": "consumer", "state_id": false, "property_account_position_id": false}]"""))
+        val c = service().create("Aman", "+919123456789")
+        assertEquals(true, CustomerService.lostPhone("+919123456789", c))
+        assertEquals(false, CustomerService.lostPhone("+919123456789", c.copy(phone = "+91 91234 56789")))
+        assertEquals(false, CustomerService.lostPhone(null, c))
     }
 
     @Test fun `exact lookup is by the sanitized phone`() = runTest {

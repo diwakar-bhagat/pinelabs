@@ -180,6 +180,10 @@ interface PaymentAttemptDao {
     @Query("UPDATE payment_attempt SET eventId = :eventId, state = CASE WHEN state = 'STARTING' THEN 'IN_FLIGHT' ELSE state END, updatedAt = :now WHERE billingRef = :ref")
     suspend fun setEventId(ref: String, eventId: String, now: Long)
 
+    /** Payments a cashier marked paid by hand (Force done) since [since]: booked in Odoo with no terminal ref. */
+    @Query("SELECT * FROM payment_attempt WHERE state = 'RESOLVED_PAID' AND updatedAt >= :since ORDER BY updatedAt")
+    suspend fun forceDoneSince(since: Long): List<PaymentAttemptEntity>
+
     /** Card sales the cashier may void (newest first). */
     @Query("SELECT * FROM payment_attempt WHERE mode = 'CARD' AND state IN ('SUCCESS','RESOLVED_PAID') AND createdAt >= :since ORDER BY createdAt DESC")
     suspend fun paidCardSince(since: Long): List<PaymentAttemptEntity>

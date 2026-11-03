@@ -237,7 +237,7 @@ class SaleFinalizer(
      * A split bill is finalized here only when its terminal parts cover the whole total; while it is
      * partly paid this returns null and the split screen (or the red bar) finishes it.
      */
-    suspend fun finalizeTerminal(a: PaymentAttempt): PaidSale? {
+    suspend fun finalizeTerminal(a: PaymentAttempt, sendNow: Boolean = true): PaidSale? {
         val snap = load(a.orderUuid) ?: run {
             PosLog.e("FINALIZE_NO_SNAPSHOT", null, "order" to a.orderUuid, "ref" to a.billingRef)
             return null
@@ -249,9 +249,9 @@ class SaleFinalizer(
                 PosLog.i("SPLIT_PARTLY_PAID", "order" to a.orderUuid, "paid" to paid, "total" to snap.totals().totalIncl)
                 return null
             }
-            return finalize(snap, parts.map { it.paymentLine() })
+            return finalize(snap, parts.map { it.paymentLine() }, sendNow)
         }
-        return finalize(snap, a.paymentLine())
+        return finalize(snap, listOf(a.paymentLine()), sendNow)
     }
 
     /**
@@ -259,13 +259,13 @@ class SaleFinalizer(
      * Cash is only what is still due (the change is handed back, not booked), so the payments add
      * up to Odoo's total exactly (the server refuses anything else).
      */
-    suspend fun finalizeSplit(snap: SaleSnapshot): PaidSale {
+    suspend fun finalizeSplit(snap: SaleSnapshot, sendNow: Boolean = true): PaidSale {
         val parts = paidAttempts(snap.orderUuid)
         val terminal = parts.fold(Paise.ZERO) { acc, p -> acc + p.amount }
         val cash = snap.totals().totalIncl - terminal
         require(cash.value >= 0) { "terminal parts exceed the bill" }
         val cashLine = if (cash.isPositive) listOf(PaymentLineData(cashPaymentMethodId(), cash, null, null, null)) else emptyList()
-        return finalize(snap, parts.map { it.paymentLine() } + cashLine)
+        return finalize(snap, parts.map { it.paymentLine() } + cashLine, sendNow)
     }
 
     /** Split bills with some terminal parts paid but not the total (red bar; they block session close, I9). */
@@ -294,9 +294,10 @@ class SaleFinalizer(
 
     private fun PaymentAttempt.paymentLine() = PaymentLineData(terminalMethodFor(mode), amount, mode, billingRef, details)
 
-    suspend fun finalize(snap: SaleSnapshot, payment: PaymentLineData): PaidSale = finalize(snap, listOf(payment))
+    suspend fun finalize(snap: SaleSnapshot, payment: PaymentLineData, sendNow: Boolean = true): PaidSale = finalize(snap, listOf(payment), sendNow)
 
-    suspend fun finalize(snap: SaleSnapshot, payments: List<PaymentLineData>): PaidSale {
+    /** [sendNow] false: persisted only; the caller sends it with [OrderSyncService.sendHeld]. */
+    suspend fun finalize(snap: SaleSnapshot, payments: List<PaymentLineData>, sendNow: Boolean = true): PaidSale {
         val sale = PaidSale(
             orderUuid = snap.orderUuid, sessionId = snap.sessionId, lines = snap.cartLines(),
             totals = snap.totals(), customer = snap.customer(), payments = payments,
@@ -308,7 +309,7 @@ class SaleFinalizer(
             presetId = snap.presetId,
             offers = snap.appliedOffers(),
         )
-        orderSync.submit(sale)          // outbox row written first inside submit()
+        orderSync.submit(sale, sendNow) // outbox row written first inside submit()
         snapshots.delete(snap.orderUuid)
         return sale
     }

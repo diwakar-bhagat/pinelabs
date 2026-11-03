@@ -70,22 +70,43 @@ class OrderSyncService(
     private val clock: () -> Long = System::currentTimeMillis,
     private val onPayloadGenerated: ((uuid: String, payload: JsonObject) -> Unit)? = null,
 ) {
-    /** Persist first, then try once. Returns true if Odoo confirmed now. */
-    suspend fun submit(sale: PaidSale): Boolean =
-        submitPayload(sale.orderUuid, buildPayload(sale), sale.totals.totalIncl.value, couponData(sale))
+    /**
+     * Persist first, then try once. Returns true if Odoo confirmed now. With [sendNow] false the order is
+     * only persisted and [sendHeld] sends it: the till shows "Paid" once the order is safe in the outbox (I7)
+     * instead of after Odoo's answer.
+     */
+    suspend fun submit(sale: PaidSale, sendNow: Boolean = true): Boolean =
+        submitPayload(sale.orderUuid, buildPayload(sale), sale.totals.totalIncl.value, couponData(sale), sendNow)
 
     /**
-     * Any ready sync_from_ui payload (sale or refund): persist first, then try once.
+     * Any ready sync_from_ui payload (sale or refund): persist first, then try once ([sendNow]).
      * [couponData] is the ZZ Cash change to book with `confirm_coupon_programs` once the order exists.
      */
-    suspend fun submitPayload(uuid: String, payload: JsonObject, amountPaise: Long, couponData: JsonObject? = null): Boolean {
+    suspend fun submitPayload(uuid: String, payload: JsonObject, amountPaise: Long, couponData: JsonObject? = null, sendNow: Boolean = true): Boolean {
         onPayloadGenerated?.invoke(uuid, payload)
         if (couponData != null) {
             checkNotNull(loyalty) { "loyalty journal missing" }
                 .upsert(LoyaltyConfirmEntity(uuid, couponData.toString(), 0, null, clock(), 0))
         }
         outbox.upsert(OutboxEntity(uuid, payload.toString(), amountPaise, 0, null, clock(), 0))
+        if (!sendNow) {
+            held[uuid] = payload
+            return false
+        }
         return withContext(OdooLane.SALE) { trySend(uuid, payload) }.also { sent -> if (!sent) countNotSentAtOnce() }
+    }
+
+    /** Orders persisted by [submit] with sendNow false whose first send has not run yet. */
+    private val held = java.util.concurrent.ConcurrentHashMap<String, JsonObject>()
+
+    /**
+     * The first send of an order [submit] held. True when Odoo has it, also when the outbox pass sent it
+     * first; false when it waits in the outbox (the pass retries it, as any order).
+     */
+    suspend fun sendHeld(uuid: String): Boolean {
+        val payload = held.remove(uuid) ?: return !outbox.contains(uuid)
+        return withContext(OdooLane.SALE) { trySend(uuid, payload) || !outbox.contains(uuid) }
+            .also { sent -> if (!sent) countNotSentAtOnce() }
     }
 
     /** Sales today whose first send did not reach Odoo (out of reach, busy or refused), for the till's status row. */

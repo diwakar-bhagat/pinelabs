@@ -45,6 +45,7 @@ import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.bohemian.odoo.pos.R
 import com.bohemian.odoo.pos.core.Paise
 import com.bohemian.odoo.pos.odoo.CartLine
+import com.bohemian.odoo.pos.odoo.CustomerService
 import com.bohemian.odoo.pos.odoo.LineNote
 import com.bohemian.odoo.pos.odoo.MenuTree
 import com.bohemian.odoo.pos.odoo.ParkedBill
@@ -476,11 +477,15 @@ private fun Keypad(s: SellState, vm: PosViewModel, keyHeight: androidx.compose.u
 private fun PayRow(s: SellState, vm: PosViewModel) {
     val canPay = s.totals != null && !s.pricing && s.pay == PayUi.Idle && s.config?.sessionOpen == true
     val single = canPay && !s.partPaid.isPositive
+    // A card / UPI payment of this bill the terminal has not confirmed: no cash or split on top of it, or the
+    // customer may pay twice. The yellow bar's Force done / Not paid settles it first.
+    val unresolved by vm.unresolved.collectAsStateWithLifecycle()
+    val unconfirmed = unresolved.any { it.orderUuid == s.orderUuid }
     Row(Modifier.fillMaxWidth().padding(8.dp), horizontalArrangement = Arrangement.spacedBy(6.dp)) {
         PayTile("CARD", R.drawable.mdi_credit_card_outline, single, Modifier.weight(1f)) { vm.payWithTerminal(PayMode.CARD) }
         PayTile("UPI", R.drawable.mdi_qrcode, single, Modifier.weight(1f)) { vm.payWithTerminal(PayMode.UPI) }
-        PayTile("CASH", R.drawable.mdi_cash, single, Modifier.weight(1f), dark = true) { vm.payCash(null) }
-        PayTile("SPLIT", R.drawable.mdi_call_split, canPay, Modifier.weight(1f), dark = true) { vm.openSplit() }
+        PayTile("CASH", R.drawable.mdi_cash, single && !unconfirmed, Modifier.weight(1f), dark = true) { vm.payCash(null) }
+        PayTile("SPLIT", R.drawable.mdi_call_split, canPay && !(unconfirmed && !s.partPaid.isPositive), Modifier.weight(1f), dark = true) { vm.openSplit() }
     }
 }
 
@@ -640,14 +645,26 @@ private fun CustomerMatches(s: SellState, vm: PosViewModel) {
     Text("${s.customerMatches.size}${if (s.customerHasMore) "+" else ""} found" + if (s.customerHasMore) " · scroll for more" else "",
         fontSize = 13.sp, color = Zz.Muted)
     LazyColumn(Modifier.heightIn(max = 300.dp), state = list) {
+        // Like Odoo's customer list: the name, then the number, so two customers with one name are told apart.
         items(s.customerMatches, key = { it.id }) { m ->
             Row(Modifier.fillMaxWidth().clickable { vm.pickCustomer(m) }.padding(vertical = 10.dp),
                 verticalAlignment = Alignment.CenterVertically) {
                 Text(m.name, Modifier.weight(1f), fontWeight = FontWeight.Bold, maxLines = 1, overflow = TextOverflow.Ellipsis)
-                Text(m.phone ?: "", fontSize = 13.sp, color = Zz.Muted)
+                CustomerPhone(m.phone, Modifier.weight(1f))
             }
             HorizontalDivider(color = Zz.Line)
         }
+    }
+}
+
+/** A customer's number as Odoo's list shows it ("+91 98212 71573"), or a grey "no number". */
+@Composable
+private fun CustomerPhone(phone: String?, modifier: Modifier = Modifier) {
+    val shown = CustomerService.displayPhone(phone)
+    Row(modifier, verticalAlignment = Alignment.CenterVertically) {
+        MdiIcon(R.drawable.mdi_phone, null, if (shown != null) Zz.Black else Zz.Line, size = 16)
+        Spacer(Modifier.width(6.dp))
+        Text(shown ?: "no number", fontSize = 15.sp, color = if (shown != null) Zz.Black else Zz.Muted)
     }
 }
 
@@ -667,7 +684,7 @@ private fun CustomerDialog(s: SellState, vm: PosViewModel, onDismiss: () -> Unit
                     Row(Modifier.fillMaxWidth().background(Zz.GoldSoft).padding(12.dp), verticalAlignment = Alignment.CenterVertically) {
                         Column(Modifier.weight(1f)) {
                             Text(cust.name, fontWeight = FontWeight.Bold)
-                            cust.phone?.let { Text(it, fontSize = 13.sp, color = Zz.Muted) }
+                            CustomerPhone(cust.phone)
                             val bal = s.zzCash?.takeIf { it.partnerId == cust.id }
                             Text(when {
                                 bal != null -> "${bal.points.toPlainString()} ZZ Cash"

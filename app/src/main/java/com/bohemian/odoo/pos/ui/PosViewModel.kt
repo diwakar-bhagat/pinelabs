@@ -68,6 +68,7 @@ import com.bohemian.odoo.pos.odoo.PricelistHold
 import com.bohemian.odoo.pos.odoo.PosConfig
 import com.bohemian.odoo.pos.odoo.Product
 import com.bohemian.odoo.pos.odoo.SaleSnapshot
+import com.bohemian.odoo.pos.payment.AttemptState
 import com.bohemian.odoo.pos.payment.PaymentAttempt
 import com.bohemian.odoo.pos.odoo.PartlyPaid
 import com.bohemian.odoo.pos.payment.PaymentSplit
@@ -157,6 +158,8 @@ data class SetupState(
     val odooRate: String? = null,
     /** Whose key this till uses and until when (F4). */
     val keyInfo: String? = null,
+    /** "Force done today: 2, ₹350.00 …" from the payment journal; null when there were none. */
+    val forceDoneToday: String? = null,
     val busy: Boolean = false,
     val error: String? = null,
     /** Result of "Change PIN" on the Setup screen. */
@@ -212,7 +215,8 @@ data class PinUi(val entered: String = "", val message: String? = null)
 
 sealed interface PayUi {
     data object Idle : PayUi
-    data class Working(val mode: String, val message: String) : PayUi
+    /** [orderUuid]: the bill whose terminal payment this is, so its status check can offer Force done. */
+    data class Working(val mode: String, val message: String, val orderUuid: String? = null) : PayUi
     data class Done(
         val outcome: PaymentOutcome?,          // null for cash
         val paidByCash: Boolean = false,
@@ -224,11 +228,17 @@ sealed interface PayUi {
         val printing: Boolean = false,
         /** The order this result is for, when it may not be the bill on screen (resolved from the bar). */
         val orderUuid: String? = null,
+        /** The paid order being sent to Odoo behind this screen; [inOdoo] null while it goes, then the answer. */
+        val syncUuid: String? = null,
+        val inOdoo: Boolean? = null,
     ) : PayUi {
         val isPaid: Boolean get() = paidByCash || splitSummary != null || outcome is PaymentOutcome.Paid
     }
     data class Error(val message: String) : PayUi
 }
+
+/** Force done ([paid]) or Not paid, asked for [ref] and waiting for the cashier to confirm it. */
+data class PaymentDecision(val ref: String, val mode: PayMode, val amount: Paise, val paid: Boolean)
 
 data class SellState(
     val config: PosConfig? = null,
@@ -294,6 +304,8 @@ data class SellState(
     val keypadKeyDp: Int = 36,
     /** Split bill: card / UPI parts of this bill already paid. While positive the cart is locked. */
     val partPaid: Paise = Paise.ZERO,
+    /** The Force done / Not paid confirmation on screen, if any. */
+    val decision: PaymentDecision? = null,
     /** Live sync changed this cart's prices ("Prices updated from Odoo at 1:21 PM"); not an error. */
     val notice: String? = null,
     /** Promotions, codes and free items on this bill (ZZ Cash aside), priced by Odoo. */
@@ -534,7 +546,18 @@ class PosViewModel(private val c: AppContainer) : ViewModel() {
         startLiveSync()
     }
 
-    fun reopenSetup() { _configured.value = false; _setup.update { it.copy(odooRate = odooRateText()) }; loadConfigs() }
+    fun reopenSetup() { _configured.value = false; _setup.update { it.copy(odooRate = odooRateText()) }; refreshForceDone(); loadConfigs() }
+
+    /** Today's Force done payments on this till, for Setup: each is in Odoo with no terminal reference. */
+    private fun refreshForceDone() = launchSafe {
+        val since = java.util.Calendar.getInstance().apply {
+            set(java.util.Calendar.HOUR_OF_DAY, 0); set(java.util.Calendar.MINUTE, 0); set(java.util.Calendar.SECOND, 0); set(java.util.Calendar.MILLISECOND, 0)
+        }.timeInMillis
+        val forced = c.db.attempts().forceDoneSince(since)
+        _setup.update { it.copy(forceDoneToday = forced.takeIf { f -> f.isNotEmpty() }?.let { f ->
+            "Force done today: ${f.size}, ${Paise(f.sumOf { a -> a.amountPaise }).format()} (in Odoo with no terminal reference)"
+        }) }
+    }
 
     // ------------------------------------------------------------------ Setup PIN
 
@@ -1831,7 +1854,7 @@ class PosViewModel(private val c: AppContainer) : ViewModel() {
             val found = c.customerIndex.exact(e164) ?: c.customers.findByPhone(e164)
             // The cashier typed another number meanwhile: this answer is for the old one, drop it.
             if (_sell.value.phone != typed) return@launchSafe _sell.update { it.copy(customerBusy = false) }
-            if (found != null) pickCustomer(found)
+            if (found != null) pickCustomer(found) else PosLog.i("CUSTOMER_NOT_FOUND", "phone" to Redact.phone(e164), "at" to "find")
             _sell.update { it.copy(customerBusy = false, customerNotFound = found == null) }
         } catch (e: Exception) {
             PosLog.w("CUSTOMER_LOOKUP_FAILED", "phone" to Redact.phone(e164), "err" to e.message)
@@ -1856,6 +1879,9 @@ class PosViewModel(private val c: AppContainer) : ViewModel() {
             val saved = existing ?: c.customers.create(name, e164)
             c.customerIndex.put(saved, e164)
             PosLog.i("CUSTOMER_SAVED", "partner" to saved.id, "new" to (existing == null))
+            // An Odoo rule took the number off the new customer: say so now, not when the bill never arrives.
+            val lost = existing == null && CustomerService.lostPhone(e164, saved)
+            if (lost) PosLog.w("CUSTOMER_PHONE_DROPPED", "partner" to saved.id)
             // The form is locked while saving; if the number changed anyway, do not attach this one.
             if (c.customers.normalizeIndianMobile(_sell.value.phone) != e164) {
                 return@launchSafe _sell.update {
@@ -1865,9 +1891,12 @@ class PosViewModel(private val c: AppContainer) : ViewModel() {
             }
             pickCustomer(saved)
             _sell.update {
-                it.copy(customerBusy = false, customerNoteOk = true, customerNote =
-                    if (existing == null) "Saved: ${saved.name} · ••••${e164.takeLast(4)}"
-                    else "Already in Odoo as ${saved.name}: attached.")
+                it.copy(customerBusy = false, customerNoteOk = !lost, customerNote = when {
+                    lost -> "Saved ${saved.name}, but Odoo removed the number from this customer (an Odoo rule). " +
+                        "The WhatsApp bill and ZZ Cash won't find them: tell the admin."
+                    existing == null -> "Saved: ${saved.name} · ••••${e164.takeLast(4)}"
+                    else -> "Already in Odoo as ${saved.name}: attached."
+                })
             }
         } catch (e: Exception) {
             PosLog.w("CUSTOMER_SAVE_FAILED", "phone" to Redact.phone(e164), "err" to e.message)
@@ -2106,22 +2135,33 @@ class PosViewModel(private val c: AppContainer) : ViewModel() {
             return
         }
         // A mobile is found in the till's index at once, with no call. Nobody there (saved at another store
-        // since the last update), a name, or no index yet: Odoo is asked, as before.
+        // since the last update), a name, or no index yet: Odoo is asked, as before. A full number the
+        // index lists nobody under may be a customer saved minutes ago at another till or on the web POS:
+        // the index's matches show at once and Odoo's answer joins them.
+        var shown = emptyList<Customer>()
         if (CustomerService.isPhoneQuery(query) && c.customerIndex.ready) {
             val local = c.customerIndex.byPhone(query)
-            if (local.isNotEmpty()) {
+            val full = c.customers.normalizeIndianMobile(query)
+            if (local.isNotEmpty() && (full == null || c.customerIndex.exact(full) != null)) {
                 customerListLocal = true
                 _sell.update { it.copy(customerMatches = local, customerHasMore = local.size == CustomerService.PAGE) }
                 return
+            }
+            if (full != null) {
+                shown = local
+                _sell.update { it.copy(customerMatches = local, customerHasMore = false) }
             }
         }
         phoneSearchJob = launchSafe {
             if (debounce) delay(CUSTOMER_SEARCH_DEBOUNCE_MS)
             try {
                 val page = c.customers.search(query)
-                // Only for what is typed now: a slow answer for older text is dropped.
+                // Only for what is typed now: a slow answer for older text is dropped. A full number's few
+                // matches are one page, so more is never asked for after a merge.
                 _sell.update {
-                    if (it.phone == query) it.copy(customerMatches = page, customerHasMore = page.size == CustomerService.PAGE) else it
+                    if (it.phone != query) it
+                    else if (shown.isNotEmpty()) it.copy(customerMatches = (shown + page).distinctBy { m -> m.id }, customerHasMore = false)
+                    else it.copy(customerMatches = page, customerHasMore = page.size == CustomerService.PAGE)
                 }
             } catch (e: CancellationException) {
                 throw e
@@ -2300,14 +2340,32 @@ class PosViewModel(private val c: AppContainer) : ViewModel() {
         if (lockedByPartPayment()) return@launchPay
         if (c.paymentRoles().forMode(mode) == 0) { _sell.update { it.copy(error = "${mode.label()} is not set up on this till (Setup)") }; return@launchPay }
         val snap = prepareSnapshot() ?: return@launchPay
-        _sell.update { it.copy(pay = PayUi.Working(mode.label(), "Complete the payment on the terminal…")) }
+        _sell.update { it.copy(pay = PayUi.Working(mode.label(), "Complete the payment on the terminal…", snap.orderUuid)) }
         val outcome = c.payments.pay(snap.orderUuid, snap.totals().totalIncl, mode, snap.customerPhone?.takeLast(10))
         handleOutcome(outcome)
+    }
+
+    /**
+     * A card / UPI payment of this bill that is unconfirmed or paid rules out cash (and a new split): the
+     * customer may have paid already, and that terminal money would then never be booked in Odoo
+     * (FINALIZE_NO_SNAPSHOT). Shows why and returns true when the bill must wait.
+     */
+    private suspend fun terminalPaymentPending(split: Boolean = false): Boolean {
+        val orderUuid = _sell.value.orderUuid
+        val a = c.journal.forOrder(orderUuid).firstOrNull { it.state.blocksNewCharge || (!split && it.state.isPaid) } ?: return false
+        // A split bill keeps its own payment screen, where an unconfirmed part is settled.
+        if (split && c.finalizer.load(orderUuid)?.split == true) return false
+        PosLog.w("PAY_REFUSED_PENDING", "ref" to a.billingRef, "state" to a.state, "split" to split)
+        _sell.update { it.copy(error =
+            if (a.state.isPaid) "This bill is already paid (${a.billingRef})."
+            else "Payment ${a.billingRef} for this bill is not confirmed. Tap Force done or Not paid on the yellow bar first.") }
+        return true
     }
 
     fun payCash(tendered: Paise?) = launchPay {
         if (lockedByPartPayment()) return@launchPay
         if (c.settings.cashPaymentMethodId == 0) { _sell.update { it.copy(error = "No cash method configured") }; return@launchPay }
+        if (terminalPaymentPending()) return@launchPay
         val snap = prepareSnapshot() ?: return@launchPay
         val total = snap.totals().totalIncl
         val change = tendered?.takeIf { it >= total }?.minus(total)
@@ -2315,11 +2373,11 @@ class PosViewModel(private val c: AppContainer) : ViewModel() {
         // leaves no journal row that would stop a restart bringing it back to be sold again.
         billPaid(snap.orderUuid)
         _sell.update { it.copy(pay = PayUi.Working("CASH", "Saving order…")) }
-        val sale = c.finalizer.finalize(snap, PaymentLineData(c.settings.cashPaymentMethodId, total, null, null, null))
+        val sale = c.finalizer.finalize(snap, PaymentLineData(c.settings.cashPaymentMethodId, total, null, null, null), sendNow = false)
         countOfferUse(sale)
-        // Paid as soon as Odoo has the order; the bill prints behind the "Paid" screen.
-        _sell.update { it.copy(pay = PayUi.Done(outcome = null, paidByCash = true, cashChange = change)) }
-        printInBackground(sale, "CASH", emptyList())
+        // Paid as soon as the order is safe on the till (I7); Odoo gets it and the bill prints behind the screen.
+        _sell.update { it.copy(pay = PayUi.Done(outcome = null, paidByCash = true, cashChange = change, syncUuid = sale.orderUuid)) }
+        printInBackground(sale, "CASH", emptyList(), after = sendInBackground(sale.orderUuid))
     }
 
     // ------------------------------------------------------------------ split payment (Odoo payment screen)
@@ -2349,6 +2407,7 @@ class PosViewModel(private val c: AppContainer) : ViewModel() {
 
     /** SPLIT on the pay row: save the cart (HARD RULE 4) and open Odoo's payment screen for it. */
     fun openSplit() = launchPay {
+        if (terminalPaymentPending(split = true)) return@launchPay
         val snap = prepareSnapshot(split = true) ?: return@launchPay
         _split.value = splitScreenFor(snap)
     }
@@ -2458,12 +2517,18 @@ class PosViewModel(private val c: AppContainer) : ViewModel() {
         val snap = c.finalizer.load(ui.orderUuid) ?: return@launchSafe _split.update {
             it?.copy(parts = it.parts - uuid, message = "This bill was not saved. Close and press SPLIT again.")
         }
-        _sell.update { it.copy(pay = PayUi.Working(mode.label(), "Complete ${line.amount.format()} on the terminal…")) }
+        _sell.update { it.copy(pay = PayUi.Working(mode.label(), "Complete ${line.amount.format()} on the terminal…", ui.orderUuid)) }
         val outcome = try {
             c.payments.pay(ui.orderUuid, line.amount, mode, snap.customerPhone?.takeLast(10), orderTotal = ui.split.total, expectedPaid = seenPaid)
         } finally {
             _sell.update { it.copy(pay = PayUi.Idle) }
         }
+        PosLog.i("SPLIT_PART", "order" to ui.orderUuid, "mode" to mode, "amount" to line.amount, "outcome" to outcome::class.simpleName)
+        setPart(uuid, settledNow(outcome))
+    }
+
+    /** A split part's state from its outcome; a part a cashier decided (Force done / Not paid) shows that. */
+    private suspend fun setPart(uuid: String, outcome: PaymentOutcome) {
         val state = when (outcome) {
             is PaymentOutcome.Paid -> PartState.Paid(outcome.attempt)
             is PaymentOutcome.NotPaid -> PartState.Failed(outcome.reason)
@@ -2472,12 +2537,19 @@ class PosViewModel(private val c: AppContainer) : ViewModel() {
             is PaymentOutcome.Blocked -> PartState.Failed("Another part of this bill is not confirmed yet. Resolve it on the yellow bar first.")
             is PaymentOutcome.AlreadyPaid -> PartState.Failed("That is more than this bill still needs, or another part was just paid. Check the amounts.")
         }
-        PosLog.i("SPLIT_PART", "order" to ui.orderUuid, "mode" to mode, "amount" to line.amount, "outcome" to outcome::class.simpleName)
         _split.update { it?.copy(parts = it.parts + (uuid to state)) }
-        val paid = c.journal.forOrder(ui.orderUuid).filter { it.state.isPaid }.fold(Paise.ZERO) { acc, a -> acc + a.amount }
+        val orderUuid = outcome.attempt?.orderUuid ?: _split.value?.orderUuid ?: return
+        val paid = c.journal.forOrder(orderUuid).filter { it.state.isPaid }.fold(Paise.ZERO) { acc, a -> acc + a.amount }
         _sell.update { it.copy(partPaid = paid) }
         refreshPartlyPaid()
     }
+
+    /**
+     * An unresolved outcome read again from the journal: a Force done / Not paid may have landed just as
+     * the status loop gave up, and the decision is what the bill must show.
+     */
+    private suspend fun settledNow(outcome: PaymentOutcome): PaymentOutcome =
+        if (outcome is PaymentOutcome.Unresolved) c.payments.outcomeNow(outcome.attempt.billingRef) ?: outcome else outcome
 
     /**
      * Validate: every Card/UPI part paid and the bill covered. Cash is the rest (change handed
@@ -2495,7 +2567,7 @@ class PosViewModel(private val c: AppContainer) : ViewModel() {
             ?: return@launchSafe _split.update { it?.copy(busy = false, message = "This bill was not saved. Close and press SPLIT again.") }
         _sell.update { it.copy(pay = PayUi.Working("SPLIT", "Saving order…")) }
         billPaid(snap.orderUuid) // covered: its cash part leaves no journal row (see payCash)
-        val sale = try { c.finalizer.finalizeSplit(snap) } catch (e: CancellationException) { throw e } catch (e: Exception) {
+        val sale = try { c.finalizer.finalizeSplit(snap, sendNow = false) } catch (e: CancellationException) { throw e } catch (e: Exception) {
             PosLog.e("SPLIT_FINALIZE_FAILED", e, "order" to ui.orderUuid)
             _split.update { it?.copy(busy = false, message = "Could not save the order: ${friendly(e)}") }
             _sell.update { it.copy(pay = PayUi.Idle) }
@@ -2505,9 +2577,10 @@ class PosViewModel(private val c: AppContainer) : ViewModel() {
         val attempts = ui.parts.values.filterIsInstance<PartState.Paid>().map { it.attempt }
         val summary = sale.payments.joinToString(" · ") { p -> "${p.mode?.label() ?: "CASH"} ${p.amount.format()}" }
         _split.value = null
-        _sell.update { it.copy(partPaid = Paise.ZERO, pay = PayUi.Done(outcome = null, splitSummary = summary, cashChange = ui.split.change.takeIf { c -> c.isPositive })) }
+        _sell.update { it.copy(partPaid = Paise.ZERO, pay = PayUi.Done(outcome = null, splitSummary = summary,
+            cashChange = ui.split.change.takeIf { c -> c.isPositive }, syncUuid = sale.orderUuid)) }
         refreshPartlyPaid()
-        printInBackground(sale, "SPLIT", attempts)
+        printInBackground(sale, "SPLIT", attempts, after = sendInBackground(sale.orderUuid))
     }
 
     /** Back on the payment screen. A bill with a paid part stays locked, with the red bar to finish it. */
@@ -2552,6 +2625,7 @@ class PosViewModel(private val c: AppContainer) : ViewModel() {
                 return null.also { _sell.update { it.copy(error = "Could not find the customer in Odoo: ${friendly(e)}") } }
             }
             found ?: return null.also {
+                PosLog.i("CUSTOMER_NOT_FOUND", "phone" to Redact.phone(e164), "at" to "payment")
                 _sell.update { it.copy(error = "Mobile ••••${e164.takeLast(4)} is not a saved customer. Save it under Customer, or clear the number.") }
             }
         }
@@ -2627,6 +2701,9 @@ class PosViewModel(private val c: AppContainer) : ViewModel() {
     /** Refs whose status the coordinator is checking with the terminal right now. */
     val checking: StateFlow<Set<String>> get() = c.payments.checking
 
+    /** Bills whose payment the coordinator is checking: their waiting dialog offers Force done / Not paid. */
+    val checkingOrders: StateFlow<Set<String>> get() = c.payments.checkingOrders
+
     private fun launchForRef(ref: String, block: suspend () -> Unit) = launchSafe {
         if (ref in _barBusy.value) return@launchSafe // a double tap does nothing
         _barBusy.update { it + ref }
@@ -2646,16 +2723,61 @@ class PosViewModel(private val c: AppContainer) : ViewModel() {
     }
 
     /**
-     * Supervisor decision. Works at once even while a status check runs (the check stops), and a
-     * payment that settled meanwhile keeps its real outcome, which is shown instead.
+     * Force done ([paid]) or Not paid for a card / UPI payment the terminal has not confirmed, as Odoo's
+     * payment screen offers: from the waiting dialog ([ref] null: this bill's payment being checked), the
+     * yellow bar or a split part. The cashier confirms first ([confirmDecision]).
      */
-    fun resolveManually(billingRef: String, paid: Boolean) = launchForRef(billingRef) {
-        val outcome = c.payments.resolveManually(billingRef, paid, if (paid) "confirmed paid on terminal" else "confirmed not paid")
-            ?: return@launchForRef _sell.update { it.copy(error = "Payment $billingRef is not on this till.") }
-        handleOutcome(outcome)
+    fun askDecision(paid: Boolean, ref: String? = null) = launchSafe {
+        val a = (if (ref != null) c.journal.get(ref) else c.journal.forOrder(_sell.value.orderUuid).lastOrNull { !it.state.isFinal })
+            ?: return@launchSafe
+        if (a.state.isFinal) {
+            // Settled meanwhile (the terminal answered): a split part still showing it unconfirmed catches up.
+            partOf(a.billingRef)?.let { part -> c.payments.outcomeNow(a.billingRef)?.let { setPart(part, it) } }
+            return@launchSafe
+        }
+        _sell.update { it.copy(decision = PaymentDecision(a.billingRef, a.mode, a.amount, paid)) }
     }
 
-    private suspend fun handleOutcome(outcome: PaymentOutcome) {
+    fun cancelDecision() = _sell.update { it.copy(decision = null) }
+
+    /**
+     * The cashier confirmed. The decision lands in the journal; a GetStatus already in flight finishes
+     * first, and a definitive answer from the terminal wins over it. The bill is finished once: a payment
+     * still waiting for the terminal returns the same outcome, which [handleOutcome] then ignores.
+     */
+    fun confirmDecision() {
+        val d = _sell.value.decision ?: return
+        _sell.update { it.copy(decision = null) }
+        launchForRef(d.ref) {
+            val outcome = c.payments.resolveManually(d.ref, d.paid, if (d.paid) "force done by cashier" else "not paid, by cashier")
+                ?: return@launchForRef _sell.update { it.copy(error = "Payment ${d.ref} is not on this till.") }
+            val part = partOf(d.ref)
+            when {
+                part != null -> setPart(part, outcome)
+                // The part being charged on the split screen gets it from its own payment, which ends now.
+                _split.value?.orderUuid == outcome.attempt?.orderUuid -> Unit
+                else -> handleOutcome(outcome)
+            }
+        }
+    }
+
+    /** The split part showing attempt [ref] as not confirmed, if the payment screen is open. */
+    private fun partOf(ref: String): String? =
+        _split.value?.parts?.entries?.firstOrNull { (_, p) -> p is PartState.Unconfirmed && p.attempt.billingRef == ref }?.key
+
+    /** Attempts whose final outcome was finished here (booked, printed): a second report of it changes nothing. */
+    private val finishedRefs = HashSet<String>()
+
+    private suspend fun handleOutcome(reported: PaymentOutcome) {
+        val outcome = settledNow(reported)
+        val ref = outcome.attempt?.billingRef
+        val final = outcome is PaymentOutcome.Paid || outcome is PaymentOutcome.NotPaid
+        // A Force done and the payment it ended both report the same outcome: book and print it once.
+        val again = ref != null && (if (final) !finishedRefs.add(ref) else outcome is PaymentOutcome.AlreadyPaid && ref in finishedRefs)
+        if (again) {
+            _sell.update { if (it.pay is PayUi.Working) it.copy(pay = PayUi.Done(outcome, orderUuid = outcome.attempt?.orderUuid)) else it }
+            return
+        }
         val paidAttempt = when (outcome) {
             is PaymentOutcome.Paid -> outcome.attempt
             is PaymentOutcome.AlreadyPaid -> outcome.attempt // paid earlier; UI never finished
@@ -2663,11 +2785,11 @@ class PosViewModel(private val c: AppContainer) : ViewModel() {
         }
         if (paidAttempt != null) {
             billPaid(paidAttempt.orderUuid)
-            val sale = c.finalizer.finalizeTerminal(paidAttempt)
+            val sale = c.finalizer.finalizeTerminal(paidAttempt, sendNow = false)
             countOfferUse(sale)
             _sell.update { it.copy(pay = PayUi.Done(PaymentOutcome.Paid(paidAttempt), printed = if (sale == null) false else null,
-                orderUuid = paidAttempt.orderUuid)) }
-            sale?.let { printInBackground(it, paidAttempt.mode.label(), listOf(paidAttempt)) }
+                orderUuid = paidAttempt.orderUuid, syncUuid = sale?.orderUuid)) }
+            sale?.let { printInBackground(it, paidAttempt.mode.label(), listOf(paidAttempt), after = sendInBackground(it.orderUuid)) }
         } else {
             _sell.update { it.copy(pay = PayUi.Done(outcome, orderUuid = outcome.attempt?.orderUuid)) }
         }
@@ -2677,11 +2799,24 @@ class PosViewModel(private val c: AppContainer) : ViewModel() {
     /** The last bill printed (or tried), for "Print again" on the result screen. */
     private var lastBill: Triple<PaidSale, String, List<PaymentAttempt>>? = null
 
-    /** Print [sale]'s bill without holding the cashier: the result screen shows "Printing…" meanwhile. */
-    private fun printInBackground(sale: PaidSale, label: String, attempts: List<PaymentAttempt>, reprint: Boolean = false) {
+    /**
+     * The first send to Odoo of a sale the till has just saved, behind the "Paid" screen, which then says
+     * whether Odoo has it. The bill is printed after it ([printInBackground]'s after), from Odoo's answer.
+     */
+    private fun sendInBackground(uuid: String): Job = launchSafe {
+        val sent = c.orderSync.sendHeld(uuid)
+        _sell.update { s -> (s.pay as? PayUi.Done)?.takeIf { it.syncUuid == uuid }?.let { s.copy(pay = it.copy(inOdoo = sent)) } ?: s }
+    }
+
+    /**
+     * Print [sale]'s bill without holding the cashier: the result screen shows "Printing…" meanwhile.
+     * [after] (the first send to Odoo) ends first, so the bill is Odoo's.
+     */
+    private fun printInBackground(sale: PaidSale, label: String, attempts: List<PaymentAttempt>, reprint: Boolean = false, after: Job? = null) {
         lastBill = Triple(sale, label, attempts)
         _sell.update { s -> (s.pay as? PayUi.Done)?.let { s.copy(pay = it.copy(printing = true, printed = null)) } ?: s }
         launchSafe {
+            after?.join()
             val ok = try { print(sale, label, attempts, reprint) } catch (e: CancellationException) { throw e } catch (e: Exception) {
                 PosLog.w("PRINT_FAILED", "err" to e.message); false
             }
@@ -2738,7 +2873,8 @@ class PosViewModel(private val c: AppContainer) : ViewModel() {
             ?: BillReceipt.fromSale(sale, _sell.value.config?.name ?: "", ref))
             .copy(
                 companyAddress = companyAddress?.takeIf { it.first == _sell.value.config?.companyId }?.second,
-                terminals = attempts.map { TerminalSlip(it.mode.label(), it.details?.last4, it.details?.rrn ?: it.details?.transactionId, it.details?.authCode) },
+                terminals = attempts.map { TerminalSlip(it.mode.label(), it.details?.last4, it.details?.rrn ?: it.details?.transactionId, it.details?.authCode,
+                    forceDone = it.state == AttemptState.RESOLVED_PAID) },
                 reprint = reprint,
                 logoBase64 = logoForBill(),
             )

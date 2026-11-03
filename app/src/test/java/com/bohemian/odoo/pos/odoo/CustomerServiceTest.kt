@@ -40,6 +40,22 @@ class CustomerServiceTest {
         assertNull(svc.normalizeIndianMobile("704898005512"))
     }
 
+    @Test fun `a mobile starting with 91 keeps its 91 (it was rejected before 0_10_0)`() {
+        assertEquals("+919123456789", svc.normalizeIndianMobile("9123456789"))
+        assertEquals("+919123456789", svc.normalizeIndianMobile("919123456789"))
+        assertEquals("+919123456789", svc.normalizeIndianMobile("+91 91234 56789"))
+        assertEquals("+919123456789", svc.normalizeIndianMobile("09123456789"))
+    }
+
+    @Test fun `numbers show as Odoo's customer list shows them`() {
+        assertEquals("+91 98212 71573", CustomerService.displayPhone("+919821271573"))
+        assertEquals("+91 98212 71573", CustomerService.displayPhone("+91 98212 71573"))
+        assertEquals("+91 98212 71573", CustomerService.displayPhone("9821271573"))
+        assertEquals("+971 50 123 4567", CustomerService.displayPhone("+971 50 123 4567"))
+        assertNull(CustomerService.displayPhone(null))
+        assertNull(CustomerService.displayPhone("  "))
+    }
+
     private companion object {
         /** Stub that throws if any Odoo call is attempted — these tests are pure. */
         fun stubOdoo() = OdooJson2Client(

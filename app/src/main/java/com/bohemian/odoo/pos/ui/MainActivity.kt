@@ -44,6 +44,7 @@ import com.bohemian.odoo.pos.core.Paise
 import com.bohemian.odoo.pos.odoo.PaymentRoles
 import com.bohemian.odoo.pos.odoo.PaymentMethod
 import com.bohemian.odoo.pos.odoo.ZzCashRules
+import com.bohemian.odoo.pos.payment.AttemptState
 import com.bohemian.odoo.pos.payment.PaymentOutcome
 import com.bohemian.odoo.pos.payment.VoidState
 import com.bohemian.odoo.pos.data.VoidAttemptEntity
@@ -173,6 +174,7 @@ fun SetupScreen(vm: PosViewModel) {
         }
         CrashReportsRow(s.crashReports, vm)
         s.odooRate?.let { Text(it, fontSize = 13.sp) }
+        s.forceDoneToday?.let { Text(it, fontSize = 13.sp) }
         var pineReport by remember { mutableStateOf<String?>(null) }
         OutlinedButton({ pineReport = PineCheck.report(activity, BuildConfig.PINE_APPLICATION_ID, BuildConfig.PINE_SDK_PRESENT) }) {
             Text("Check Pine payment app")
@@ -330,6 +332,7 @@ fun SellScreen(vm: PosViewModel) {
     val split by vm.split.collectAsStateWithLifecycle()
     split?.let { PaymentScreen(it, vm) }
     PaymentDialog(s.pay, vm)
+    s.decision?.let { DecisionDialog(it, vm) }
     val pinPrompt by vm.pinPrompt.collectAsStateWithLifecycle()
     pinPrompt?.let { SetupPinDialog(it, vm) }
     val closing by vm.closing.collectAsStateWithLifecycle()
@@ -499,22 +502,69 @@ private fun UnresolvedBar(ref: String, mode: String, acting: Boolean, checking: 
         )
         if (mode != PayMode.CARD.name) OutlinedButton({ vm.checkAgain(ref) }, enabled = !acting && !checking) { Text("Check status") }
         Spacer(Modifier.width(6.dp))
-        OutlinedButton({ vm.resolveManually(ref, paid = true) }, enabled = !acting) { Text("Supervisor: PAID") }
-        Spacer(Modifier.width(6.dp))
-        OutlinedButton({ vm.resolveManually(ref, paid = false) }, enabled = !acting) { Text("Supervisor: NOT paid") }
+        DecisionButtons(acting, { vm.askDecision(paid = true, ref) }, { vm.askDecision(paid = false, ref) })
     }
+}
+
+/**
+ * Odoo's "Force done", and Not paid: the cashier decides a payment the terminal has not confirmed after
+ * looking at the terminal or the customer's app, instead of waiting or leaving for Pine's app.
+ */
+@Composable
+fun DecisionButtons(acting: Boolean, forceDone: () -> Unit, notPaid: () -> Unit) {
+    Button(forceDone, enabled = !acting, colors = ButtonDefaults.buttonColors(containerColor = Zz.Black, contentColor = Zz.Cream)) { Text("Force done") }
+    Spacer(Modifier.width(6.dp))
+    OutlinedButton(notPaid, enabled = !acting) { Text("Not paid") }
+}
+
+/** One confirm before a decision: Force done books money Odoo gets without a terminal reference. */
+@Composable
+private fun DecisionDialog(d: PaymentDecision, vm: PosViewModel) {
+    val what = "${d.amount.format()} ${d.mode.name.replace('_', ' ')}"
+    AlertDialog(
+        onDismissRequest = { vm.cancelDecision() },
+        title = { Text(if (d.paid) "Force done: $what paid?" else "Not paid: $what?") },
+        text = {
+            Text(if (d.paid) "Only if the terminal or the customer's app shows it paid. The bill is booked in Odoo with no terminal " +
+                    "reference, as Odoo's own Force done.\nRef ${d.ref}"
+                else "Only if the terminal or the customer's app shows it failed. If the customer did pay, that money must be refunded.\nRef ${d.ref}")
+        },
+        confirmButton = {
+            Button(onceIn { vm.confirmDecision() }, colors = ButtonDefaults.buttonColors(
+                containerColor = if (d.paid) Zz.Black else Zz.Red, contentColor = Zz.Cream)) { Text(if (d.paid) "Force done" else "Not paid") }
+        },
+        dismissButton = { TextButton({ vm.cancelDecision() }) { Text("Back") } },
+    )
 }
 
 @Composable
 private fun PaymentDialog(pay: PayUi, vm: PosViewModel) {
     when (pay) {
         PayUi.Idle -> Unit
-        is PayUi.Working -> AlertDialog(
-            onDismissRequest = {}, // cannot dismiss while the terminal is working
-            confirmButton = {},
-            title = { Text("${pay.mode} payment") },
-            text = { Column { Text(pay.message); Spacer(Modifier.height(12.dp)); LinearProgressIndicator(Modifier.fillMaxWidth()) } },
-        )
+        is PayUi.Working -> {
+            // While the till asks the terminal about this bill's payment, the cashier may decide instead of waiting.
+            val checkingOrders by vm.checkingOrders.collectAsStateWithLifecycle()
+            val busy by vm.barBusy.collectAsStateWithLifecycle()
+            val checking = pay.orderUuid != null && pay.orderUuid in checkingOrders
+            AlertDialog(
+                onDismissRequest = {}, // cannot dismiss while the terminal is working
+                confirmButton = {
+                    if (checking) Row { DecisionButtons(busy.isNotEmpty(), { vm.askDecision(paid = true) }, { vm.askDecision(paid = false) }) }
+                },
+                title = { Text("${pay.mode} payment") },
+                text = {
+                    Column {
+                        Text(when {
+                            checking && busy.isNotEmpty() -> "Saving… the terminal is finishing its check."
+                            checking -> "Checking with the terminal… If the terminal or the customer's app already shows the result, " +
+                                "tap Force done or Not paid."
+                            else -> pay.message
+                        })
+                        Spacer(Modifier.height(12.dp)); LinearProgressIndicator(Modifier.fillMaxWidth())
+                    }
+                },
+            )
+        }
         is PayUi.Error -> AlertDialog({ vm.dismissPayResult() }, { TextButton({ vm.dismissPayResult() }) { Text("OK") } },
             title = { Text("Error") }, text = { Text(pay.message) })
         is PayUi.Done -> {
@@ -524,18 +574,27 @@ private fun PaymentDialog(pay: PayUi, vm: PosViewModel) {
                 else -> when (val o = pay.outcome) {
                     is PaymentOutcome.Paid -> "✓ PAYMENT SUCCESSFUL" to listOfNotNull(
                         o.attempt.amount.format(), o.attempt.details?.rrn?.let { "RRN $it" }, o.attempt.details?.last4?.let { "Card ****$it" },
+                        "Force done: no terminal reference".takeIf { o.attempt.state == AttemptState.RESOLVED_PAID },
                     ).joinToString("\n")
                     is PaymentOutcome.NotPaid -> "✕ NOT PAID" to o.reason
                     is PaymentOutcome.NotSent -> "Payment not started" to o.reason
                     is PaymentOutcome.Unresolved -> "⚠ Status not confirmed" to
-                        "Do NOT take payment again. Use 'Check status' or ask a supervisor to verify on the terminal.\nRef ${o.attempt.billingRef}"
+                        "Do NOT take payment again. When the terminal or the customer's app shows the result, tap Force done or Not paid " +
+                            "on the yellow bar.\nRef ${o.attempt.billingRef}"
                     is PaymentOutcome.Blocked -> "⚠ Previous payment unresolved" to
                         "Payment ${o.attempt.billingRef} for this bill is not confirmed yet. Resolve it before charging again."
                     is PaymentOutcome.AlreadyPaid -> "Already paid" to "This bill was already paid (${o.attempt.billingRef})."
                     null -> "" to ""
                 }
             }
-            val printedNote = when {
+            // The paid order goes to Odoo behind this screen (it is already safe on the till).
+            val syncNote = when {
+                pay.syncUuid == null -> ""
+                pay.inOdoo == null -> "\n\nSending to Odoo…"
+                pay.inOdoo -> "\n\nIn Odoo ✓"
+                else -> "\n\nSaved on the till: Odoo gets it shortly."
+            }
+            val printedNote = syncNote + when {
                 pay.printing -> "\n\nPrinting the bill…"
                 pay.printed == false -> "\n\nThe bill did not print. Check the paper, then Print again."
                 else -> ""

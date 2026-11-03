@@ -725,6 +725,70 @@ The owner asked how many stores one key carries at a simultaneous peak. Full wri
   within 2 minutes reuses its customer's last card read (`odoo/RecentCards.kt`), so switching back and forth
   costs nothing either. A customer's entry is dropped when one of their bills goes to payment. Odoo still
   checks a reward at payment.
+
+### Decisions 2026-11-03 (customers lost their number; Force done, 0.10.0)
+
+A field video and the owner's report: new customers got no WhatsApp bill, couldn't use ZZ Cash and weren't
+found by number. A UPI payment also kept the till "checking" for about 30 s, until the cashier left for Pine's
+app. Checked on the live database (read-only) and in the code.
+
+- **The Brand rule emptied every new till customer.**
+  - **The rule:** the till saves customers under Ankur's key, and Ankur leads the Sales team (crm.team 1). So
+    Odoo automation 23, "Contacts: created by Sales team is a Brand", ran server action 1393 on each one.
+  - **What it did:** a contact with no orders yet becomes a Brand: `x_contact_kind='brand'`, `x_first_name`
+    emptied, and the number moved from `phone` to `x_brand_phone`.
+  - **The cost:** with no `phone`, the WhatsApp bill automations, which need `partner_id.phone ilike '+91'`,
+    never fire. The till can't find the customer by number either, so some were saved twice.
+  - **Live, 10 Oct–3 Nov:** 88 till customers; 80 with bills; 79 ZZ Cash cards holding 3,846 points; 11
+    numbers saved twice.
+  - **Contacts made by the store cashiers' own users** stayed "Store customer" with their phone.
+  - **Not a rights problem:** automations fire for any user, and the bill ones run as OdooBot.
+- **The fix in Odoo** (owner's choice: keep Ankur's key on the tills):
+  - **The rule:** `tools/odoo/fix_brand_rule.py` rewrites action 1384, so a Sales-team member's new contact
+    with an Indian mobile, no email, no company and no parent stays a store customer. So does a contact
+    created with the context `zz_store_customer`, which the till sends from 0.10.0.
+  - **Real brands** are still flagged by the lead and shelf-rental quotation rules (actions 1382, 1383).
+  - **The data:** `tools/odoo/repair_till_customers.py` gives the 80 contacts with bills their phone back,
+    marks them Store customer and runs action 1392 (first name). It only lists the 8 contacts without bills
+    and the 11 shared numbers, which an admin merges by hand. `--resend-today` sends the day's missed bills
+    with actions 1277 / 1283.
+  - **Both** dry-run by default and write only with `--apply`, on the owner's go.
+- **Till 0.10.0, customers** (`odoo/CustomerService.kt`):
+  - **91 bug:** a mobile starting with 91 ("9123456789") was cut to 8 digits and refused. `normalizeIndianMobile`
+    now uses `nationalDigits`.
+  - **Number check:** a new customer Odoo keeps without the number gives a red note and
+    `CUSTOMER_PHONE_DROPPED`.
+  - **Rows:** search rows and the attached customer show the number as Odoo's list does
+    (`displayPhone`, "+91 98212 71573"), or a grey "no number".
+  - **Full numbers:** a full number the index has nobody under also asks Odoo, so a customer saved minutes ago
+    elsewhere is listed.
+  - **Logs:** `CUSTOMER_NOT_FOUND` is logged.
+- **Till 0.10.0, Force done** (Odoo's own payment-screen button). It is HARD RULE 5's human decision, made by
+  the cashier from what the terminal or the customer's app shows:
+  - **Where:** the waiting dialog, the yellow bar and a split part offer **Force done** and **Not paid**, after
+    one confirm.
+  - **The terminal still wins:** a GetStatus already in flight finishes first, and a definitive answer wins.
+  - **The loop stops:** a decision wakes the status loop at once, and no further GetStatus is sent.
+  - **Each bill once:** it is finished and printed once, as `handleOutcome` ignores a second report of a
+    final outcome.
+  - **Visible:**
+    - in Odoo, the payment has no transaction id (as Odoo's forced lines);
+    - the bill prints "Force done (no terminal ref)";
+    - Setup shows today's count;
+    - the log has `PAYMENT_FORCE_DONE`.
+- **Less waiting** (`StatusPolicy`):
+  - **Faster checks:** GetStatus at 1, 5 and 10 s (was 5, 10 and 15).
+  - **UPI decline or cancel:** one the terminal states outright (onResult FAILED, Cancelled) gets one GetStatus
+    after 1 s, not the loop.
+  - **PENDING and timeouts** keep the 3 checks.
+  - **"Paid" before Odoo answers:** it shows once the order is in the outbox (I7). The first `sync_from_ui`
+    runs behind it (`OrderSyncService.sendHeld`), the dialog says whether Odoo has it, and the bill prints
+    after that send.
+- **Money gap closed:**
+  - **Before:** CASH and SPLIT worked on a bill whose card / UPI payment was unconfirmed. The customer could
+    pay twice, and a later "paid" found no snapshot, so the terminal money was never booked
+    (`FINALIZE_NO_SNAPSHOT`).
+  - **Now:** both are greyed out, and `payCash` / `openSplit` refuse with a message (`PAY_REFUSED_PENDING`).
 ---
 
 ## 6. Odoo integration (verified against live DB, 2026-09-21)
@@ -768,7 +832,9 @@ Private (`_x`) methods are not callable.
   `sync_from_ui` alone never moves them (`docs/ZZ_CASH.md`, 2026-10-27).
 - **Automations:** WhatsApp bill, ZZ Cash expiry, dashboard webhook fire server-side on
   `sync_from_ui` orders. They have no store filter (checked 2026-10-28): the WhatsApp bill covers every
-  POS order except self-order (`source not in (mobile, kiosk)`), so E700 orders from any store get it.
+  POS order except self-order (`source not in (mobile, kiosk)`), so E700 orders from any store get it, as
+  long as the customer's `phone` holds a +91 number (the Brand rule took it off till customers until
+  3 Nov 2026, see the 0.10.0 decisions).
 
 ---
 
@@ -932,6 +998,13 @@ company password manager + encrypted drive.
 | 53 | Change a picked customer's state in Odoo, then pick them on the till | The bill is priced again under the new fiscal position |
 | 54 | Sell 3 bills within 10 minutes, then read the log | `LIVE_PACE every_s=300` while selling, back to 120 after a quiet 10 minutes |
 | 55 | Two open bills with customers: switch A → B → A within a minute; then pay A, park a second bill for A's customer and reopen it | The switches show the balances at once (`ZZ_CARD_REUSED` in the log); after A's payment the reopened bill reads the card again and shows the new balance |
+| 56 | Save a new customer (new mobile + name), sell to them, then search their last 4 digits | "Saved", no red note; in Odoo a Store customer with its +91 number; the WhatsApp bill arrives; found by number on the next bill; ZZ Cash shows |
+| 57 | Customer search by a name shared by several people | Each row shows the name and the number as "+91 98212 71573" |
+| 58 | Save a customer whose mobile starts with 91 (e.g. 91xxx xxxxx) | Find / Save accept it; saved with that number |
+| 59 | UPI, then Cancel on Pine's QR screen | "✕ NOT PAID" within about 10 s; no visit to Pine's app; the cart can be charged again |
+| 60 | UPI paid on the customer's phone while the till still says "Checking with the terminal" → Force done → confirm | "✓ PAYMENT SUCCESSFUL" at once with "Force done: no terminal reference"; the bill prints "Force done (no terminal ref)"; Odoo's payment has no transaction id; Setup shows "Force done today: 1" |
+| 61 | With a card / UPI payment of this bill not confirmed (yellow bar) | CASH and SPLIT are greyed out; Force done or Not paid on the bar settles it |
+| 62 | Any paid sale | "Paid" shows before Odoo answers, with "Sending to Odoo…", then "In Odoo ✓"; the bill prints after |
 
 ---
 
@@ -998,6 +1071,16 @@ company password manager + encrypted drive.
 - [ ] On device: first full catalogue load time and memory with 2,421 tiles on the E700 (UAT case 14)
 - [ ] ZZ Note codes have no usage limit in Odoo (`limit_usage` off): anyone who learns one can reuse it. Odoo setting, not the app
 - [ ] Offers not supported on the till: gift cards, eWallets, coupons for a next order, pricelist-limited programs (none in use)
+- [ ] Brand rule, 3 Nov 2026 (`docs/ZZ_CASH.md`, "The Brand rule"), each on the owner's go:
+  - `tools/odoo/fix_brand_rule.py --apply`, then the next store customer saved reads back as a Store customer
+    with a phone;
+  - `tools/odoo/repair_till_customers.py --resend-today --apply`, run again a day later;
+  - an admin merges the 11 numbers saved twice and decides on their extra ₹30 welcome credits.
+- [ ] On device: UAT 56–62 (customer number kept and shown, the 91 mobile, a UPI cancel, Force done, cash
+  blocked while a payment is unconfirmed, "Paid" before Odoo)
+- [ ] Pine's Payments app showed "Activating… Terminal Synced" when opened by hand during a payment (3 Nov
+  video). Ask Pine whether MasterApp re-activates before each App-to-App call (logcat `PINE_REQUEST` →
+  `PINE_RESULT` timing)
 - [ ] Under the POS-User key, confirm `loyalty.card.web_search_read` (the 0.9.0 card read) and the `res.partner` index reads are allowed
 - [ ] Is Odoo's limit per network or per key / database? Run `tools/odoo/billing_rush.py` from two networks at once (owner's yes, a quiet hour)
 - [ ] Rush with real writes (`sync_from_ui`, `confirm_coupon_programs`) on a duplicate of the database, not the live one
