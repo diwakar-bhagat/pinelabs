@@ -1082,6 +1082,11 @@ company password manager + encrypted drive.
     bills all got the WhatsApp bill;
   - run `repair_till_customers.py` (dry run) again on 4 Nov;
   - check by hand the 8 till contacts left as Brand with no bills.
+- [ ] Customers on WhatsApp (`docs/WHATSAPP_JOIN.md`, draft):
+  - **Step 1 is done** (3 Nov 2026 18:45 IST): the ZZ Cash balance bot (automation 27) answers every customer,
+    not only its one test number.
+  - **Next, each on the owner's yes:** STOP (opt-out), the QR "JOIN ZENZEBRA" sign-up with the name reply, and a
+    till search that finds a customer who joined a minute ago by their last 4 digits.
 - [ ] An admin merges the 12 numbers saved on two contacts (Contacts → Action → Merge, then one ZZ Cash card
   per person) and decides on their extra ₹30 welcome credits.
 - [ ] On device: UAT 56–62 (customer number kept and shown, the 91 mobile, a UPI cancel, Force done, cash
