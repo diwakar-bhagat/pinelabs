@@ -753,6 +753,7 @@ app. Checked on the live database (read-only) and in the code.
     and the 11 shared numbers, which an admin merges by hand. `--resend-today` sends the day's missed bills
     with actions 1277 / 1283.
   - **Both** dry-run by default and write only with `--apply`, on the owner's go.
+  - **Applied on 3 Nov:** 83 contacts repaired and 12 missed bills re-sent.
 - **Till 0.10.0, customers** (`odoo/CustomerService.kt`):
   - **91 bug:** a mobile starting with 91 ("9123456789") was cut to 8 digits and refused. `normalizeIndianMobile`
     now uses `nationalDigits`.
@@ -1071,11 +1072,17 @@ company password manager + encrypted drive.
 - [ ] On device: first full catalogue load time and memory with 2,421 tiles on the E700 (UAT case 14)
 - [ ] ZZ Note codes have no usage limit in Odoo (`limit_usage` off): anyone who learns one can reuse it. Odoo setting, not the app
 - [ ] Offers not supported on the till: gift cards, eWallets, coupons for a next order, pricelist-limited programs (none in use)
-- [ ] Brand rule, 3 Nov 2026 (`docs/ZZ_CASH.md`, "The Brand rule"), each on the owner's go:
-  - `tools/odoo/fix_brand_rule.py --apply`, then the next store customer saved reads back as a Store customer
-    with a phone;
-  - `tools/odoo/repair_till_customers.py --resend-today --apply`, run again a day later;
-  - an admin merges the 11 numbers saved twice and decides on their extra ₹30 welcome credits.
+- [x] Brand rule fixed in live Odoo (action 1384, 3 Nov 2026 13:22 IST), and repaired
+  (`repair_till_customers.py --resend-today --apply`):
+  - 83 till customers have their phone back and are Store customers again;
+  - 12 of the day's missed WhatsApp bills were re-sent, and all 12 orders have their message.
+- [ ] Brand rule follow-up:
+  - check that the next customer saved on a till reads back as a Store customer with a phone (none saved by
+    13:30 on 3 Nov);
+  - run `repair_till_customers.py` (dry run) again on 4 Nov;
+  - check by hand the 8 till contacts left as Brand with no bills.
+- [ ] An admin merges the 12 numbers saved on two contacts (Contacts → Action → Merge, then one ZZ Cash card
+  per person) and decides on their extra ₹30 welcome credits.
 - [ ] On device: UAT 56–62 (customer number kept and shown, the 91 mobile, a UPI cancel, Force done, cash
   blocked while a payment is unconfirmed, "Paid" before Odoo)
 - [ ] Pine's Payments app showed "Activating… Terminal Synced" when opened by hand during a payment (3 Nov
