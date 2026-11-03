@@ -1077,8 +1077,9 @@ company password manager + encrypted drive.
   - 83 till customers have their phone back and are Store customers again;
   - 12 of the day's missed WhatsApp bills were re-sent, and all 12 orders have their message.
 - [ ] Brand rule follow-up:
-  - check that the next customer saved on a till reads back as a Store customer with a phone (none saved by
-    13:30 on 3 Nov);
+  - ~~check that the next customer saved on a till reads back as a Store customer with a phone~~ Done
+    3 Nov, 13:22–15:52 IST: 20 customers saved on tills, all Store customers with their phone; their 19 paid
+    bills all got the WhatsApp bill;
   - run `repair_till_customers.py` (dry run) again on 4 Nov;
   - check by hand the 8 till contacts left as Brand with no bills.
 - [ ] An admin merges the 12 numbers saved on two contacts (Contacts → Action → Merge, then one ZZ Cash card
